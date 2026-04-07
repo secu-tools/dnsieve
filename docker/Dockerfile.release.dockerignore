@@ -1,0 +1,6 @@
+# Exclude everything from the build context except the pre-built binaries
+# and the entrypoint script. This keeps the context tiny and avoids sending
+# Go source, test files, and documentation to the Docker daemon.
+*
+!docker-bin/
+!docker/docker-entrypoint.sh

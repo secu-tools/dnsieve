@@ -1,0 +1,57 @@
+# Copyright (c) 2020-2026 Jack L. (Cpt-JackL) (https://jack-l.com)
+# SPDX-License-Identifier: MIT
+# Docker Compose for DNSieve
+#
+# Quick start (run from the repository root):
+#   mkdir -p config log
+#   docker compose -f docker/docker-compose.yml up -d
+#
+# On first run the container auto-generates a default config at ./config/config.toml.
+# Stop the container, edit the file to customise upstreams and ports, then restart.
+#
+# Logs are written to ./log/ and also to stdout (visible with: docker compose logs).
+
+services:
+  dnsieve:
+    image: ghcr.io/secu-tools/dnsieve:latest
+    container_name: dnsieve
+    # Restart on non-zero exit (server crash). Clean shutdowns (exit 0) do not
+    # trigger a restart, so "docker stop dnsieve" works as expected.
+    restart: on-failure
+    ports:
+      - "5353:5353/udp"   # Plain DNS (default). Change to 53:53 for standard port.
+      - "5353:5353/tcp"
+      # DNSieve defaults to listen_addresses = ["0.0.0.0", "::"].
+      # Docker binds 0.0.0.0 by default; add explicit IPv6 mappings if needed:
+      # - "[::]:5353:5353/udp"
+      # - "[::]:5353:5353/tcp"
+      # Uncomment for DoT/DoH (configure TLS certificates in config.toml first):
+      # - "8853:8853/tcp"   # DNS-over-TLS (default non-privileged port)
+      # - "4433:4433/tcp"   # DNS-over-HTTPS (default non-privileged port)
+      # For standard ports (require NET_BIND_SERVICE cap, see below):
+      # - "853:853/tcp"     # Standard DoT port
+      # - "443:443/tcp"     # Standard DoH port
+    volumes:
+      - ./config:/app/config
+      - ./log:/app/log
+    environment:
+      - TZ=UTC
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    # NET_BIND_SERVICE is only required when binding to privileged ports (below 1024).
+    # Default ports (5353/8853/4433) do not need this capability.
+    # Uncomment and add cap_add if you switch to port 53, 853, or 443:
+    # cap_add:
+    #   - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "nslookup", "google.com", "127.0.0.1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

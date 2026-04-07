@@ -1,0 +1,16 @@
+build/
+*.exe
+*.deb
+*.rpm
+.git
+.github
+.gitignore
+docs/
+tests/
+README.md
+LICENSE
+*.md
+build_boilerplate.*
+Makefile_boilerplate
+*_test.go
+.vscode/

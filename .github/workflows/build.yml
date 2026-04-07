@@ -1,0 +1,71 @@
+# Copyright (c) 2020-2026 Jack L. (Cpt-JackL) (https://jack-l.com)
+# SPDX-License-Identifier: MIT
+name: Build
+run-name: ${{ github.workflow }} - ${{ github.event.head_commit.message }}
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(cat version/version_base.txt | tr -d '[:space:]')
+          BUILD=$(cat version/build_number.txt | tr -d '[:space:]')
+          COMMIT=$(git rev-parse --short HEAD)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "full=$VERSION.$BUILD" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          MODULE="github.com/secu-tools/dnsieve/internal/app"
+          EXT=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
+          OUTPUT="build/dnsieve_${{ steps.version.outputs.full }}-${{ matrix.goos }}-${{ matrix.goarch }}${EXT}"
+          go build \
+            -ldflags "-s -w -X ${MODULE}.version=${{ steps.version.outputs.version }} -X ${MODULE}.commit=${{ steps.version.outputs.commit }} -X ${MODULE}.buildNumber=${{ steps.version.outputs.build }}" \
+            -trimpath \
+            -o "$OUTPUT" \
+            ./
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnsieve-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: build/dnsieve_*

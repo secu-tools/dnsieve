@@ -1,0 +1,63 @@
+# Copyright (c) 2020-2026 Jack L. (Cpt-JackL) (https://jack-l.com)
+# SPDX-License-Identifier: MIT
+# CI release image -- uses pre-built binaries from the build-linux artifact.
+# Requires the docker-bin/ directory to be populated before building:
+#   docker-bin/dnsieve-linux-amd64
+#   docker-bin/dnsieve-linux-arm64
+#   docker-bin/dnsieve-linux-armv7   (arm/v7 -- GOARCH=arm GOARM=7)
+#   docker-bin/dnsieve-linux-386
+#   docker-bin/dnsieve-linux-ppc64le
+#   docker-bin/dnsieve-linux-s390x
+#   docker-bin/dnsieve-linux-riscv64
+#
+# Binary name convention for Docker TARGETARCH + TARGETVARIANT:
+#   linux/amd64   -> TARGETARCH=amd64,   TARGETVARIANT=    -> dnsieve-linux-amd64
+#   linux/arm64   -> TARGETARCH=arm64,   TARGETVARIANT=    -> dnsieve-linux-arm64
+#   linux/arm/v7  -> TARGETARCH=arm,     TARGETVARIANT=v7  -> dnsieve-linux-armv7
+#   linux/386     -> TARGETARCH=386,     TARGETVARIANT=    -> dnsieve-linux-386
+#   linux/ppc64le -> TARGETARCH=ppc64le, TARGETVARIANT=    -> dnsieve-linux-ppc64le
+#   linux/s390x   -> TARGETARCH=s390x,   TARGETVARIANT=    -> dnsieve-linux-s390x
+#   linux/riscv64 -> TARGETARCH=riscv64, TARGETVARIANT=    -> dnsieve-linux-riscv64
+
+FROM alpine:3.20
+
+ARG TARGETARCH
+ARG TARGETVARIANT
+
+RUN apk add --no-cache ca-certificates tzdata su-exec && \
+    addgroup -S -g 1000 dnsieve && \
+    adduser -S -u 1000 -G dnsieve dnsieve
+
+COPY docker-bin/ /tmp/bins/
+
+# Select the correct pre-built binary for this platform.
+# The naming convention concatenates TARGETARCH and TARGETVARIANT:
+#   arm + v7  -> armv7
+#   amd64 + (empty) -> amd64
+RUN set -e; \
+    BIN_ARCH="${TARGETARCH}${TARGETVARIANT}"; \
+    BIN="/tmp/bins/dnsieve-linux-${BIN_ARCH}"; \
+    if [ ! -f "${BIN}" ]; then \
+        echo "ERROR: pre-built binary not found: ${BIN}"; \
+        echo "Available binaries:"; ls /tmp/bins/ || true; \
+        exit 1; \
+    fi; \
+    mkdir -p /app && \
+    cp "${BIN}" /app/dnsieve && \
+    chmod +x /app/dnsieve && \
+    rm -rf /tmp/bins
+
+RUN mkdir -p /app/config /app/log && \
+    chown -R dnsieve:dnsieve /app
+
+COPY docker/docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+WORKDIR /app
+
+EXPOSE 5353/udp 5353/tcp 8853/tcp 4433/tcp
+
+VOLUME ["/app/config", "/app/log"]
+
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["--cfgfile", "/app/config/config.toml", "--logdir", "/app/log"]

@@ -1,0 +1,793 @@
+# Copyright (c) 2020-2026 Jack L. (Cpt-JackL) (https://jack-l.com)
+# SPDX-License-Identifier: MIT
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: "Release type"
+        required: true
+        type: choice
+        options:
+          - beta
+          - release
+        default: "beta"
+      version:
+        description: "Base version (e.g. 1.0.3) -- leave empty to use version/version_base.txt"
+        required: false
+        type: string
+      build_number:
+        description: "Build number -- leave empty for auto-increment (current + 1)"
+        required: false
+        type: string
+      release_description:
+        description: "Release description (optional -- can be edited on GitHub after publishing)"
+        required: false
+        type: string
+      docker:
+        description: 'Push Linux Docker image to GHCR'
+        required: false
+        type: boolean
+        default: true
+      docker_windows:
+        description: 'Push Windows Docker image to GHCR (requires Docker Desktop + Windows containers)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+# Prevent concurrent release runs to avoid version file race conditions.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------
+  # 1. Run full test suite on all three platforms before building.
+  #    Uses the same -testall path as the local build script:
+  #    smoke -> unit -> integration -> fuzz seeds -> e2e.
+  # ---------------------------------------------------------------
+  ci-tests:
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run full test suite (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x build.sh
+          ./build.sh -testall
+
+      - name: Run full test suite (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\build.ps1 -testall
+
+  # ---------------------------------------------------------------
+  # 2. Resolve version and build number from version/ files,
+  #    applying any user overrides. Outputs feed all downstream jobs.
+  # ---------------------------------------------------------------
+  resolve-version:
+    needs: ci-tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      build_number: ${{ steps.resolve.outputs.build_number }}
+      full_version: ${{ steps.resolve.outputs.full_version }}
+      tag_name: ${{ steps.resolve.outputs.tag_name }}
+      is_prerelease: ${{ steps.resolve.outputs.is_prerelease }}
+      version_changed: ${{ steps.resolve.outputs.version_changed }}
+      next_build_number: ${{ steps.resolve.outputs.next_build_number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version and build number
+        id: resolve
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          FILE_VERSION="1.0.0"
+          if [ -f version/version_base.txt ]; then
+            FILE_VERSION=$(head -1 version/version_base.txt | tr -cd '0-9.')
+          fi
+          FILE_BUILD=0
+          if [ -f version/build_number.txt ]; then
+            FILE_BUILD=$(head -1 version/build_number.txt | tr -cd '0-9')
+          fi
+          [ -z "$FILE_BUILD" ] && FILE_BUILD=0
+
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+            VERSION_CHANGED="true"
+          else
+            VERSION="$FILE_VERSION"
+            VERSION_CHANGED="false"
+          fi
+
+          if [ -n "${{ inputs.build_number }}" ]; then
+            BUILD_NUMBER="${{ inputs.build_number }}"
+          else
+            BUILD_NUMBER=$FILE_BUILD
+          fi
+          NEXT_BUILD_NUMBER=$((BUILD_NUMBER + 1))
+
+          FULL_VERSION="${VERSION}.${BUILD_NUMBER}"
+
+          # Git tags use semver-compliant format so the module works with
+          # "go install github.com/secu-tools/dnsieve@latest" and
+          # "go install github.com/secu-tools/dnsieve@vX.Y.Z".
+          # Release tags:  v1.0.4          (pure semver, @latest picks this up)
+          # Beta tags:     v1.0.4-beta.N   (semver pre-release, excluded from @latest)
+          # Binary filenames still embed the full four-part version (1.0.4.N).
+          if [ "${{ inputs.release_type }}" = "beta" ]; then
+            TAG_NAME="v${VERSION}-beta.${BUILD_NUMBER}"
+            IS_PRERELEASE="true"
+          else
+            TAG_NAME="v${VERSION}"
+            IS_PRERELEASE="false"
+          fi
+
+          echo "version=$VERSION"                         >> "$GITHUB_OUTPUT"
+          echo "build_number=$BUILD_NUMBER"               >> "$GITHUB_OUTPUT"
+          echo "full_version=$FULL_VERSION"               >> "$GITHUB_OUTPUT"
+          echo "tag_name=$TAG_NAME"                       >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=$IS_PRERELEASE"             >> "$GITHUB_OUTPUT"
+          echo "version_changed=$VERSION_CHANGED"         >> "$GITHUB_OUTPUT"
+          echo "next_build_number=$NEXT_BUILD_NUMBER"     >> "$GITHUB_OUTPUT"
+
+          echo "Resolved: $FULL_VERSION (tag: $TAG_NAME, prerelease: $IS_PRERELEASE)"
+          # Set the workflow run name so the run shows the resolved version
+          if [ -n "$GITHUB_RUN_ID" ]; then
+            RUN_NAME="${GITHUB_WORKFLOW} - ${FULL_VERSION}"
+            echo "Setting workflow run name to '${RUN_NAME}'"
+            curl -s -X PATCH \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+              -d "$(printf '{"name":"%s"}' "$RUN_NAME")" || true
+          fi
+
+  # ---------------------------------------------------------------
+  # 3a. Build Linux binaries + deb/rpm packages
+  # ---------------------------------------------------------------
+  build-linux:
+    needs: resolve-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build environment info
+        run: |
+          echo "Runner OS  : $(uname -s)"
+          echo "Runner arch: $(uname -m)"
+          echo "Go version : $(go version)"
+
+      - name: Install nfpm for deb/rpm packaging
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          echo "nfpm version: $(nfpm --version)"
+
+      - name: Build linux binaries + deb/rpm packages
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          BUILD_NUMBER: ${{ needs.resolve-version.outputs.build_number }}
+        run: |
+          echo "Building VERSION=${VERSION} BUILD_NUMBER=${BUILD_NUMBER}"
+          chmod +x build.sh
+          ./build.sh -linux -deb -rpm
+
+      - name: List build outputs
+        run: |
+          echo "=== build/linux/ ==="
+          find build/linux -type f | sort | while read f; do
+            echo "  $f  ($(stat -c%s "$f") bytes)"
+          done
+
+      - name: Verify linux binaries and packages
+        run: |
+          fail=0
+          for arch in amd64 arm64; do
+            found=$(find build/linux -name "*-linux-${arch}" -type f 2>/dev/null)
+            if [ -z "$found" ]; then
+              echo "::error::FAIL: binary not found for linux/${arch}"
+              fail=1
+            else
+              echo "OK binary: $found ($(stat -c%s "$found") bytes)"
+            fi
+            for ext in deb rpm; do
+              pkg=$(find build/linux -name "*-linux-${arch}.${ext}" -type f 2>/dev/null)
+              if [ -z "$pkg" ]; then
+                echo "::error::FAIL: ${ext} package not found for linux/${arch}"
+                fail=1
+              else
+                echo "OK package: $pkg ($(stat -c%s "$pkg") bytes)"
+              fi
+            done
+          done
+          if [ $fail -ne 0 ]; then
+            echo "::error::Linux build or packaging failed -- aborting release"
+            exit 1
+          fi
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-linux
+          path: build/linux/
+          retention-days: 1
+
+  # ---------------------------------------------------------------
+  # 3b. Build Windows binaries (amd64 + arm64)
+  # ---------------------------------------------------------------
+  build-windows:
+    needs: resolve-version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build environment info
+        shell: pwsh
+        run: |
+          Write-Host "Runner OS  : $([System.Runtime.InteropServices.RuntimeInformation]::OSDescription)"
+          Write-Host "Runner arch: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
+          Write-Host "Go version : $(go version)"
+
+      - name: Build windows binaries (amd64 + arm64)
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          BUILD_NUMBER: ${{ needs.resolve-version.outputs.build_number }}
+        run: |
+          Write-Host "Building VERSION=$env:VERSION BUILD_NUMBER=$env:BUILD_NUMBER"
+          .\build.ps1 -windows
+
+      - name: List build outputs
+        shell: pwsh
+        run: |
+          Write-Host "=== build\windows\ ==="
+          Get-ChildItem "build\windows" -Recurse -File | Sort-Object FullName | ForEach-Object {
+            Write-Host "  $($_.FullName)  ($($_.Length) bytes)"
+          }
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-windows
+          path: build\windows\
+          retention-days: 1
+
+  # ---------------------------------------------------------------
+  # 3c. Build macOS arm64 binary (macos-latest = arm64 runner)
+  # ---------------------------------------------------------------
+  build-macos-arm64:
+    needs: resolve-version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build environment info
+        run: |
+          echo "Runner OS  : $(uname -s)"
+          echo "Runner arch: $(uname -m)"
+          echo "Go version : $(go version)"
+
+      - name: Build darwin/arm64
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          BUILD_NUMBER: ${{ needs.resolve-version.outputs.build_number }}
+        run: |
+          chmod +x build.sh
+          ./build.sh -darwin -arm64
+
+      - name: List build outputs
+        run: |
+          echo "=== build/darwin/ ==="
+          find build/darwin -type f | sort | while read f; do
+            echo "  $f  ($(stat -f%z "$f") bytes)"
+          done
+
+      - name: Upload macOS arm64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-macos-arm64
+          path: build/darwin/
+          retention-days: 1
+
+  # ---------------------------------------------------------------
+  # 3d. Build macOS amd64 binary (macos-26-intel = Intel/amd64 runner)
+  # ---------------------------------------------------------------
+  build-macos-amd64:
+    needs: resolve-version
+    runs-on: macos-26-intel
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build environment info
+        run: |
+          echo "Runner OS  : $(uname -s)"
+          echo "Runner arch: $(uname -m)"
+          echo "Go version : $(go version)"
+
+      - name: Build darwin/amd64
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          BUILD_NUMBER: ${{ needs.resolve-version.outputs.build_number }}
+        run: |
+          chmod +x build.sh
+          ./build.sh -darwin -amd64
+
+      - name: List build outputs
+        run: |
+          echo "=== build/darwin/ ==="
+          find build/darwin -type f | sort | while read f; do
+            echo "  $f  ($(stat -f%z "$f") bytes)"
+          done
+
+      - name: Upload macOS amd64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-macos-amd64
+          path: build/darwin/
+          retention-days: 1
+
+  # ---------------------------------------------------------------
+  # 5. Publish release
+  #    Runs after Docker succeeds or when Docker is disabled.
+  #    Creates the GitHub Release, commits version files, and
+  #    uploads all release assets.
+  # ---------------------------------------------------------------
+  publish:
+    needs: [resolve-version, build-linux, build-windows, build-macos-arm64, build-macos-amd64, docker, docker-windows]
+    if: |
+      always() &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled') &&
+      (needs.docker.result == 'success' || needs.docker.result == 'skipped') &&
+      (needs.docker-windows.result == 'success' || needs.docker-windows.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          pattern: build-*
+
+      - name: Collect release files
+        run: |
+          mkdir -p release
+          find artifacts/ -type f | while read f; do
+            cp "$f" release/
+          done
+          echo "=== Collected release files ==="
+          ls -lh release/ | sort
+          echo "Total: $(find release -type f | wc -l | tr -d ' ') file(s)"
+
+      - name: Verify all release files are present
+        run: |
+          echo "=== Verifying release artifacts ==="
+          ls release/ | sort
+          echo ""
+          count=$(find release -type f | wc -l | tr -d ' ')
+          echo "Total files found: $count"
+          if [ "$count" -lt 10 ]; then
+            echo "::error::Expected at least 10 release files, found $count -- aborting release"
+            exit 1
+          fi
+          fail=0
+          for arch in amd64 arm64; do
+            for os in linux darwin; do
+              found=$(find release -name "*-${os}-${arch}" -type f 2>/dev/null)
+              if [ -z "$found" ]; then
+                echo "::error::FAIL: missing binary for ${os}/${arch}"
+                fail=1
+              else
+                echo "OK: $found ($(stat -c%s "$found") bytes)"
+              fi
+            done
+            found=$(find release -name "*-windows-${arch}.exe" -type f 2>/dev/null)
+            if [ -z "$found" ]; then
+              echo "::error::FAIL: missing binary for windows/${arch}"
+              fail=1
+            else
+              echo "OK: $found ($(stat -c%s "$found") bytes)"
+            fi
+            for ext in deb rpm; do
+              pkg=$(find release -name "*-linux-${arch}.${ext}" -type f 2>/dev/null)
+              if [ -z "$pkg" ]; then
+                echo "::error::FAIL: missing ${ext} package for linux/${arch}"
+                fail=1
+              else
+                echo "OK: $pkg ($(stat -c%s "$pkg") bytes)"
+              fi
+            done
+          done
+          if [ $fail -ne 0 ]; then
+            echo "::error::Required release files are missing -- aborting release"
+            exit 1
+          fi
+          echo ""
+          echo "All release files verified."
+
+      - name: Update version files
+        run: |
+          VERSION="${{ needs.resolve-version.outputs.version }}"
+          BUILD_NUMBER="${{ needs.resolve-version.outputs.build_number }}"
+          NEXT_BUILD_NUMBER="${{ needs.resolve-version.outputs.next_build_number }}"
+          VERSION_CHANGED="${{ needs.resolve-version.outputs.version_changed }}"
+
+          if [ "$VERSION_CHANGED" = "true" ]; then
+            printf '%s\n' "$VERSION" > version/version_base.txt
+            echo "Updated version_base.txt to $VERSION"
+          fi
+
+          printf '%s\n' "$NEXT_BUILD_NUMBER" > version/build_number.txt
+          echo "Updated build_number.txt: $BUILD_NUMBER -> $NEXT_BUILD_NUMBER"
+
+      - name: Commit and push version files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add version/version_base.txt version/build_number.txt
+          if git diff --cached --quiet; then
+            echo "No version file changes to commit."
+          else
+            TAG_NAME="${{ needs.resolve-version.outputs.tag_name }}"
+            git commit -m "release: update version files for ${TAG_NAME}"
+            git push
+          fi
+
+      - name: Compute SHA256 checksums
+        run: |
+          cd release
+          echo "## SHA256 Checksums" > /tmp/checksums.md
+          echo "" >> /tmp/checksums.md
+          echo '```' >> /tmp/checksums.md
+          for f in $(ls -1 | sort); do
+            sha256sum "$f" >> /tmp/checksums.md
+          done
+          echo '```' >> /tmp/checksums.md
+          cat /tmp/checksums.md
+
+      - name: Build release body
+        env:
+          RELEASE_DESC: ${{ inputs.release_description }}
+        run: |
+          TAG_NAME="${{ needs.resolve-version.outputs.tag_name }}"
+          TYPE="${{ inputs.release_type }}"
+
+          {
+            if [ "$TYPE" = "beta" ]; then
+              echo "## DNSieve ${TAG_NAME} (Pre-release)"
+              echo ""
+              echo "> **This is a pre-release build.** It may contain bugs or incomplete features."
+            else
+              echo "## DNSieve ${TAG_NAME}"
+            fi
+            echo ""
+            if [ -n "$RELEASE_DESC" ]; then
+              echo "$RELEASE_DESC"
+              echo ""
+            fi
+            echo ""
+            echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/commits/${TAG_NAME}"
+            echo ""
+            echo "---"
+            echo ""
+            cat /tmp/checksums.md
+          } > /tmp/release_body.md
+          cat /tmp/release_body.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-version.outputs.tag_name }}
+          name: "DNSieve ${{ needs.resolve-version.outputs.tag_name }}"
+          body_path: /tmp/release_body.md
+          prerelease: ${{ needs.resolve-version.outputs.is_prerelease == 'true' }}
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------
+  # 4. Docker build + push (optional, runs before publish)
+  #    Validates the Docker image before the release is created.
+  #    If this job fails, cleanup-on-docker-failure removes all
+  #    artifacts and any partially-pushed GHCR images. The GitHub
+  #    Release and git tag do not exist yet at this stage.
+  # ---------------------------------------------------------------
+  docker:
+    name: Docker
+    needs: [resolve-version, build-linux, build-windows, build-macos-arm64, build-macos-amd64]
+    if: ${{ inputs.docker }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Download the pre-built Linux binaries so the Docker build skips
+      # Go compilation entirely -- drastically cuts image build time.
+      - name: Download Linux binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: build-linux
+          path: build-linux-artifacts/
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Prepare Docker binaries
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          BUILD_NUMBER: ${{ needs.resolve-version.outputs.build_number }}
+        run: |
+          mkdir -p docker-bin
+          COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "docker")
+          MODULE="github.com/secu-tools/dnsieve/internal/app"
+          LDFLAGS="-X ${MODULE}.version=${VERSION} -X ${MODULE}.commit=${COMMIT} -X ${MODULE}.buildNumber=${BUILD_NUMBER} -s -w -X ${MODULE}.buildMode=docker"
+
+          # Use pre-built amd64 and arm64 from the build-linux artifact.
+          for arch in amd64 arm64; do
+            binary=$(find build-linux-artifacts -name "*-linux-${arch}" -not -name "*.deb" -not -name "*.rpm" -type f | head -1)
+            if [ -z "$binary" ]; then
+              echo "::error::Pre-built binary not found for linux/${arch}"
+              exit 1
+            fi
+            cp "$binary" docker-bin/dnsieve-linux-${arch}
+            chmod +x docker-bin/dnsieve-linux-${arch}
+            echo "Copied pre-built: $binary -> docker-bin/dnsieve-linux-${arch}"
+          done
+
+          # Cross-compile the remaining architectures that are not in the
+          # standard release build set but are supported Docker platforms.
+          build_extra() {
+            local goarch="$1" outname="$2" goarm="${3:-}"
+            echo "Building docker-bin/${outname} (GOARCH=${goarch}${goarm:+ GOARM=${goarm}})..."
+            if [ -n "$goarm" ]; then
+              CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" GOARM="$goarm" go build \
+                -ldflags "$LDFLAGS" -trimpath -o "docker-bin/${outname}" ./
+            else
+              CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" go build \
+                -ldflags "$LDFLAGS" -trimpath -o "docker-bin/${outname}" ./
+            fi
+            chmod +x "docker-bin/${outname}"
+          }
+
+          build_extra arm     dnsieve-linux-armv7   7  # linux/arm/v7  (TARGETARCH=arm  TARGETVARIANT=v7)
+          build_extra 386     dnsieve-linux-386        # linux/386     (TARGETARCH=386)
+          build_extra ppc64le dnsieve-linux-ppc64le    # linux/ppc64le (TARGETARCH=ppc64le)
+          build_extra s390x   dnsieve-linux-s390x      # linux/s390x   (TARGETARCH=s390x)
+          build_extra riscv64 dnsieve-linux-riscv64    # linux/riscv64 (TARGETARCH=riscv64)
+
+          echo ""
+          echo "=== docker-bin contents ==="
+          ls -lh docker-bin/
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # QEMU is required to run apk/sh inside non-native platform containers
+      # during the multi-platform Docker build (e.g. ppc64le, s390x, riscv64).
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.release
+          push: true
+          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/386,linux/ppc64le,linux/s390x,linux/riscv64
+          build-args: |
+            VERSION=${{ needs.resolve-version.outputs.full_version }}
+          tags: |
+            ghcr.io/secu-tools/dnsieve:latest
+            ghcr.io/secu-tools/dnsieve:${{ needs.resolve-version.outputs.full_version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------
+  # 4a. Docker build + push (Windows, optional, runs before publish)
+  #     Builds Windows container images (windows/amd64) from pre-built
+  #     binaries and pushes them to GHCR as separate Windows-tagged images.
+  #
+  #     IMPORTANT: GitHub-hosted runners do NOT support Windows containers.
+  #     This job requires a self-hosted Windows runner with Docker Desktop
+  #     installed and switched to Windows container mode. Enable it by:
+  #       1. Set docker_windows=true in the workflow dispatch inputs.
+  #       2. Register a self-hosted runner tagged 'windows-docker'.
+  #     Windows/arm64 requires an arm64 Windows runner; build locally with
+  #     docker/Dockerfile.windows using --platform windows/arm64 --build-arg TARGETARCH=arm64.
+  # ---------------------------------------------------------------
+  docker-windows:
+    name: Docker (Windows)
+    needs: [resolve-version, build-linux, build-windows, build-macos-arm64, build-macos-amd64]
+    if: ${{ inputs.docker_windows }}
+    runs-on: [self-hosted, windows, docker]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Windows binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: build-windows
+          path: build-windows-artifacts/
+
+      - name: Verify Windows container mode
+        shell: pwsh
+        run: |
+          # This job requires a self-hosted runner with Docker Desktop in Windows
+          # container mode. Verify the daemon is already serving Windows containers.
+          $osType = & docker info --format '{{.OSType}}' 2>&1
+          if ($LASTEXITCODE -ne 0 -or $osType -ne 'windows') {
+            Write-Error "Docker is not in Windows container mode (osType='$osType'). Ensure the runner has Docker Desktop switched to Windows containers before running this job."
+            exit 1
+          }
+          Write-Host "Docker is in Windows container mode (osType=$osType)"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare Windows Docker binaries
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          BUILD_NUMBER: ${{ needs.resolve-version.outputs.build_number }}
+        run: |
+          New-Item -ItemType Directory -Force docker-bin-windows | Out-Null
+          $binary = Get-ChildItem build-windows-artifacts -Filter "*-windows-amd64.exe" -Recurse | Select-Object -First 1
+          if (-not $binary) {
+            Write-Error "Pre-built Windows amd64 binary not found in build-windows-artifacts/"
+            exit 1
+          }
+          Copy-Item $binary.FullName "docker-bin-windows\dnsieve-windows-amd64.exe"
+          Write-Host "Copied: $($binary.Name) -> docker-bin-windows\dnsieve-windows-amd64.exe"
+          Write-Host "=== docker-bin-windows contents ==="
+          Get-ChildItem docker-bin-windows | Format-Table Name, Length
+
+      - name: Build and push Windows amd64 image
+        shell: pwsh
+        env:
+          FULL_VERSION: ${{ needs.resolve-version.outputs.full_version }}
+        run: |
+          $versionTag = "ghcr.io/secu-tools/dnsieve:$env:FULL_VERSION-windows-ltsc2022"
+          $latestTag  = "ghcr.io/secu-tools/dnsieve:latest-windows-ltsc2022"
+          docker build `
+            --platform windows/amd64 `
+            --build-arg TARGETARCH=amd64 `
+            -f docker/Dockerfile.windows `
+            -t $versionTag `
+            -t $latestTag `
+            .
+          docker push $versionTag
+          docker push $latestTag
+          Write-Host "Pushed: $versionTag"
+          Write-Host "Pushed: $latestTag"
+
+  # ---------------------------------------------------------------
+  # 4b. Cleanup if Docker fails
+  #     Deletes all uploaded build artifacts and removes any GHCR
+  #     image versions that were pushed before the failure.
+  #     No GitHub Release or git tag exists yet at this point.
+  #     Build number is intentionally not rolled back.
+  # ---------------------------------------------------------------
+  cleanup-on-docker-failure:
+    name: Cleanup (Docker failed)
+    needs: [resolve-version, docker, docker-windows]
+    if: always() && (needs.docker.result == 'failure' || needs.docker-windows.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete build artifacts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Deleting build artifacts for run ${GITHUB_RUN_ID}..."
+          for name in build-linux build-windows build-macos-arm64 build-macos-amd64; do
+            artifact_id=$(curl -s \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" \
+              | jq -r --arg n "$name" '.artifacts[] | select(.name == $n) | .id // empty')
+            if [ -n "$artifact_id" ]; then
+              curl -s -X DELETE \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
+              echo "  Deleted artifact: $name (id: $artifact_id)"
+            else
+              echo "  Not found: $name"
+            fi
+          done
+
+      - name: Delete GHCR image versions
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FULL_VERSION: ${{ needs.resolve-version.outputs.full_version }}
+        run: |
+          ORG=$(echo "${GITHUB_REPOSITORY}" | cut -d/ -f1)
+          echo "Checking for partially pushed GHCR images (version: ${FULL_VERSION})..."
+          # Only search by FULL_VERSION tag -- it is unique to this run.
+          # Searching by "latest" is unsafe: if the push failed before moving
+          # the latest tag, that tag still points to the previous good release
+          # and must not be deleted.
+          # Deleting the version found via FULL_VERSION removes all tags on the
+          # same manifest (including "latest" if it was successfully applied).
+          versions=$(curl -s \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/orgs/${ORG}/packages/container/dnsieve/versions?per_page=100" \
+            || echo "[]")
+          version_id=$(echo "$versions" | jq -r --arg t "${FULL_VERSION}" \
+            '[.[] | select((.metadata.container.tags // []) | index($t) != null)] | first | .id // empty')
+          if [ -n "$version_id" ]; then
+            tags=$(echo "$versions" | jq -r --arg id "$version_id" \
+              '.[] | select(.id == ($id | tonumber)) | .metadata.container.tags // [] | join(", ")')
+            curl -s -X DELETE \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/orgs/${ORG}/packages/container/dnsieve/versions/${version_id}"
+            echo "  Deleted GHCR version id=${version_id} (tags: ${tags})"
+          else
+            echo "  No GHCR image found for version ${FULL_VERSION} -- nothing to delete"
+          fi

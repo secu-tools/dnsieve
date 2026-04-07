@@ -1,0 +1,36 @@
+Third-Party Software Notices
+=============================
+
+DNSieve includes or depends on the following third-party software.
+Each is listed with its license type. See the linked repositories for
+full license text.
+
+------------------------------------------------------------------------
+
+codeberg.org/miekg/dns
+License: BSD 3-Clause
+Repository: https://codeberg.org/miekg/dns
+
+------------------------------------------------------------------------
+
+github.com/BurntSushi/toml
+License: MIT
+Repository: https://github.com/BurntSushi/toml
+
+------------------------------------------------------------------------
+
+golang.org/x/crypto
+License: BSD 3-Clause
+Repository: https://go.googlesource.com/crypto
+
+------------------------------------------------------------------------
+
+golang.org/x/net
+License: BSD 3-Clause
+Repository: https://go.googlesource.com/net
+
+------------------------------------------------------------------------
+
+golang.org/x/sys
+License: BSD 3-Clause
+Repository: https://go.googlesource.com/sys

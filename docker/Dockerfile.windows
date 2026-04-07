@@ -1,0 +1,27 @@
+# Copyright (c) 2020-2026 Jack L. (Cpt-JackL) (https://jack-l.com)
+# SPDX-License-Identifier: MIT
+# Windows container image for DNSieve DNS Filtering Proxy.
+# Uses pre-built Windows binaries from the docker-bin-windows/ directory.
+#
+# Requires the docker-bin-windows/ directory to be populated before building:
+#   docker-bin-windows/dnsieve-windows-amd64.exe
+#   docker-bin-windows/dnsieve-windows-arm64.exe
+#
+# Build examples:
+#   docker build --platform windows/amd64 --build-arg TARGETARCH=amd64 -f Dockerfile.windows -t dnsieve-windows .
+#   docker build --platform windows/arm64  --build-arg TARGETARCH=arm64  -f Dockerfile.windows -t dnsieve-windows .
+
+FROM mcr.microsoft.com/windows/nanoserver:ltsc2022
+
+ARG TARGETARCH=amd64
+
+WORKDIR C:/app
+
+COPY docker-bin-windows/dnsieve-windows-${TARGETARCH}.exe /app/dnsieve.exe
+
+EXPOSE 5353/udp 5353/tcp 8853/tcp 4433/tcp
+
+VOLUME ["C:/app/config", "C:/app/log"]
+
+ENTRYPOINT ["/app/dnsieve.exe"]
+CMD ["--cfgfile", "C:/app/config/config.toml", "--logdir", "C:/app/log"]

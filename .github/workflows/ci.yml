@@ -1,0 +1,195 @@
+# Copyright (c) 2020-2026 Jack L. (Cpt-JackL) (https://jack-l.com)
+# SPDX-License-Identifier: MIT
+name: CI
+run-name: ${{ github.workflow }} - ${{ github.event.head_commit.message }}
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------
+  # Smoke tests: build the binary and run it as a subprocess
+  # ---------------------------------------------------------------
+  smoke:
+    name: Smoke Tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run smoke tests
+        run: go test -buildvcs=false -v -tags smoke -count=1 -timeout 300s ./tests/smoke/
+
+  # ---------------------------------------------------------------
+  # Unit tests + go vet (all platforms)
+  # ---------------------------------------------------------------
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run unit tests
+        run: go test -v -race -count=1 ./...
+
+      - name: Run vet
+        run: go vet ./...
+
+  # ---------------------------------------------------------------
+  # Integration tests (all platforms)
+  # ---------------------------------------------------------------
+  integration:
+    name: Integration Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run integration tests
+        run: go test -v -tags integration -race -count=1 -timeout 120s ./tests/integration/
+
+  # ---------------------------------------------------------------
+  # Fuzz: seed corpus (deterministic regression gate, Linux only)
+  # ---------------------------------------------------------------
+  fuzz-seed-corpus:
+    name: Fuzz Seed Corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run fuzz seed corpus
+        run: go test -count=1 -run '^Fuzz' ./internal/...
+
+  # ---------------------------------------------------------------
+  # Fuzz: mutation (exploratory, 10s per target, blocks CI on failure)
+  # -run='^$' suppresses regular test execution so only the named fuzz
+  # target runs; this ensures a non-zero exit means the fuzzer itself
+  # found a failure, not an unrelated unit test.
+  # ---------------------------------------------------------------
+  fuzz-mutation:
+    name: Fuzz Mutation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run fuzz mutation (10s per target)
+        shell: bash
+        run: |
+          set -e
+          FUZZ_TIME="10s"
+          FAILED=false
+          for pkg in $(go list -buildvcs=false ./internal/...); do
+            while IFS= read -r func; do
+              [ -z "$func" ] && continue
+              echo "=== Fuzzing $func in $pkg for $FUZZ_TIME ==="
+              go test -buildvcs=false -run='^$' -fuzz="^${func}$" -fuzztime="$FUZZ_TIME" -count=1 "$pkg" || FAILED=true
+            done < <(go test -buildvcs=false -list "^Fuzz" "$pkg" 2>/dev/null | grep "^Fuzz" || true)
+          done
+          if $FAILED; then exit 1; fi
+
+  # ---------------------------------------------------------------
+  # End-to-end tests (network access required, Linux only)
+  # ---------------------------------------------------------------
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run e2e tests
+        run: go test -v -tags e2e -count=1 -timeout 300s ./tests/e2e/
+
+  # ---------------------------------------------------------------
+  # Lint: format, ineffectual assignments, spelling, cognitive complexity
+  # ---------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Format check
+        run: |
+          gofmt -l .
+          test -z "$(gofmt -l .)"
+
+      - name: Install linters
+        run: |
+          go install github.com/gordonklaus/ineffassign@latest
+          go install github.com/client9/misspell/cmd/misspell@latest
+          go install github.com/uudashr/gocognit/cmd/gocognit@latest
+
+      - name: Ineffectual assignments
+        run: ineffassign ./...
+
+      - name: Spelling
+        run: misspell -error .
+
+      - name: Cognitive complexity
+        run: |
+          # Check production code only (exclude _test.go files) at threshold 25.
+          # Test helpers and table-driven tests are exempt from this limit.
+          gocognit -over 25 -ignore '_test\.go' ./internal/
+
+  # ---------------------------------------------------------------
+  # Vulnerability check (informational -- does not block CI)
+  # ---------------------------------------------------------------
+  govulncheck:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: govulncheck ./...

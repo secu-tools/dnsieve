@@ -1,0 +1,51 @@
+# Binaries
+/dnsieve
+/dnsieve.exe
+dnsieve_*
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Config files (generated per-instance, may contain secrets)
+config.toml
+*.pem
+*.crt
+*.key
+
+# Test binary
+*.test
+*.test.exe
+
+# Output of go coverage
+*.out
+coverage.html
+coverage_report.txt
+cover/
+
+# Dependency directories
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build output
+build/
+
+# Log files
+log/
+*.log
+*.log.*
+
+# Go workspace
+go.work
+go.work.sum
