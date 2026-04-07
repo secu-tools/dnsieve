@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -348,7 +349,7 @@ func TestDoTClient_ContextAlreadyExpired(t *testing.T) {
 }
 
 // TestDoTClient_UnreachableServer verifies that dialing an unreachable address
-// returns a descriptive error containing the target address.
+// returns a non-nil error.
 func TestDoTClient_UnreachableServer(t *testing.T) {
 	// Port 1 should be unreachable.
 	client, err := NewDoTClient("127.0.0.1:1", false)
@@ -364,8 +365,69 @@ func TestDoTClient_UnreachableServer(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unreachable server")
 	}
-	if !strings.Contains(err.Error(), "127.0.0.1:1") {
-		t.Errorf("error should contain the target address, got: %q", err.Error())
+}
+
+// TestDoTClient_NoAddressInError verifies that the error returned by Query
+// does not repeat the upstream address. The address is already present in
+// DoTClient.String() so including it again in the error is redundant.
+func TestDoTClient_NoAddressInError(t *testing.T) {
+	client, err := NewDoTClient("127.0.0.1:1", false)
+	if err != nil {
+		t.Fatalf("NewDoTClient: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	query := dnsutil.SetQuestion(new(dns.Msg), "example.com.", dns.TypeA)
+	_, err = client.Query(ctx, query)
+	if err == nil {
+		t.Fatal("expected error for unreachable server")
+	}
+	if strings.Contains(err.Error(), "127.0.0.1:1") {
+		t.Errorf("error should not repeat the upstream address, got: %q", err.Error())
+	}
+}
+
+// TestShortNetError verifies that shortNetError strips source and destination
+// addresses from a *net.OpError while preserving the Op, Net and inner error.
+func TestShortNetError(t *testing.T) {
+	inner := fmt.Errorf("i/o timeout")
+	netErr := &net.OpError{
+		Op:     "read",
+		Net:    "tcp",
+		Source: &net.TCPAddr{IP: net.ParseIP("172.18.0.3"), Port: 38498},
+		Addr:   &net.TCPAddr{IP: net.ParseIP("155.138.130.135"), Port: 853},
+		Err:    inner,
+	}
+
+	got := shortNetError(netErr)
+
+	gotStr := got.Error()
+	if strings.Contains(gotStr, "172.18.0.3") {
+		t.Errorf("shortNetError should strip source address, got: %q", gotStr)
+	}
+	if strings.Contains(gotStr, "155.138.130.135") {
+		t.Errorf("shortNetError should strip destination address, got: %q", gotStr)
+	}
+	if !strings.Contains(gotStr, "read") {
+		t.Errorf("shortNetError should keep Op, got: %q", gotStr)
+	}
+	if !strings.Contains(gotStr, "tcp") {
+		t.Errorf("shortNetError should keep Net, got: %q", gotStr)
+	}
+	if !strings.Contains(gotStr, "i/o timeout") {
+		t.Errorf("shortNetError should keep inner error, got: %q", gotStr)
+	}
+}
+
+// TestShortNetError_NonNetOpError verifies that shortNetError returns
+// non-*net.OpError values unchanged.
+func TestShortNetError_NonNetOpError(t *testing.T) {
+	plain := fmt.Errorf("connection reset by peer")
+	got := shortNetError(plain)
+	if got.Error() != plain.Error() {
+		t.Errorf("shortNetError should return non-net.OpError unchanged, got: %q", got.Error())
 	}
 }
 

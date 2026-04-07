@@ -5,6 +5,7 @@ package upstream
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -107,10 +108,23 @@ func (c *DoTClient) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 	// tcp-tls" at dial time.
 	resp, _, err := dnsClient.Exchange(ctx, msg, "tcp", c.address)
 	if err != nil {
-		return nil, fmt.Errorf("DoT query to %s: %w", c.address, err)
+		return nil, shortNetError(err)
 	}
 
 	return resp, nil
+}
+
+// shortNetError simplifies a *net.OpError by stripping the source and
+// destination addresses from the error string. The upstream address is
+// already present in the log prefix via Client.String(), so repeating it
+// (along with internal local addresses) in the error message is redundant.
+// Other error types are returned unchanged.
+func shortNetError(err error) error {
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		return fmt.Errorf("%s %s: %w", netErr.Op, netErr.Net, netErr.Err)
+	}
+	return err
 }
 
 // String returns a description of this client.

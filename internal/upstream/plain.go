@@ -55,14 +55,14 @@ func (c *PlainClient) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error)
 
 	resp, _, err := client.Exchange(ctx, msg, "udp", c.address)
 	if err != nil {
-		return nil, fmt.Errorf("UDP query to %s: %w", c.address, err)
+		return nil, shortNetError(err)
 	}
 
 	// TCP fallback on truncation
 	if resp.Truncated {
 		resp, _, err = client.Exchange(ctx, msg, "tcp", c.address)
 		if err != nil {
-			return nil, fmt.Errorf("TCP fallback to %s: %w", c.address, err)
+			return nil, fmt.Errorf("TCP fallback: %w", shortNetError(err))
 		}
 	}
 
