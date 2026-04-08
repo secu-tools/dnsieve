@@ -30,6 +30,14 @@ Using more than 3 upstream servers may slow down DNS resolution and
 increase startup time. For best results, pick 2-3 fast providers with
 complementary filtering.
 
+**Recommendation: use DNSSEC-supporting upstreams.** DNSieve always sets
+DO=1 on every upstream query. If an upstream supports DNSSEC it returns
+signed records (RRSIG) or sets the Authenticated Data (AD) bit. DNSieve
+then prefers that response over unsigned responses from other upstreams,
+even if those upstreams have a higher priority index. If none of your
+configured upstreams support DNSSEC, DNSieve falls back to the
+highest-priority valid response.
+
 ```toml
 [[upstream]]
 address = "https://dns.quad9.net/dns-query"

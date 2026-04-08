@@ -270,14 +270,24 @@ func countResults(results []*Result) (okCount int, blockedResult *Result) {
 	return
 }
 
-// pickBestResponse returns the highest-priority (lowest index) OK response.
+// pickBestResponse returns the best OK response, preferring responses that
+// carry DNSSEC data (RRSIG records or AD=1) over unsigned ones. Among DNSSEC
+// responses the lowest-index (highest-priority) wins. If no upstream returned
+// DNSSEC data the lowest-index valid response is used.
 func pickBestResponse(results []*Result) *dns.Msg {
+	var fallback *dns.Msg
 	for _, res := range results {
-		if res != nil && res.OK() {
+		if res == nil || !res.OK() {
+			continue
+		}
+		if res.Inspect.HasDNSSEC {
 			return res.Msg
 		}
+		if fallback == nil {
+			fallback = res.Msg
+		}
 	}
-	return nil
+	return fallback
 }
 
 // selectResult applies the block-consensus algorithm to pick the best response.

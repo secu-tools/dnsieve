@@ -160,6 +160,19 @@ including cross-compilation, packaging (.deb/.rpm), and version embedding.
 See [docs/testing.md](docs/testing.md) for test instructions including
 unit tests, e2e tests, integration tests, RFC compliance tests, and fuzz testing.
 
+## FAQ
+
+See [docs/faq.md](docs/faq.md) for the full FAQ, including topics such as how
+block-consensus works, using DNSieve with Pi-hole, whitelist configuration,
+DoH/DoT setup, caching behaviour, and provider recommendations.
+
+## Troubleshooting
+
+See [docs/troubleshooting.md](docs/troubleshooting.md) for solutions to common
+problems including port conflicts, permission errors, blocked or unblocked
+domains, Docker networking, TLS certificates, service installation, and config
+validation errors.
+
 ## Documentation
 
 - [docs/compilation.md](docs/compilation.md) -- Build instructions
@@ -170,21 +183,6 @@ unit tests, e2e tests, integration tests, RFC compliance tests, and fuzz testing
 - [docs/protocol.md](docs/protocol.md) -- DNS protocol details
 - [docs/testing.md](docs/testing.md) -- Test instructions
 - [docs/troubleshooting.md](docs/troubleshooting.md) -- Troubleshooting guide
-
-## FAQ
-
-See [docs/faq.md](docs/faq.md) for the full FAQ, including topics such as how
-block-consensus works, using DNSieve with Pi-hole, whitelist configuration,
-DoH/DoT setup, caching behaviour, and provider recommendations.
-
----
-
-## Troubleshooting
-
-See [docs/troubleshooting.md](docs/troubleshooting.md) for solutions to common
-problems including port conflicts, permission errors, blocked or unblocked
-domains, Docker networking, TLS certificates, service installation, and config
-validation errors.
 
 ## License
 

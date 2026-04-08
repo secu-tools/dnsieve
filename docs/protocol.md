@@ -75,8 +75,12 @@ verbatim.
 - Responses exceeding 1232 bytes over UDP are truncated (TC=1)
 
 ### DO Bit (RFC 3225)
-- The DNSSEC OK bit from the client is forwarded to upstreams
-- Cache entries are segregated by DO bit (DO=1 and DO=0 have separate entries)
+- DO=1 is always set on every upstream query, regardless of whether the client
+  requested DNSSEC. This ensures that upstreams which support DNSSEC return signed
+  records (RRSIG) and the Authenticated Data (AD) bit, which DNSieve uses for
+  DNSSEC-preference selection (see below).
+- The DO bit in the response to the client reflects the client's original request.
+- Cache entries are segregated by DO bit (DO=1 and DO=0 have separate entries).
 
 ### ECS (RFC 7871)
 - Configurable: strip (default), forward, or substitute with a fixed subnet
@@ -118,10 +122,13 @@ DNSieve detects blocked domains by inspecting upstream responses:
 ### Consensus Algorithm
 
 1. If **any** upstream signals blocked -> cache blocked, return REFUSED + EDE Blocked
-2. If not blocked and **all** responded without error -> cache from
-   highest-priority upstream
-3. If some upstreams had errors -> don't cache, return best available
-4. If upstreams disagree on NXDOMAIN -> don't cache (prevents false positives)
+2. If not blocked, among the valid responses prefer a DNSSEC response (one that
+   carries RRSIG records in the Answer or Authority section, or has AD=1) over a
+   plain unsigned response. The lowest-index DNSSEC response wins; if no upstream
+   returned DNSSEC data, the lowest-index valid response is used.
+3. If not blocked and **all** responded without error -> cache the selected response
+4. If some upstreams had errors -> don't cache, return best available
+5. If upstreams disagree on NXDOMAIN -> don't cache (prevents false positives)
 
 ## Blocked Response Format
 

@@ -850,3 +850,314 @@ func TestResolve_IPv4_Blocked_ZeroAddr(t *testing.T) {
 		t.Error("0.0.0.0 should be recognised as a block signal")
 	}
 }
+
+// --- DNSSEC-preference selection (pickBestResponse) ---
+
+// makeDNSSECResp creates a normal A-record response with AuthenticatedData=true
+// (AD=1), simulating an upstream that validated DNSSEC. AD=1 survives the
+// pack/unpack round-trip in mockClient.
+func makeDNSSECResp(query *dns.Msg, ip string) *dns.Msg {
+	resp := new(dns.Msg)
+	dnsutil.SetReply(resp, query)
+	resp.AuthenticatedData = true
+	resp.Answer = append(resp.Answer, &dns.A{
+		Hdr: dns.Header{Name: query.Question[0].Header().Name, Class: dns.ClassINET, TTL: 300},
+		A:   rdata.A{Addr: netip.MustParseAddr(ip)},
+	})
+	return resp
+}
+
+// TestResolve_DNSSEC_PrefersOverFirst verifies that when the first (highest-
+// priority) upstream returns a non-DNSSEC response but a later upstream
+// returns a DNSSEC response, the DNSSEC response wins.
+func TestResolve_DNSSEC_PrefersOverFirst(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+
+	clients := []Client{
+		// Index 0: normal, no DNSSEC → would normally win on priority alone
+		&mockClient{name: "server1-plain", response: makeNormalResp(query)},
+		// Index 1: normal, no DNSSEC
+		&mockClient{name: "server2-plain", response: makeNormalResp(query)},
+		// Index 2: has DNSSEC (AD=1) — should override the above
+		&mockClient{name: "server3-dnssec", response: makeDNSSECResp(query, "3.3.3.3")},
+	}
+
+	r := newTestResolverWithClients(clients)
+	result := r.Resolve(context.Background(), query)
+
+	if result.BestResponse == nil {
+		t.Fatal("expected a response")
+	}
+	a, ok := result.BestResponse.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatal("expected *dns.A answer")
+	}
+	if a.Addr != netip.MustParseAddr("3.3.3.3") {
+		t.Errorf("expected DNSSEC response from server3 (3.3.3.3), got %v", a.Addr)
+	}
+	if result.Blocked {
+		t.Error("should not be blocked")
+	}
+}
+
+// TestResolve_DNSSEC_PrefersFirstDNSSEC verifies that when multiple upstreams
+// return DNSSEC responses, the one with the lowest index (highest priority)
+// wins among the DNSSEC responses.
+func TestResolve_DNSSEC_PrefersFirstDNSSEC(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+
+	clients := []Client{
+		// Index 0: no DNSSEC
+		&mockClient{name: "server1-plain", response: makeNormalResp(query)},
+		// Index 1: DNSSEC — should win (lowest-index DNSSEC)
+		&mockClient{name: "server2-dnssec", response: makeDNSSECResp(query, "2.2.2.2")},
+		// Index 2: DNSSEC — should lose to server2 on index order
+		&mockClient{name: "server3-dnssec", response: makeDNSSECResp(query, "3.3.3.3")},
+	}
+
+	r := newTestResolverWithClients(clients)
+	result := r.Resolve(context.Background(), query)
+
+	if result.BestResponse == nil {
+		t.Fatal("expected a response")
+	}
+	a, ok := result.BestResponse.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatal("expected *dns.A answer")
+	}
+	if a.Addr != netip.MustParseAddr("2.2.2.2") {
+		t.Errorf("expected first DNSSEC response (2.2.2.2), got %v", a.Addr)
+	}
+}
+
+// TestResolve_DNSSEC_FallbackToFirstValid verifies that when no upstream
+// returns DNSSEC data, the original highest-priority (index 0) behaviour is
+// preserved as a fallback.
+func TestResolve_DNSSEC_FallbackToFirstValid(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+
+	resp1 := new(dns.Msg)
+	dnsutil.SetReply(resp1, query)
+	resp1.Answer = append(resp1.Answer, &dns.A{
+		Hdr: dns.Header{Name: query.Question[0].Header().Name, Class: dns.ClassINET, TTL: 300},
+		A:   rdata.A{Addr: netip.MustParseAddr("1.1.1.1")},
+	})
+
+	resp2 := new(dns.Msg)
+	dnsutil.SetReply(resp2, query)
+	resp2.Answer = append(resp2.Answer, &dns.A{
+		Hdr: dns.Header{Name: query.Question[0].Header().Name, Class: dns.ClassINET, TTL: 300},
+		A:   rdata.A{Addr: netip.MustParseAddr("2.2.2.2")},
+	})
+
+	clients := []Client{
+		&mockClient{name: "server1", response: resp1},
+		&mockClient{name: "server2", response: resp2},
+	}
+
+	r := newTestResolverWithClients(clients)
+	result := r.Resolve(context.Background(), query)
+
+	if result.BestResponse == nil {
+		t.Fatal("expected a response")
+	}
+	a, ok := result.BestResponse.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatal("expected *dns.A answer")
+	}
+	// Without DNSSEC, the first (index 0) result should win.
+	if a.Addr != netip.MustParseAddr("1.1.1.1") {
+		t.Errorf("expected fallback to first valid (1.1.1.1), got %v", a.Addr)
+	}
+}
+
+// TestResolve_DNSSEC_BlockTakesPriority verifies that a block signal from any
+// upstream always takes priority, even over a DNSSEC response from another.
+func TestResolve_DNSSEC_BlockTakesPriority(t *testing.T) {
+	query := makeQuery("malware.example.com", dns.TypeA)
+
+	clients := []Client{
+		// Server 1 returns a DNSSEC-signed answer
+		&mockClient{name: "server1-dnssec", response: makeDNSSECResp(query, "1.1.1.1")},
+		// Server 2 signals a block (0.0.0.0)
+		&mockClient{name: "server2-block", response: makeBlockedResp(query)},
+	}
+
+	r := newTestResolverWithClients(clients)
+	result := r.Resolve(context.Background(), query)
+
+	if !result.Blocked {
+		t.Error("block signal must take priority over DNSSEC response")
+	}
+	if result.BlockedBy != "server2-block" {
+		t.Errorf("BlockedBy = %q, want server2-block", result.BlockedBy)
+	}
+}
+
+// TestResolve_DNSSEC_OnlyErrorsAndDNSSEC verifies DNSSEC response wins when
+// some upstreams error out and only one DNSSEC server responds.
+func TestResolve_DNSSEC_OnlyOneResponds(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+
+	clients := []Client{
+		&mockClient{name: "server1-err", err: fmt.Errorf("connection refused")},
+		&mockClient{name: "server2-err", err: fmt.Errorf("timeout")},
+		&mockClient{name: "server3-dnssec", response: makeDNSSECResp(query, "3.3.3.3")},
+	}
+
+	r := newTestResolverWithClients(clients)
+	result := r.Resolve(context.Background(), query)
+
+	if result.BestResponse == nil {
+		t.Fatal("expected a response")
+	}
+	a, ok := result.BestResponse.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatal("expected *dns.A answer")
+	}
+	if a.Addr != netip.MustParseAddr("3.3.3.3") {
+		t.Errorf("expected DNSSEC response (3.3.3.3), got %v", a.Addr)
+	}
+	if result.Cacheable {
+		t.Error("should not be cacheable when some servers errored")
+	}
+}
+
+// TestResolve_DNSSEC_AllResponded_Cacheable verifies that when the DNSSEC
+// response is selected and all upstreams responded, the result is cacheable.
+func TestResolve_DNSSEC_AllResponded_Cacheable(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+
+	clients := []Client{
+		&mockClient{name: "server1-plain", response: makeNormalResp(query)},
+		&mockClient{name: "server2-dnssec", response: makeDNSSECResp(query, "2.2.2.2")},
+	}
+
+	r := newTestResolverWithClients(clients)
+	result := r.Resolve(context.Background(), query)
+
+	if result.BestResponse == nil {
+		t.Fatal("expected a response")
+	}
+	if !result.Cacheable {
+		t.Error("result should be cacheable when all servers responded without error")
+	}
+	if result.Blocked {
+		t.Error("should not be blocked")
+	}
+}
+
+// TestPickBestResponse_DNSSECPreferred is a direct unit test of
+// pickBestResponse to verify the selection logic in isolation.
+func TestPickBestResponse_DNSSECPreferred(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+
+	normalMsg := makeNormalResp(query)
+	dnssecMsg := makeDNSSECResp(query, "9.9.9.9")
+
+	results := []*Result{
+		{
+			Index:   0,
+			Client:  "plain",
+			Msg:     normalMsg,
+			Inspect: dnsmsg.InspectResult{HasDNSSEC: false},
+		},
+		{
+			Index:   1,
+			Client:  "dnssec",
+			Msg:     dnssecMsg,
+			Inspect: dnsmsg.InspectResult{HasDNSSEC: true},
+		},
+	}
+
+	got := pickBestResponse(results)
+	if got != dnssecMsg {
+		t.Error("pickBestResponse should select the DNSSEC response")
+	}
+}
+
+// TestPickBestResponse_NoDNSSEC_FallsBackToFirst verifies that without any
+// DNSSEC response, pickBestResponse returns the first (index 0) valid result.
+func TestPickBestResponse_NoDNSSEC_FallsBackToFirst(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+
+	msg1 := makeNormalResp(query)
+	msg2 := makeNormalResp(query)
+
+	results := []*Result{
+		{Index: 0, Client: "s1", Msg: msg1, Inspect: dnsmsg.InspectResult{}},
+		{Index: 1, Client: "s2", Msg: msg2, Inspect: dnsmsg.InspectResult{}},
+	}
+
+	got := pickBestResponse(results)
+	if got != msg1 {
+		t.Error("pickBestResponse should fall back to first valid when no DNSSEC")
+	}
+}
+
+// TestPickBestResponse_NilResultsSkipped verifies that nil slots in the
+// results slice (upstreams that never responded) are safely skipped.
+func TestPickBestResponse_NilResultsSkipped(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	dnssecMsg := makeDNSSECResp(query, "5.5.5.5")
+
+	results := []*Result{
+		nil,
+		nil,
+		{Index: 2, Client: "s3", Msg: dnssecMsg, Inspect: dnsmsg.InspectResult{HasDNSSEC: true}},
+	}
+
+	got := pickBestResponse(results)
+	if got != dnssecMsg {
+		t.Error("nil slots should be skipped, DNSSEC response should be selected")
+	}
+}
+
+// TestPickBestResponse_AllNil verifies that an all-nil slice returns nil.
+func TestPickBestResponse_AllNil(t *testing.T) {
+	results := []*Result{nil, nil, nil}
+	got := pickBestResponse(results)
+	if got != nil {
+		t.Error("all-nil slice should return nil")
+	}
+}
+
+// TestPickBestResponse_AllErrors verifies that a slice of error results
+// (all ServFail) returns nil.
+func TestPickBestResponse_AllErrors(t *testing.T) {
+	results := []*Result{
+		{Index: 0, Client: "s1", Err: fmt.Errorf("timeout"), Inspect: dnsmsg.InspectResult{ServFail: true}},
+		{Index: 1, Client: "s2", Err: fmt.Errorf("refused"), Inspect: dnsmsg.InspectResult{ServFail: true}},
+	}
+	got := pickBestResponse(results)
+	if got != nil {
+		t.Error("all-error results should return nil, not a SERVFAIL message")
+	}
+}
+
+// TestResolve_DNSSEC_MixedErrors_DNSSECWins verifies that when the first
+// upstream errors and the second returns DNSSEC, the DNSSEC response wins
+// over a plain response from a later-index server.
+func TestResolve_DNSSEC_MixedErrors_DNSSECWins(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+
+	clients := []Client{
+		&mockClient{name: "server1-err", err: fmt.Errorf("timeout")},
+		&mockClient{name: "server2-dnssec", response: makeDNSSECResp(query, "2.2.2.2")},
+		&mockClient{name: "server3-plain", response: makeNormalResp(query)},
+	}
+
+	r := newTestResolverWithClients(clients)
+	result := r.Resolve(context.Background(), query)
+
+	if result.BestResponse == nil {
+		t.Fatal("expected a response")
+	}
+	a, ok := result.BestResponse.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatal("expected *dns.A answer")
+	}
+	if a.Addr != netip.MustParseAddr("2.2.2.2") {
+		t.Errorf("expected DNSSEC response (2.2.2.2), got %v", a.Addr)
+	}
+}

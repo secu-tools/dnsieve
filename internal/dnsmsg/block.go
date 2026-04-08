@@ -19,10 +19,11 @@ const blockedUDPSize uint16 = 1232
 
 // InspectResult holds the outcome of inspecting a DNS response.
 type InspectResult struct {
-	Blocked  bool // A blocking signal was detected
-	ServFail bool // Server failure (SERVFAIL rcode)
-	NXDomain bool // NXDOMAIN rcode (may or may not be block)
-	Rcode    int  // Raw DNS rcode
+	Blocked   bool // A blocking signal was detected
+	ServFail  bool // Server failure (SERVFAIL rcode)
+	NXDomain  bool // NXDOMAIN rcode (may or may not be block)
+	HasDNSSEC bool // Response contains DNSSEC data (RRSIG in Answer/Authority, or AD=1)
+	Rcode     int  // Raw DNS rcode
 }
 
 // InspectResponse examines a parsed DNS message and returns whether it
@@ -48,6 +49,10 @@ func InspectResponse(msg *dns.Msg) InspectResult {
 		result.ServFail = true
 		return result
 	}
+
+	// Detect DNSSEC: AD=1 means upstream validated the chain;
+	// RRSIG records mean the upstream provided signed data.
+	result.HasDNSSEC = hasDNSSECData(msg)
 
 	// REFUSED -- some providers use this as a block signal
 	if msg.Rcode == dns.RcodeRefused {
@@ -94,6 +99,27 @@ func InspectWireResponse(buf []byte) (*dns.Msg, InspectResult) {
 		return nil, InspectResult{ServFail: true, Rcode: dns.RcodeServerFailure}
 	}
 	return msg, InspectResponse(msg)
+}
+
+// hasDNSSECData returns true if the response carries DNSSEC data: either the
+// AD (Authenticated Data) bit is set (upstream has validated the chain), or
+// RRSIG records are present in the Answer or Authority section (upstream
+// returned signed data for a validating client to verify).
+func hasDNSSECData(msg *dns.Msg) bool {
+	if msg.AuthenticatedData {
+		return true
+	}
+	for _, rr := range msg.Answer {
+		if _, ok := rr.(*dns.RRSIG); ok {
+			return true
+		}
+	}
+	for _, rr := range msg.Ns {
+		if _, ok := rr.(*dns.RRSIG); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // isBlockedIPv4 checks whether an IPv4 address is a known block indicator.

@@ -49,10 +49,23 @@ Topology A
 
 **Q: Does DNSieve do DNSSEC validation?**
 
-No. DNSieve forwards the DNSSEC OK (DO) bit from clients to upstreams and passes
-DNSSEC records through, but it does not validate DNSSEC signatures itself.
-Validation is delegated to the upstream resolvers. Cache entries are segregated by
-DO bit so DNSSEC-aware and non-DNSSEC clients both receive correct responses.
+No. DNSieve does not validate DNSSEC signatures itself. However, it does the
+following to improve DNSSEC behaviour:
+
+- It always sets DO=1 on every upstream query so that DNSSEC-capable upstreams
+  return signed records (RRSIG) and the Authenticated Data (AD) bit, even when
+  the client did not request DNSSEC.
+- When multiple upstreams respond, DNSieve prefers a response that carries DNSSEC
+  data (RRSIG records or AD=1) over an unsigned response, regardless of the
+  upstream's configured priority index. Among DNSSEC responses, the
+  highest-priority index wins.
+- If none of the configured upstreams support DNSSEC, DNSieve falls back to the
+  normal highest-priority selection.
+
+For best results, configure DNSSEC-validating upstreams. They perform the full
+chain-of-trust validation and set AD=1, which DNSieve recognises and forwards to
+clients that requested DNSSEC. Cache entries are segregated by the DO bit so
+DNSSEC-aware and non-DNSSEC clients both receive correct responses.
 
 **Q: Is DNSieve a recursive resolver?**
 

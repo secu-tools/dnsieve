@@ -476,3 +476,154 @@ func TestExtractMinTTL_AuthorityOnly(t *testing.T) {
 		t.Errorf("ExtractMinTTL(authority only) = %d, want 600", got)
 	}
 }
+
+// --- HasDNSSEC detection (RFC 3225 / RFC 4034) ---
+
+// TestInspectResponse_HasDNSSEC_False_Normal verifies that a plain A response
+// without RRSIG records and without the AD bit is not tagged as HasDNSSEC.
+func TestInspectResponse_HasDNSSEC_False_Normal(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	resp := makeReply(query, dns.RcodeSuccess, &dns.A{
+		Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300},
+		A:   rdata.A{Addr: netip.MustParseAddr("93.184.216.34")},
+	})
+
+	result := InspectResponse(resp)
+	if result.HasDNSSEC {
+		t.Error("plain A response without RRSIG/AD should have HasDNSSEC=false")
+	}
+}
+
+// TestInspectResponse_HasDNSSEC_ADSet verifies that a response with the
+// AD (Authenticated Data) bit set is tagged HasDNSSEC=true. AD=1 means
+// the upstream validated the full DNSSEC chain.
+func TestInspectResponse_HasDNSSEC_ADSet(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	resp := makeReply(query, dns.RcodeSuccess, &dns.A{
+		Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300},
+		A:   rdata.A{Addr: netip.MustParseAddr("93.184.216.34")},
+	})
+	resp.AuthenticatedData = true
+
+	result := InspectResponse(resp)
+	if !result.HasDNSSEC {
+		t.Error("response with AD=1 should have HasDNSSEC=true")
+	}
+}
+
+// TestInspectResponse_HasDNSSEC_RRSIGInAnswer verifies that a response with
+// RRSIG records in the Answer section is tagged HasDNSSEC=true.
+func TestInspectResponse_HasDNSSEC_RRSIGInAnswer(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	resp := makeReply(query, dns.RcodeSuccess,
+		&dns.A{
+			Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300},
+			A:   rdata.A{Addr: netip.MustParseAddr("93.184.216.34")},
+		},
+		&dns.RRSIG{
+			Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300},
+			RRSIG: rdata.RRSIG{
+				TypeCovered: dns.TypeA,
+				Algorithm:   8, // RSA/SHA-256
+				Labels:      2,
+				OrigTTL:     300,
+				SignerName:  "example.com.",
+			},
+		},
+	)
+
+	result := InspectResponse(resp)
+	if !result.HasDNSSEC {
+		t.Error("response with RRSIG in Answer should have HasDNSSEC=true")
+	}
+	if result.Blocked {
+		t.Error("RRSIG-carrying response should not be blocked")
+	}
+}
+
+// TestInspectResponse_HasDNSSEC_RRSIGInAuthority verifies that a response
+// with RRSIG in the Authority section (e.g., NSEC/NSEC3 denial proofs) is
+// tagged HasDNSSEC=true.
+func TestInspectResponse_HasDNSSEC_RRSIGInAuthority(t *testing.T) {
+	query := makeQuery("nonexistent.example.com", dns.TypeA)
+	// Genuine NXDOMAIN with SOA + RRSIG covering the SOA in Authority
+	resp := makeReply(query, dns.RcodeNameError)
+	resp.Ns = append(resp.Ns,
+		&dns.SOA{
+			Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 900},
+			SOA: rdata.SOA{Ns: "ns1.example.com.", Mbox: "admin.example.com."},
+		},
+		&dns.RRSIG{
+			Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 900},
+			RRSIG: rdata.RRSIG{
+				TypeCovered: dns.TypeSOA,
+				Algorithm:   8,
+				Labels:      2,
+				OrigTTL:     900,
+				SignerName:  "example.com.",
+			},
+		},
+	)
+
+	result := InspectResponse(resp)
+	if !result.HasDNSSEC {
+		t.Error("NXDOMAIN response with RRSIG in Authority should have HasDNSSEC=true")
+	}
+	if result.Blocked {
+		t.Error("genuine NXDOMAIN with SOA+RRSIG should not be blocked")
+	}
+	if !result.NXDomain {
+		t.Error("NXDomain flag should be set")
+	}
+}
+
+// TestInspectResponse_HasDNSSEC_SERVFAIL_False verifies that SERVFAIL
+// responses are never tagged HasDNSSEC, even if the message somehow carries
+// an AD bit (SERVFAIL is returned before DNSSEC detection runs).
+func TestInspectResponse_HasDNSSEC_SERVFAIL_False(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	resp := makeReply(query, dns.RcodeServerFailure)
+	resp.AuthenticatedData = true // ignored for SERVFAIL
+
+	result := InspectResponse(resp)
+	if result.HasDNSSEC {
+		t.Error("SERVFAIL response should never have HasDNSSEC=true")
+	}
+	if !result.ServFail {
+		t.Error("should be ServFail")
+	}
+}
+
+// TestInspectResponse_HasDNSSEC_Refused verifies that a REFUSED (blocked)
+// response with AD=1 still has HasDNSSEC=true; the proxy can record both
+// facts but the blocked flag takes precedence in upstream selection.
+func TestInspectResponse_HasDNSSEC_Refused_WithAD(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	resp := makeReply(query, dns.RcodeRefused)
+	resp.AuthenticatedData = true
+
+	result := InspectResponse(resp)
+	if !result.Blocked {
+		t.Error("REFUSED should be blocked")
+	}
+	if !result.HasDNSSEC {
+		t.Error("REFUSED + AD=1 should still record HasDNSSEC=true")
+	}
+}
+
+// TestInspectResponse_HasDNSSEC_OnlyAnswer verifies RRSIG only in Answer
+// (not Authority) is still detected.
+func TestInspectResponse_HasDNSSEC_NoRRSIG_OnlySOA(t *testing.T) {
+	query := makeQuery("nonexistent.example.com", dns.TypeA)
+	resp := makeReply(query, dns.RcodeNameError)
+	resp.Ns = append(resp.Ns, &dns.SOA{
+		Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 900},
+		SOA: rdata.SOA{Ns: "ns1.example.com.", Mbox: "admin.example.com."},
+	})
+	// SOA without RRSIG — unsigned NXDOMAIN
+
+	result := InspectResponse(resp)
+	if result.HasDNSSEC {
+		t.Error("NXDOMAIN with SOA but no RRSIG should have HasDNSSEC=false")
+	}
+}
