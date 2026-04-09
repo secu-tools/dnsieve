@@ -63,6 +63,11 @@ reverse proxy setups.
 
 HTTP/2 is supported natively via Go's TLS HTTP server.
 
+Cache-Control header behaviour per RFC 8484 s5.1:
+- Successful responses: `Cache-Control: public, max-age=<min-TTL>`
+- SERVFAIL or REFUSED responses: `Cache-Control: no-store`
+- All HTTP error responses (4xx, 5xx): `Cache-Control: no-store`
+
 ## EDNS0 Processing
 
 DNSieve rebuilds the OPT record from scratch when forwarding queries to

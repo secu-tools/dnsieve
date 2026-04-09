@@ -265,6 +265,8 @@ func dohHandler(w http.ResponseWriter, r *http.Request, handler *Handler, logger
 
 	wireQuery, statusCode, errMsg := readDOHWireQuery(r)
 	if statusCode != http.StatusOK {
+		// RFC 8484 s5.1: error responses must not be cached by intermediaries.
+		w.Header().Set("Cache-Control", "no-store")
 		http.Error(w, errMsg, statusCode)
 		return
 	}
@@ -273,6 +275,7 @@ func dohHandler(w http.ResponseWriter, r *http.Request, handler *Handler, logger
 	query := new(dns.Msg)
 	query.Data = wireQuery
 	if err := query.Unpack(); err != nil {
+		w.Header().Set("Cache-Control", "no-store")
 		http.Error(w, "Invalid DNS message.", http.StatusBadRequest)
 		return
 	}
@@ -297,6 +300,7 @@ func dohHandler(w http.ResponseWriter, r *http.Request, handler *Handler, logger
 
 	if err := resp.Pack(); err != nil {
 		logger.Warnf("Failed to pack DNS response: %v", err)
+		w.Header().Set("Cache-Control", "no-store")
 		http.Error(w, "Internal error.", http.StatusInternalServerError)
 		return
 	}

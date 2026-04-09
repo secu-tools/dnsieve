@@ -1533,3 +1533,201 @@ func TestServePlain_DualStack(t *testing.T) {
 		t.Errorf("IPv6 UDP: expected NOERROR, got %v", resp6.Rcode)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Cache-Control: no-store on HTTP error responses (RFC 8484 s5.1)
+// ---------------------------------------------------------------------------
+
+// TestDohHandler_ErrorResponse_NoStore_InvalidBase64 verifies that a GET
+// request with invalid base64url in ?dns= returns 400 and Cache-Control: no-store
+// so that HTTP caches and reverse proxies do not cache the error.
+func TestDohHandler_ErrorResponse_NoStore_InvalidBase64(t *testing.T) {
+	handler := newTestHandler(t, nil)
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+
+	req := httptest.NewRequest(http.MethodGet, "/dns-query?dns=!!invalid!!", nil)
+	w := httptest.NewRecorder()
+	dohHandler(w, req, handler, logger)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status=%d, want 400", w.Code)
+	}
+	if cc := w.Result().Header.Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control=%q, want no-store on 400 error", cc)
+	}
+}
+
+// TestDohHandler_ErrorResponse_NoStore_WrongContentType verifies that a POST
+// with the wrong Content-Type returns 415 with Cache-Control: no-store.
+func TestDohHandler_ErrorResponse_NoStore_WrongContentType(t *testing.T) {
+	handler := newTestHandler(t, nil)
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+
+	req := httptest.NewRequest(http.MethodPost, "/dns-query", bytes.NewReader([]byte{1, 2, 3}))
+	req.Header.Set("Content-Type", "text/plain")
+	w := httptest.NewRecorder()
+	dohHandler(w, req, handler, logger)
+
+	if w.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("status=%d, want 415", w.Code)
+	}
+	if cc := w.Result().Header.Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control=%q, want no-store on 415 error", cc)
+	}
+}
+
+// TestDohHandler_ErrorResponse_NoStore_MethodNotAllowed verifies that an
+// unsupported HTTP method (e.g. PUT) returns 405 with Cache-Control: no-store.
+func TestDohHandler_ErrorResponse_NoStore_MethodNotAllowed(t *testing.T) {
+	handler := newTestHandler(t, nil)
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+
+	req := httptest.NewRequest(http.MethodPut, "/dns-query", nil)
+	w := httptest.NewRecorder()
+	dohHandler(w, req, handler, logger)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status=%d, want 405", w.Code)
+	}
+	if cc := w.Result().Header.Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control=%q, want no-store on 405 error", cc)
+	}
+}
+
+// TestDohHandler_ErrorResponse_NoStore_MalformedWire verifies that a POST
+// with a Content-Type of application/dns-message but an unparseable body
+// returns 400 with Cache-Control: no-store.
+func TestDohHandler_ErrorResponse_NoStore_MalformedWire(t *testing.T) {
+	handler := newTestHandler(t, nil)
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+
+	req := httptest.NewRequest(http.MethodPost, "/dns-query", bytes.NewReader([]byte{0xde, 0xad}))
+	req.Header.Set("Content-Type", "application/dns-message")
+	w := httptest.NewRecorder()
+	dohHandler(w, req, handler, logger)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status=%d, want 400", w.Code)
+	}
+	if cc := w.Result().Header.Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control=%q, want no-store on 400 malformed wire error", cc)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// JSON DNS API (Accept: application/dns-json)
+// ---------------------------------------------------------------------------
+
+// TestDohHandler_JSONAccept_ContentType verifies that a request with
+// Accept: application/dns-json receives a response with Content-Type
+// application/dns-json rather than application/dns-message.
+func TestDohHandler_JSONAccept_ContentType(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	query.ID = 0
+
+	handler := newTestHandler(t, []*dns.Msg{makeNormalResp(query)})
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+
+	if err := query.Pack(); err != nil {
+		t.Fatalf("pack query: %v", err)
+	}
+	body := make([]byte, len(query.Data))
+	copy(body, query.Data)
+
+	req := httptest.NewRequest(http.MethodPost, "/dns-query", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/dns-message")
+	req.Header.Set("Accept", "application/dns-json")
+	w := httptest.NewRecorder()
+	dohHandler(w, req, handler, logger)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", w.Code)
+	}
+	ct := w.Result().Header.Get("Content-Type")
+	if ct != "application/dns-json" {
+		t.Errorf("Content-Type=%q, want application/dns-json", ct)
+	}
+	// Response body must be valid JSON starting with '{'.
+	body2 := w.Body.Bytes()
+	if len(body2) == 0 || body2[0] != '{' {
+		t.Errorf("JSON body does not start with '{': %q", string(body2))
+	}
+}
+
+// TestDohHandler_JSONAccept_BlockedDomain verifies that a blocked domain
+// served via the JSON API carries Cache-Control: no-store (REFUSED rcode).
+func TestDohHandler_JSONAccept_BlockedDomain(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	query.ID = 0
+
+	handler := newTestHandler(t, []*dns.Msg{makeBlockedResp(query)})
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+
+	if err := query.Pack(); err != nil {
+		t.Fatalf("pack query: %v", err)
+	}
+	body := make([]byte, len(query.Data))
+	copy(body, query.Data)
+
+	req := httptest.NewRequest(http.MethodPost, "/dns-query", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/dns-message")
+	req.Header.Set("Accept", "application/dns-json")
+	w := httptest.NewRecorder()
+	dohHandler(w, req, handler, logger)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200 (DNS status in body for JSON API)", w.Code)
+	}
+	if cc := w.Result().Header.Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control=%q, want no-store for blocked JSON response", cc)
+	}
+	if ct := w.Result().Header.Get("Content-Type"); ct != "application/dns-json" {
+		t.Errorf("Content-Type=%q, want application/dns-json", ct)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Genuine NXDOMAIN pass-through (RFC 1034 s4.3.3)
+// ---------------------------------------------------------------------------
+
+// TestHandleQuery_GenuineNXDomain_NotBlocked verifies that when an upstream
+// returns NXDOMAIN with an Authority (SOA) section, the proxy correctly
+// passes the NXDOMAIN response to the client rather than treating it as a
+// block signal.
+func TestHandleQuery_GenuineNXDomain_NotBlocked(t *testing.T) {
+	query := makeQuery("nonexistent.example.com", dns.TypeA)
+
+	// Build genuine NXDOMAIN response: NXDOMAIN + SOA in Authority.
+	nxResp := new(dns.Msg)
+	dnsutil.SetReply(nxResp, query)
+	nxResp.Rcode = dns.RcodeNameError
+	nxResp.Ns = append(nxResp.Ns, &dns.SOA{
+		Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 900},
+		SOA: rdata.SOA{
+			Ns:      "ns1.example.com.",
+			Mbox:    "admin.example.com.",
+			Serial:  2024010101,
+			Refresh: 3600,
+			Retry:   600,
+			Expire:  86400,
+			Minttl:  300,
+		},
+	})
+
+	handler := newTestHandler(t, []*dns.Msg{nxResp})
+	resp := handler.HandleQuery(context.Background(), query)
+
+	if resp == nil {
+		t.Fatal("expected response for genuine NXDOMAIN")
+	}
+	// Must NOT be treated as a blocked domain (REFUSED + EDE).
+	if resp.Rcode == dns.RcodeRefused {
+		t.Error("genuine NXDOMAIN (with SOA) must not become REFUSED")
+	}
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("rcode=%s, want NXDOMAIN", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) != 0 {
+		t.Errorf("genuine NXDOMAIN should have no answer records, got %d", len(resp.Answer))
+	}
+}

@@ -715,3 +715,41 @@ func TestCloneMsg_nil(t *testing.T) {
 		t.Error("cloneMsg(nil) should return nil")
 	}
 }
+
+// TestCacheKey_DOBitSegregation verifies that queries with the DO (DNSSEC OK)
+// bit set are stored under a different cache key than the same query without
+// DO=1. This is required by RFC 3225 and prevents a DO=0 client from reading
+// a cached DNSSEC-signed response that was fetched on behalf of a DO=1 client.
+func TestCacheKey_DOBitSegregation(t *testing.T) {
+	c := New(100, 3600, 5, 0)
+
+	queryNoDO := makeQuery("dnssec.example.com", dns.TypeA)
+	respNoDO := makeResp(queryNoDO, 300)
+	c.Put(queryNoDO, respNoDO, false)
+
+	// Build the same query but with DO=1.
+	queryDO := makeQuery("dnssec.example.com", dns.TypeA)
+	opt := &dns.OPT{}
+	opt.Hdr.Name = "."
+	opt.SetUDPSize(4096)
+	opt.SetSecurity(true)
+	queryDO.Pseudo = append(queryDO.Pseudo, opt)
+
+	// DO=1 query must not hit the DO=0 cache entry.
+	if entry, _ := c.Get(queryDO); entry != nil {
+		t.Error("DO=1 query must not get a cache hit from a DO=0 entry")
+	}
+
+	// Cache a response for the DO=1 query and verify DO=0 still gets its own entry.
+	respDO := makeResp(queryDO, 300)
+	c.Put(queryDO, respDO, false)
+
+	if c.Len() != 2 {
+		t.Errorf("expected 2 separate cache entries (DO=0 and DO=1), got %d", c.Len())
+	}
+
+	// DO=0 query still returns the DO=0 entry.
+	if entry, _ := c.Get(queryNoDO); entry == nil {
+		t.Error("DO=0 query should still return the DO=0 cache entry")
+	}
+}
