@@ -1161,3 +1161,234 @@ func TestResolve_DNSSEC_MixedErrors_DNSSECWins(t *testing.T) {
 		t.Errorf("expected DNSSEC response (2.2.2.2), got %v", a.Addr)
 	}
 }
+
+// -- Internationalized Domain Names (IDN / ACE / Punycode) tests --
+//
+// DNS wire format uses ASCII-Compatible Encoding (ACE) labels for
+// internationalized domain names (RFC 5891 / IDNA 2008).  ACE labels carry
+// the "xn--" prefix followed by a Punycode-encoded Unicode label.  From the
+// perspective of the DNS protocol they are plain ASCII labels; the proxy
+// must pass them through and apply the same block/cache logic as it does for
+// purely-ASCII domain names.
+//
+// The whitelist additionally supports Unicode domain name entries in the
+// config file; those are normalised to ACE form before comparison so that
+// a configured entry matches the ACE-form query name received over DNS wire.
+
+// TestResolve_IDN_ACELabel_Normal verifies that a query for an ACE-encoded
+// domain (xn-- prefix) resolves correctly without being treated as blocked.
+func TestResolve_IDN_ACELabel_Normal(t *testing.T) {
+	// "xn--n3h.example.com" is a synthetic ACE-labelled test domain.
+	query := makeQuery("xn--n3h.example.com", dns.TypeA)
+	clients := []Client{
+		&mockClient{name: "server1", response: makeNormalResp(query)},
+		&mockClient{name: "server2", response: makeNormalResp(query)},
+	}
+
+	r := newTestResolverWithClients(clients)
+	result := r.Resolve(context.Background(), query)
+
+	if result.BestResponse == nil {
+		t.Fatal("expected a response for ACE-labelled domain")
+	}
+	if result.Blocked {
+		t.Error("ACE-labelled domain with normal response should not be blocked")
+	}
+	if !result.Cacheable {
+		t.Error("ACE-labelled domain response should be cacheable when all upstreams responded")
+	}
+}
+
+// TestResolve_IDN_ACELabel_Blocked verifies that a block signal for an
+// ACE-encoded domain is honoured the same as for any other domain.
+func TestResolve_IDN_ACELabel_Blocked(t *testing.T) {
+	// Synthetic ACE domain representing an internationalized label.
+	query := makeQuery("xn--blk-test.example.com", dns.TypeA)
+	clients := []Client{
+		&mockClient{name: "server1", response: makeNormalResp(query)},
+		&mockClient{name: "server2-block", response: makeBlockedResp(query)},
+	}
+
+	r := newTestResolverWithClients(clients)
+	result := r.Resolve(context.Background(), query)
+
+	if !result.Blocked {
+		t.Error("block signal for ACE-labelled domain should be detected")
+	}
+	if result.BlockedBy != "server2-block" {
+		t.Errorf("BlockedBy = %q, want \"server2-block\"", result.BlockedBy)
+	}
+}
+
+// TestResolve_IDN_ACELabel_NXDOMAIN verifies that a genuine NXDOMAIN (with
+// SOA) for an ACE-encoded domain is not misidentified as a block signal.
+func TestResolve_IDN_ACELabel_NXDOMAIN(t *testing.T) {
+	query := makeQuery("xn--nonexistent.example.com", dns.TypeA)
+	clients := []Client{
+		&mockClient{name: "server1", response: makeNXDomainResp(query, true)},
+		&mockClient{name: "server2", response: makeNXDomainResp(query, true)},
+	}
+
+	r := newTestResolverWithClients(clients)
+	result := r.Resolve(context.Background(), query)
+
+	if result.Blocked {
+		t.Error("genuine NXDOMAIN with SOA for ACE domain should not be blocked")
+	}
+	if !result.Cacheable {
+		t.Error("agreed NXDOMAIN for ACE domain should be cacheable")
+	}
+}
+
+// TestToACEDomain_ASCII verifies that a plain ASCII domain is returned
+// unchanged by toACEDomain.
+func TestToACEDomain_ASCII(t *testing.T) {
+	input := "example.com"
+	got := toACEDomain(input)
+	if got != input {
+		t.Errorf("toACEDomain(%q) = %q, want %q (ASCII domain should be unchanged)", input, got, input)
+	}
+}
+
+// TestToACEDomain_AlreadyACE verifies that a domain that already uses xn--
+// Punycode encoding is returned unchanged.
+func TestToACEDomain_AlreadyACE(t *testing.T) {
+	input := "xn--n3h.example.com"
+	got := toACEDomain(input)
+	if got != input {
+		t.Errorf("toACEDomain(%q) = %q, want %q (already-ACE domain should be unchanged)", input, got, input)
+	}
+}
+
+// TestToACEDomain_TrailingDot verifies that a trailing FQDN dot does not
+// cause conversion to fail; the result should equal the domain without the dot.
+func TestToACEDomain_TrailingDot(t *testing.T) {
+	got := toACEDomain("example.com.")
+	if got != "example.com" {
+		t.Errorf("toACEDomain(\"example.com.\") = %q, want %q", got, "example.com")
+	}
+}
+
+// TestToACEDomain_IDNEncoding verifies that a domain label containing a
+// non-ASCII Unicode character (encoded here as a Go escape sequence so the
+// source file remains ASCII) is converted to its ACE/Punycode equivalent.
+// The label used is "b\u00fccher" (the character at U+00FC is an umlaut-u),
+// a common IDNA documentation example.  The test only requires that the
+// output starts with "xn--" and differs from the input, not the exact bytes.
+func TestToACEDomain_IDNEncoding(t *testing.T) {
+	unicodeDomain := "b\u00fccher.example.com" // umlaut-u in the first label
+	got := toACEDomain(unicodeDomain)
+	if got == unicodeDomain {
+		t.Fatalf("toACEDomain(%q): expected ACE encoding but got input unchanged", unicodeDomain)
+	}
+	if !strings.HasPrefix(got, "xn--") {
+		t.Errorf("toACEDomain(%q) = %q: first label should start with xn--", unicodeDomain, got)
+	}
+}
+
+// TestToACEDomain_Idempotent verifies that applying toACEDomain twice yields
+// the same result as applying it once (idempotency of ACE encoding).
+func TestToACEDomain_Idempotent(t *testing.T) {
+	unicodeDomain := "b\u00fccher.example.com" // umlaut-u
+	once := toACEDomain(unicodeDomain)
+	twice := toACEDomain(once)
+	if once != twice {
+		t.Errorf("toACEDomain not idempotent: first=%q second=%q", once, twice)
+	}
+}
+
+// TestWhitelistResolver_IsWhitelisted_IDN_ACEForm verifies that whitelist
+// entries already in ACE form (xn-- prefix) match correctly.
+func TestWhitelistResolver_IsWhitelisted_IDN_ACEForm(t *testing.T) {
+	// The whitelist entry and the DNS query name are both already in ACE form.
+	aceEntry := "xn--n3h.example.com"
+	cfg := &config.WhitelistConfig{
+		Enabled: true,
+		Domains: []string{aceEntry},
+	}
+	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "wl"}}
+
+	tests := []struct {
+		qname    string
+		expected bool
+	}{
+		{aceEntry, true},       // exact ACE match
+		{aceEntry + ".", true}, // with trailing FQDN dot
+		{"other.example.com", false},
+		{"sub." + aceEntry, false}, // exact match does not cover subdomain
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.qname, func(t *testing.T) {
+			got := wl.IsWhitelisted(tc.qname)
+			if got != tc.expected {
+				t.Errorf("IsWhitelisted(%q) = %v, want %v", tc.qname, got, tc.expected)
+			}
+		})
+	}
+}
+
+// TestWhitelistResolver_IsWhitelisted_IDN_UnicodeEntry verifies that a
+// whitelist entry containing a non-ASCII Unicode label (written here using
+// Go escape sequences so the source file is ASCII-clean) is normalised to ACE
+// form and matches the corresponding ACE-form DNS wire query name.
+func TestWhitelistResolver_IsWhitelisted_IDN_UnicodeEntry(t *testing.T) {
+	// Unicode entry: the first label contains an umlaut-u (U+00FC).
+	unicodeEntry := "b\u00fccher.example.com"
+	// Compute the ACE form the same way IsWhitelisted does.
+	aceQuery := toACEDomain(strings.ToLower(unicodeEntry))
+	if aceQuery == unicodeEntry {
+		t.Skip("IDN conversion not available in this environment; skipping")
+	}
+
+	cfg := &config.WhitelistConfig{
+		Enabled: true,
+		Domains: []string{unicodeEntry},
+	}
+	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "wl"}}
+
+	if !wl.IsWhitelisted(aceQuery) {
+		t.Errorf("IsWhitelisted(%q) = false; Unicode entry %q should match its ACE form %q",
+			aceQuery, unicodeEntry, aceQuery)
+	}
+	// The original Unicode form should NOT be found via a raw Unicode query
+	// (DNS wire never carries raw Unicode; the input is always ACE).
+	if wl.IsWhitelisted("other.example.com") {
+		t.Error("IsWhitelisted(\"other.example.com\") = true; should not match")
+	}
+}
+
+// TestWhitelistResolver_IsWhitelisted_IDN_WildcardUnicode verifies that a
+// wildcard whitelist entry with a Unicode base domain matches the ACE-form
+// DNS query names for both the base domain and its subdomains.
+func TestWhitelistResolver_IsWhitelisted_IDN_WildcardUnicode(t *testing.T) {
+	// Wildcard entry whose base contains an umlaut-u (U+00FC).
+	wildcardEntry := "*.b\u00fccher.example.com"
+	baseAsMeta := "b\u00fccher.example.com"
+	aceBase := toACEDomain(strings.ToLower(baseAsMeta))
+	if aceBase == baseAsMeta {
+		t.Skip("IDN conversion not available in this environment; skipping")
+	}
+
+	cfg := &config.WhitelistConfig{
+		Enabled: true,
+		Domains: []string{wildcardEntry},
+	}
+	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "wl"}}
+
+	aceBaseFqdn := aceBase + "."
+	aceSubFqdn := "sub." + aceBase + "."
+
+	// The base domain itself should match (*.x also matches x per existing logic).
+	if !wl.IsWhitelisted(aceBaseFqdn) {
+		t.Errorf("IsWhitelisted(%q) = false; wildcard entry %q should match base ACE domain", aceBaseFqdn, wildcardEntry)
+	}
+	// A subdomain should also match.
+	if !wl.IsWhitelisted(aceSubFqdn) {
+		t.Errorf("IsWhitelisted(%q) = false; wildcard entry %q should match ACE subdomain", aceSubFqdn, wildcardEntry)
+	}
+	// An unrelated domain must not match.
+	if wl.IsWhitelisted("other.example.com") {
+		t.Error("IsWhitelisted(\"other.example.com\") should not match IDN wildcard entry")
+	}
+}

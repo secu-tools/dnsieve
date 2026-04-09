@@ -363,6 +363,32 @@ domains = ["*.cn"]
 domains = ["*"]
 ```
 
+### Internationalized Domain Names (IDN)
+
+Whitelist entries support internationalized domain names. You may write
+entries either in ACE/Punycode form (the `xn--` encoded representation used
+in DNS wire messages) or in their native Unicode form as UTF-8 text in the
+TOML file. DNSieve normalises Unicode entries to ACE form internally
+(RFC 5891 / IDNA 2008) before comparing them to incoming query names, so
+both representations match identically.
+
+```toml
+[whitelist]
+enabled = true
+# These two entries are equivalent and will both match the same DNS queries:
+domains = [
+  # ACE/Punycode form (xn-- prefix) -- always safe to use
+  "xn--bcher-kva.example.com",
+  # Unicode form in UTF-8 -- normalised to ACE automatically by DNSieve
+  # (the entry above and this one match the same queries)
+]
+```
+
+ACE-encoded domain names (labels starting with `xn--`) are ordinary ASCII
+labels in the DNS wire protocol and require no special treatment by the
+proxy. DNSieve passes them to upstream resolvers unchanged, just like any
+other ASCII-labelled domain name.
+
 ### Custom whitelist resolver
 
 You can use any non-blocking DNS resolver for whitelist lookups:
@@ -377,6 +403,7 @@ resolver_protocol = "doh"
 # resolver_address = "1.1.1.1:53"
 # resolver_protocol = "udp"
 ```
+
 
 ## Privacy (EDNS0 Options)
 

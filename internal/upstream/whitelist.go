@@ -9,9 +9,29 @@ import (
 
 	"codeberg.org/miekg/dns"
 	"codeberg.org/miekg/dns/dnsutil"
+	"golang.org/x/net/idna"
 
 	"github.com/secu-tools/dnsieve/internal/config"
 )
+
+// toACEDomain converts a domain label sequence that may contain Unicode
+// characters to its ASCII Compatible Encoding (ACE/Punycode) representation
+// as defined in RFC 5891 (IDNA 2008). For example, the German city domain
+// encoded with an umlaut character becomes its xn-- Punycode equivalent.
+// Domains that are already in ASCII form (including those with existing xn--
+// encoded labels) are returned unchanged. The trailing FQDN dot, if present,
+// is temporarily stripped before conversion and not re-added; callers should
+// apply dnsutil.Fqdn after this function when a fully-qualified form is
+// needed. If conversion fails the input is returned as-is so that ASCII-only
+// configured entries continue to match correctly.
+func toACEDomain(domain string) string {
+	domainNoTrailingDot := strings.TrimSuffix(domain, ".")
+	ace, err := idna.Lookup.ToASCII(domainNoTrailingDot)
+	if err != nil {
+		return domainNoTrailingDot
+	}
+	return ace
+}
 
 // WhitelistResolver resolves whitelisted domains through a dedicated
 // non-blocking upstream, bypassing all block-filtering upstreams.
@@ -79,24 +99,26 @@ func (w *WhitelistResolver) IsWhitelisted(qname string) bool {
 			return true
 		}
 
-		// Wildcard pattern: *.example.com
+		// Wildcard pattern: *.example.com or *.idn-domain (IDN labels supported)
 		if strings.HasPrefix(entry, "*.") {
-			suffix := entry[1:] // ".example.com"
-			suffix = dnsutil.Fqdn(suffix)
-			// Match the suffix (e.g., qname "sub.example.com." ends with ".example.com.")
+			// Convert the base domain to ACE form for IDN support, then reconstruct
+			// the suffix and base FQDN used for matching.
+			aceBase := toACEDomain(entry[2:])     // "m\u00fcnchen.de" -> "xn--mnchen-3ya.de"
+			suffix := "." + dnsutil.Fqdn(aceBase) // ".xn--mnchen-3ya.de."
+			base := dnsutil.Fqdn(aceBase)         // "xn--mnchen-3ya.de."
+			// Match any subdomain suffix (e.g., "sub.xn--mnchen-3ya.de.")
 			if strings.HasSuffix(qname, suffix) {
 				return true
 			}
 			// Also match the base domain itself (e.g., *.example.com matches example.com)
-			base := dnsutil.Fqdn(entry[2:])
 			if qname == base {
 				return true
 			}
 			continue
 		}
 
-		// Exact match
-		candidate := dnsutil.Fqdn(entry)
+		// Exact match - convert to ACE form first to support IDN (Unicode) entries
+		candidate := dnsutil.Fqdn(toACEDomain(entry))
 		if qname == candidate {
 			return true
 		}

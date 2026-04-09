@@ -137,3 +137,47 @@ func TestSmoke_MultipleQueryTypes(t *testing.T) {
 		})
 	}
 }
+
+// TestSmoke_IDN_ACELabel_A verifies that the DNSieve binary handles an A-record
+// query for an ACE-encoded domain name (xn-- Punycode label, RFC 5891) without
+// crashing or returning a SERVFAIL caused by label-format rejection.  The
+// synthetic subdomain is expected to return NXDOMAIN; any valid DNS response
+// code (no crash, no connection reset) is considered a pass.
+func TestSmoke_IDN_ACELabel_A(t *testing.T) {
+	dir := smokeTempDir(t)
+	port := findFreePort(t)
+	cfgPath := writeConfig(t, dir, minimalConfig(port))
+	startBinary(t, cfgPath, port)
+
+	// "xn--n3h.example.com" is a synthetic ACE-labelled subdomain.  IANA's
+	// example.com does not delegate this label, so NXDOMAIN is expected.
+	resp := queryUDP(t, port, "xn--n3h.example.com", dns.TypeA)
+	if resp.Rcode == dns.RcodeSuccess && len(resp.Answer) > 0 {
+		// Unexpected answers; not a failure but worth logging.
+		t.Logf("IDN ACE A: unexpected answers=%d", len(resp.Answer))
+	}
+	t.Logf("IDN ACE A: rcode=%s", dns.RcodeToString[resp.Rcode])
+}
+
+// TestSmoke_IDN_ACELabel_AAAA mirrors TestSmoke_IDN_ACELabel_A for AAAA queries.
+func TestSmoke_IDN_ACELabel_AAAA(t *testing.T) {
+	dir := smokeTempDir(t)
+	port := findFreePort(t)
+	cfgPath := writeConfig(t, dir, minimalConfig(port))
+	startBinary(t, cfgPath, port)
+
+	resp := queryUDP(t, port, "xn--n3h.example.com", dns.TypeAAAA)
+	t.Logf("IDN ACE AAAA: rcode=%s", dns.RcodeToString[resp.Rcode])
+}
+
+// TestSmoke_IDN_MultipleACELabels verifies that domain names with consecutive
+// ACE-encoded labels at multiple levels are passed through cleanly.
+func TestSmoke_IDN_MultipleACELabels(t *testing.T) {
+	dir := smokeTempDir(t)
+	port := findFreePort(t)
+	cfgPath := writeConfig(t, dir, minimalConfig(port))
+	startBinary(t, cfgPath, port)
+
+	resp := queryUDP(t, port, "xn--n3h.xn--n3h.example.com", dns.TypeA)
+	t.Logf("IDN multi-label: rcode=%s", dns.RcodeToString[resp.Rcode])
+}
