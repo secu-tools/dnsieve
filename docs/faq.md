@@ -90,14 +90,17 @@ the other upstreams replied. This ensures that the strictest upstream always win
 
 **Q: What does a "blocked" response look like to clients?**
 
-Blocked responses return `REFUSED` (rcode 5) with an empty Answer section and an
-Extended DNS Error (EDE) option in the OPT record with InfoCode 15 (Blocked) per
-RFC 8914. No spoofed IP address (0.0.0.0 or ::) is included. REFUSED is used
-because dnsmasq (Pi-hole's DNS engine) short-circuits DNSSEC validation for any
-rcode other than NOERROR or NXDOMAIN -- an NXDOMAIN without NSEC denial-of-existence
-records is flagged BOGUS by dnsmasq, then converted to SERVFAIL. REFUSED bypasses
-this path entirely. Pi-hole FTL >= 5.18 recognises EDE code 15 and displays the
-entry as "Blocked (upstream)".
+The response format depends on the configured `blocking.mode` setting. The
+default mode is `"null"`, which returns NOERROR with 0.0.0.0 (for A queries)
+or :: (for AAAA queries) and an Extended DNS Error (EDE) option with InfoCode
+15 (Blocked) per RFC 8914. Connections to 0.0.0.0/:: fail immediately with
+"connection refused" -- no timeout, no retry. This is the same approach used
+by Pi-hole (NULL blocking mode) and Technitium (AnyAddress mode).
+
+Other available modes: `"nxdomain"` (NXDOMAIN + empty answer), `"nodata"`
+(NOERROR + empty answer), and `"refused"` (REFUSED + empty answer). All modes
+include EDE code 15 with the name of the upstream that detected the block.
+See [configuration.md](configuration.md#blocking-mode) for details.
 
 **Q: What is `min_wait_ms` and why does it exist?**
 
@@ -159,9 +162,9 @@ instance gets a distinct service name.
 **Q: Does DNSieve support IPv6?**
 
 Yes. The default `listen_addresses = ["0.0.0.0", "::"]` binds to both IPv4 and
-IPv6 interfaces simultaneously. DNSieve also forwards AAAA queries and blocks AAAA
-answers by returning `::`.
-
+IPv6 interfaces simultaneously. DNSieve also forwards AAAA queries and blocks
+AAAA answers according to the configured `blocking.mode` (default: `"null"`,
+which returns `::` for blocked AAAA queries).
 **Q: How do I test that blocking is working?**
 
 Use a domain known to be blocked by your upstream providers. For example, Quad9
@@ -175,15 +178,16 @@ nslookup malware.testcategory.com 127.0.0.1
 dig @127.0.0.1 -p 5353 malware.testcategory.com A
 ```
 
-A blocked response returns REFUSED (rcode 5) with EDE code 15 in the OPT record.
-The Answer section is empty -- no spoofed IP is present. You can verify this with:
+A blocked response depends on the configured `blocking.mode`. In the default
+`"null"` mode, the response has status NOERROR with a 0.0.0.0 answer and
+EDE code 15 (Blocked) in the OPT record. You can verify this with:
 
 ```bash
 dig @127.0.0.1 -p 5353 malware.testcategory.com A +norecurse
 ```
 
-Look for `status: REFUSED` and an `EDE: 15 (Blocked)` line in the OPT
-pseudo-section.
+Look for `status: NOERROR`, a `0.0.0.0` answer record, and an
+`EDE: 15 (Blocked)` line in the OPT pseudo-section.
 
 **Q: How do I check which upstreams are fastest for my location?**
 

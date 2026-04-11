@@ -1014,3 +1014,106 @@ func TestCookies_Reoriginate_ConcurrentAccess(t *testing.T) {
 		<-done
 	}
 }
+
+// TestCookies_Reoriginate_ServerCookieTooShort verifies that a response cookie
+// whose server part is shorter than 8 bytes (16 hex chars) is rejected per
+// RFC 7873 s4.1 and does not update the cookie store.
+func TestCookies_Reoriginate_ServerCookieTooShort(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.Privacy.Cookies.Mode = "reoriginate"
+	m := NewMiddleware(cfg)
+
+	// Total 17-31 chars: client (16) + server (1-15) -- server part too short.
+	// Use 30 chars total: 16 client + 14 server (7 bytes, below the 8-byte min).
+	shortTotal := &dns.COOKIE{Cookie: "abcdef0123456789" + "aabbccddeeff00"}
+	m.processResponseCookie(shortTotal, "upstream1")
+
+	q := makeQuery("example.com.", dns.TypeA)
+	out := m.PrepareUpstreamQuery(q, "upstream1", false)
+	cookie := findPseudoType[*dns.COOKIE](out)
+	if cookie == nil {
+		t.Fatal("cookie must be present")
+	}
+	if len(cookie.Cookie) != 16 {
+		t.Errorf("cookie len = %d, want 16 (invalid short server cookie must not be stored)", len(cookie.Cookie))
+	}
+}
+
+// TestCookies_Reoriginate_ServerCookieTooLong verifies that a response cookie
+// whose server part exceeds 32 bytes (64 hex chars) is rejected per
+// RFC 7873 s4.1 and does not update the cookie store.
+func TestCookies_Reoriginate_ServerCookieTooLong(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.Privacy.Cookies.Mode = "reoriginate"
+	m := NewMiddleware(cfg)
+
+	// 16 client + 66 server = 82 chars total, exceeds the 80-char maximum.
+	oversized := "abcdef0123456789" + "aabbccddeeff001122334455667788990011223344556677889900112233445566778899" // 16+70=86
+	m.processResponseCookie(&dns.COOKIE{Cookie: oversized}, "upstream1")
+
+	q := makeQuery("example.com.", dns.TypeA)
+	out := m.PrepareUpstreamQuery(q, "upstream1", false)
+	cookie := findPseudoType[*dns.COOKIE](out)
+	if cookie == nil {
+		t.Fatal("cookie must be present")
+	}
+	if len(cookie.Cookie) != 16 {
+		t.Errorf("cookie len = %d, want 16 (oversized server cookie must not be stored)", len(cookie.Cookie))
+	}
+}
+
+// TestProcessResponseCookieOnly_UpdatesStatePerUpstream verifies that
+// ProcessResponseCookieOnly stores the server cookie under the correct
+// upstream address so that it is returned in subsequent queries to that
+// upstream.
+func TestProcessResponseCookieOnly_UpdatesStatePerUpstream(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.Privacy.Cookies.Mode = "reoriginate"
+	m := NewMiddleware(cfg)
+
+	// Prime client cookie for upstream1.
+	q := makeQuery("example.com.", dns.TypeA)
+	out1 := m.PrepareUpstreamQuery(q, "upstream1", false)
+	c1 := findPseudoType[*dns.COOKIE](out1)
+	if c1 == nil {
+		t.Fatal("initial cookie must be present")
+	}
+
+	// Simulate receiving an upstream response that includes a server cookie.
+	serverHex := "c0ffee1122334455"
+	resp := new(dns.Msg)
+	resp.Pseudo = append(resp.Pseudo, &dns.COOKIE{Cookie: c1.Cookie + serverHex})
+	m.ProcessResponseCookieOnly(resp, "upstream1")
+
+	// The next query to upstream1 must carry the stored server cookie.
+	out2 := m.PrepareUpstreamQuery(q, "upstream1", false)
+	c2 := findPseudoType[*dns.COOKIE](out2)
+	if c2 == nil {
+		t.Fatal("cookie must be present after ProcessResponseCookieOnly")
+	}
+	if len(c2.Cookie) <= 16 {
+		t.Errorf("cookie len = %d, want >16 (server cookie should be appended)", len(c2.Cookie))
+	}
+	if c2.Cookie[16:] != serverHex {
+		t.Errorf("server cookie = %q, want %q", c2.Cookie[16:], serverHex)
+	}
+
+	// upstream2 must not have received any server cookie state.
+	out3 := m.PrepareUpstreamQuery(q, "upstream2", false)
+	c3 := findPseudoType[*dns.COOKIE](out3)
+	if c3 == nil {
+		t.Fatal("cookie must be present for upstream2")
+	}
+	if len(c3.Cookie) != 16 {
+		t.Errorf("upstream2 cookie len = %d, want 16 (no state for upstream2)", len(c3.Cookie))
+	}
+}
+
+// TestProcessResponseCookieOnly_NilSafe verifies that ProcessResponseCookieOnly
+// does not panic on a nil response.
+func TestProcessResponseCookieOnly_NilSafe(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.Privacy.Cookies.Mode = "reoriginate"
+	m := NewMiddleware(cfg)
+	m.ProcessResponseCookieOnly(nil, "upstream1") // must not panic
+}

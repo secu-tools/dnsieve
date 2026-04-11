@@ -43,7 +43,9 @@ count to 2-3.
    servers concurrently
 4. Results are collected:
    - If **any** upstream signals **blocked**, cache the block and return
-     REFUSED + EDE Blocked (RFC 8914 code 15) to the client
+     a blocked response with EDE Blocked (RFC 8914 code 15) to the client.
+     Default mode: NOERROR + 0.0.0.0/:: (configurable: null, nxdomain,
+     nodata, refused)
    - If **not blocked** and **all** upstreams responded, cache from the
      highest-priority upstream and return
    - If some upstreams had errors, do **not** cache but still return the

@@ -366,3 +366,157 @@ func TestNewDoTClient_WithBootstrap_FallsBackOnFail(t *testing.T) {
 		t.Error("expected non-nil client")
 	}
 }
+
+// =============================================================================
+// F-06: Bootstrap A-only resolution tests
+// =============================================================================
+
+// TestLookupHostViaBootstrap_ARecordQuery verifies that the bootstrap lookup
+// sends an A query and returns the first A record IP.
+func TestLookupHostViaBootstrap_ARecordQuery(t *testing.T) {
+	// Start a mock UDP DNS server that responds to A queries.
+	addr, cleanup := startCustomBootstrapServer(t, func(msg *dns.Msg) *dns.Msg {
+		resp := new(dns.Msg)
+		dnsutil.SetReply(resp, msg)
+		resp.Answer = append(resp.Answer, &dns.A{
+			Hdr: dns.Header{Name: msg.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+			A:   rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
+		})
+		return resp
+	})
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ip, err := lookupHostViaBootstrap(ctx, "test.example.com", addr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ip != "1.2.3.4" {
+		t.Errorf("expected 1.2.3.4, got %s", ip)
+	}
+}
+
+// TestLookupHostViaBootstrap_NoARecord verifies that an error is returned
+// when no A record exists for the queried host.
+func TestLookupHostViaBootstrap_NoARecord(t *testing.T) {
+	addr, cleanup := startCustomBootstrapServer(t, func(msg *dns.Msg) *dns.Msg {
+		resp := new(dns.Msg)
+		dnsutil.SetReply(resp, msg)
+		// Return empty answer (no A records)
+		return resp
+	})
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := lookupHostViaBootstrap(ctx, "norecord.example.com", addr)
+	if err == nil {
+		t.Error("expected error when no A record returned")
+	}
+}
+
+// TestLookupHostViaBootstrap_ServerError verifies that bootstrap returns an
+// error when the DNS server responds with a non-success rcode.
+func TestLookupHostViaBootstrap_ServerError(t *testing.T) {
+	addr, cleanup := startCustomBootstrapServer(t, func(msg *dns.Msg) *dns.Msg {
+		resp := new(dns.Msg)
+		dnsutil.SetReply(resp, msg)
+		resp.Rcode = dns.RcodeServerFailure
+		return resp
+	})
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := lookupHostViaBootstrap(ctx, "fail.example.com", addr)
+	if err == nil {
+		t.Error("expected error when server returns SERVFAIL")
+	}
+}
+
+// TestResolveViaBootstrap_MultipleAddrs verifies that resolveViaBootstrap
+// fans out to all bootstrap addresses and returns the first successful result.
+func TestResolveViaBootstrap_MultipleAddrs(t *testing.T) {
+	// First server fails, second succeeds.
+	addr1, cleanup1 := startCustomBootstrapServer(t, func(msg *dns.Msg) *dns.Msg {
+		resp := new(dns.Msg)
+		dnsutil.SetReply(resp, msg)
+		resp.Rcode = dns.RcodeServerFailure
+		return resp
+	})
+	defer cleanup1()
+
+	addr2, cleanup2 := startCustomBootstrapServer(t, func(msg *dns.Msg) *dns.Msg {
+		resp := new(dns.Msg)
+		dnsutil.SetReply(resp, msg)
+		resp.Answer = append(resp.Answer, &dns.A{
+			Hdr: dns.Header{Name: msg.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+			A:   rdata.A{Addr: netip.MustParseAddr("5.6.7.8")},
+		})
+		return resp
+	})
+	defer cleanup2()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ip, err := resolveViaBootstrap(ctx, "test.example.com", []string{addr1, addr2})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ip != "5.6.7.8" {
+		t.Errorf("expected 5.6.7.8, got %s", ip)
+	}
+}
+
+// TestResolveViaBootstrap_EmptyAddrs verifies error on empty bootstrap list.
+func TestResolveViaBootstrap_EmptyAddrs(t *testing.T) {
+	ctx := context.Background()
+	_, err := resolveViaBootstrap(ctx, "test.example.com", nil)
+	if err == nil {
+		t.Error("expected error with empty bootstrap addresses")
+	}
+}
+
+// startCustomBootstrapServer starts a local UDP DNS server for testing
+// with a custom handler function.
+func startCustomBootstrapServer(t *testing.T, handler func(*dns.Msg) *dns.Msg) (string, func()) {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := pc.LocalAddr().String()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 4096)
+		for {
+			n, raddr, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			msg := new(dns.Msg)
+			msg.Data = buf[:n]
+			if err := msg.Unpack(); err != nil {
+				continue
+			}
+			resp := handler(msg)
+			if err := resp.Pack(); err != nil {
+				continue
+			}
+			pc.WriteTo(resp.Data, raddr)
+		}
+	}()
+
+	cleanup := func() {
+		pc.Close()
+		<-done
+	}
+	return addr, cleanup
+}

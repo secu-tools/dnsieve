@@ -5,10 +5,12 @@
 package dnsmsg
 
 import (
+	"fmt"
 	"net/netip"
 
 	"codeberg.org/miekg/dns"
 	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
 )
 
 // blockedUDPSize is the EDNS0 UDP payload size advertised in blocked
@@ -16,6 +18,34 @@ import (
 // OPT record -- which carries the EDE option -- is always included in the
 // wire format even before PrepareClientResponse assigns the final value.
 const blockedUDPSize uint16 = 1232
+
+// Blocking mode constants. These correspond to the blocking.mode config value.
+const (
+	// BlockingModeNull returns NOERROR with 0.0.0.0 for A queries and ::
+	// for AAAA queries. Other query types receive NODATA (NOERROR with
+	// empty answer). Both Pi-hole and Technitium recommend this mode.
+	// Connections to blocked domains fail immediately without timeout.
+	BlockingModeNull = "null"
+
+	// BlockingModeNXDomain returns NXDOMAIN with empty answer section.
+	// Signals the domain does not exist. Some clients retry more
+	// aggressively than with null mode.
+	BlockingModeNXDomain = "nxdomain"
+
+	// BlockingModeNODATA returns NOERROR with empty answer section.
+	// Signals the domain exists but has no records of the requested type.
+	// Better client acceptance than NXDOMAIN in some environments.
+	BlockingModeNODATA = "nodata"
+
+	// BlockingModeRefused returns REFUSED with empty answer section.
+	// Caution: some clients may fall back to another DNS resolver.
+	BlockingModeRefused = "refused"
+)
+
+// blockedTTL is the TTL used for synthesized answer records in null mode.
+// Short TTL (10 seconds) since the cache layer handles long-term storage
+// with its own blocked_ttl setting.
+const blockedTTL uint32 = 10
 
 // InspectResult holds the outcome of inspecting a DNS response.
 type InspectResult struct {
@@ -46,6 +76,13 @@ func InspectResponse(msg *dns.Msg) InspectResult {
 
 	// SERVFAIL
 	if msg.Rcode == dns.RcodeServerFailure {
+		result.ServFail = true
+		return result
+	}
+
+	// BADCOOKIE (RFC 7873 §5.4): treat as a retryable server error.
+	// Must not be cached or selected as a valid upstream response.
+	if msg.Rcode == dns.RcodeBadCookie {
 		result.ServFail = true
 		return result
 	}
@@ -135,27 +172,30 @@ func isBlockedIPv6(addr netip.Addr) bool {
 }
 
 // MakeBlockedResponse creates a DNS response that signals a blocked domain
-// to the client.
+// to the client using the specified blocking mode.
 //
-// The response uses REFUSED (rcode 5) with no Answer section and includes an
-// Extended DNS Error (EDE) option with InfoCode 15 (Blocked) per RFC 8914
-// section 4.16. REFUSED is semantically correct for policy-based denial and
-// avoids DNSSEC validation problems caused by NXDOMAIN and spoofed addresses:
-// DNSSEC-validating resolvers such as Pi-hole/dnsmasq only validate NOERROR
-// and NXDOMAIN responses; REFUSED is returned to the downstream client
-// immediately without DNSSEC processing (dnsmasq forward.c process_reply).
-// The EDE Blocked (15) code signals to supporting clients that the upstream
-// filter intentionally blocked the domain, as opposed to a network error.
+// Modes (following Pi-hole and Technitium conventions):
 //
-// Note: Pi-hole with --dnssec validation will still log the query as BOGUS
-// because dnsmasq retries the query once on REFUSED, then classifies the
-// result as STAT_ABANDONED. The actual DNS response forwarded to the end
-// client is REFUSED + EDE 15. Correct behavior for clients that do not
-// perform their own DNSSEC validation, or for Pi-hole in --proxy-dnssec mode.
-func MakeBlockedResponse(query *dns.Msg) *dns.Msg {
+//   - "null" (default, recommended): NOERROR with 0.0.0.0 for A / :: for AAAA.
+//     Other query types get NODATA (NOERROR, empty answer). Clients see an
+//     immediate connection failure. 0.0.0.0 is "this host on this network"
+//     (RFC 1122 Section 3.2.1.3); :: is the unspecified address (RFC 4291
+//     Section 2.5.2). Both Pi-hole and Technitium default to this mode.
+//
+//   - "nxdomain": NXDOMAIN with empty answer. Domain does not exist.
+//
+//   - "nodata": NOERROR with empty answer. Domain exists but no records.
+//
+//   - "refused": REFUSED with empty answer. Server refuses the query.
+//
+// All modes include Extended DNS Error (EDE) code 15 (Blocked) per RFC 8914
+// section 4.16. The extraText includes which upstream detected the block.
+//
+// The blockedBy parameter identifies the upstream that signalled the block
+// (e.g., "dns.quad9.net"). Pass empty string for cached blocked responses.
+func MakeBlockedResponse(query *dns.Msg, mode string, blockedBy string) *dns.Msg {
 	resp := new(dns.Msg)
 	dnsutil.SetReply(resp, query)
-	resp.Rcode = dns.RcodeRefused
 	resp.Authoritative = false
 	resp.RecursionAvailable = true
 
@@ -163,12 +203,61 @@ func MakeBlockedResponse(query *dns.Msg) *dns.Msg {
 	// has not yet run. The EDE option is carried inside the OPT record.
 	resp.UDPSize = blockedUDPSize
 
+	// Build EDE extra text with upstream identification.
+	edeText := "Blocked"
+	if blockedBy != "" {
+		edeText = fmt.Sprintf("Blocked (%s)", blockedBy)
+	}
+
 	// RFC 8914 EDE code 15 (Blocked): informs the client that the upstream
-	// filter deliberately blocked this domain, as opposed to a genuine error.
+	// filter deliberately blocked this domain.
 	resp.Pseudo = append(resp.Pseudo, &dns.EDE{
 		InfoCode:  dns.ExtendedErrorBlocked,
-		ExtraText: "Blocked",
+		ExtraText: edeText,
 	})
+
+	switch mode {
+	case BlockingModeNXDomain:
+		resp.Rcode = dns.RcodeNameError
+		// No answer section -- domain does not exist
+
+	case BlockingModeNODATA:
+		resp.Rcode = dns.RcodeSuccess
+		// No answer section -- domain exists but no records
+
+	case BlockingModeRefused:
+		resp.Rcode = dns.RcodeRefused
+		// No answer section -- server refuses
+
+	default: // BlockingModeNull (default, recommended)
+		resp.Rcode = dns.RcodeSuccess
+		if len(query.Question) > 0 {
+			qtype := dns.RRToType(query.Question[0])
+			qname := query.Question[0].Header().Name
+			switch qtype {
+			case dns.TypeA:
+				resp.Answer = append(resp.Answer, &dns.A{
+					Hdr: dns.Header{
+						Name:  qname,
+						Class: dns.ClassINET,
+						TTL:   blockedTTL,
+					},
+					A: rdata.A{Addr: netip.AddrFrom4([4]byte{0, 0, 0, 0})},
+				})
+			case dns.TypeAAAA:
+				resp.Answer = append(resp.Answer, &dns.AAAA{
+					Hdr: dns.Header{
+						Name:  qname,
+						Class: dns.ClassINET,
+						TTL:   blockedTTL,
+					},
+					AAAA: rdata.AAAA{Addr: netip.IPv6Unspecified()},
+				})
+			default:
+				// NODATA for all other types -- domain exists, no records
+			}
+		}
+	}
 
 	return resp
 }

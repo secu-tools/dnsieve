@@ -290,6 +290,98 @@ response size. Memory estimates:
 For a business with 100 employees plus ~1900 servers, consider
 50,000-100,000 entries depending on available memory.
 
+## Blocking Mode
+
+When an upstream DNS server signals that a domain is blocked (malware,
+phishing, tracking, etc.), DNSieve constructs its own response to the
+client. The `blocking.mode` setting controls the format of that response.
+
+```toml
+[blocking]
+mode = "null"   # "null", "nxdomain", "nodata", or "refused"
+```
+
+All modes include an Extended DNS Error (EDE) option with info code 15
+("Blocked") per RFC 8914. The EDE extra text identifies which upstream
+service detected the block, for example: `Blocked (dns.quad9.net)`.
+
+### Modes
+
+| Mode        | Rcode    | Answer                          | Recommended |
+|-------------|----------|---------------------------------|-------------|
+| `"null"`    | NOERROR  | 0.0.0.0 (A) or :: (AAAA)       | Yes         |
+| `"nxdomain"`| NXDOMAIN | Empty                           |             |
+| `"nodata"`  | NOERROR  | Empty                           |             |
+| `"refused"` | REFUSED  | Empty                           |             |
+
+#### null (default, recommended)
+
+Returns NOERROR with a synthesized answer: `0.0.0.0` for A queries,
+`::` for AAAA queries. Other query types (MX, TXT, CNAME, SRV, etc.)
+receive NODATA (NOERROR with an empty answer section).
+
+This is the safest mode and the default recommended by both Pi-hole and
+Technitium. Connections to blocked domains fail immediately with
+"connection refused" because 0.0.0.0 (RFC 1122 Section 3.2.1.3) and ::
+(RFC 4291 Section 2.5.2) are non-routable addresses. Clients do not
+experience timeouts or retry storms.
+
+The synthesized answer uses a 10-second TTL.
+
+```toml
+[blocking]
+mode = "null"
+```
+
+#### nxdomain
+
+Returns NXDOMAIN (Name Error) with an empty answer section. Signals
+that the domain does not exist. Some clients retry NXDOMAIN responses
+more aggressively than null responses, which may increase DNS traffic.
+
+```toml
+[blocking]
+mode = "nxdomain"
+```
+
+#### nodata
+
+Returns NOERROR with an empty answer section. Signals that the domain
+exists but has no records of the requested type. Some clients accept
+NODATA more gracefully than NXDOMAIN.
+
+```toml
+[blocking]
+mode = "nodata"
+```
+
+#### refused
+
+Returns REFUSED with an empty answer section. Signals that the server
+refuses to answer the query. **Use with caution**: some clients fall back
+to another DNS resolver when they receive REFUSED, which bypasses the
+proxy entirely.
+
+```toml
+[blocking]
+mode = "refused"
+```
+
+### Choosing a Mode
+
+For most deployments, `"null"` is the best choice:
+
+- Web browsers and applications see an immediate "connection refused"
+  error instead of a slow timeout.
+- No retry storms: clients accept the response without re-querying.
+- Compatible with DNSSEC validation (NOERROR is not treated as BOGUS).
+- Both Pi-hole and Technitium independently recommend this approach as
+  their default.
+
+Use `"nxdomain"` or `"nodata"` if you have specific client software that
+handles those rcodes better for your use case. Avoid `"refused"` unless
+you understand the DNS fallback risk.
+
 ## Logging
 
 ```toml
@@ -499,6 +591,7 @@ On startup, DNSieve validates the config and reports warnings and errors:
 - DoT/DoH without TLS certificate
 - Unsupported upstream protocol
 - Empty upstream address
+- Invalid `blocking.mode` (must be null, nxdomain, nodata, or refused)
 - `cache renew_percent` out of range (must be 0-99)
 - `cache max_entries`, `blocked_ttl`, or `min_ttl` negative
 - `logging log_level` not one of debug/info/warn/error
@@ -514,3 +607,4 @@ On startup, DNSieve validates the config and reports warnings and errors:
 - DoH running over plain HTTP without TLS
 - Whitelist with `*` global wildcard
 - Negative `slow_upstream_ms` (treated as 0/disabled)
+- `blocking.mode = "refused"` (clients may fall back to another resolver)

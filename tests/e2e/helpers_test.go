@@ -664,24 +664,24 @@ func findTCPKeepalive(msg *dns.Msg) *dns.TCPKEEPALIVE {
 	return nil
 }
 
-// isBlockedIPv4 returns true if the response is a blocked response: REFUSED
-// (rcode 5) with an EDE Blocked option (RFC 8914 code 15).  The proxy returns
-// REFUSED + EDE so that DNSSEC-validating resolvers (such as Pi-hole) do not
-// classify the response as BOGUS (REFUSED bypasses dnsmasq DNSSEC validation).
+// isBlockedIPv4 returns true if the response represents a blocked A query.
+// In default "null" mode: NOERROR with 0.0.0.0 answer and EDE Blocked.
+// In other modes: EDE Blocked is the primary signal regardless of rcode.
 func isBlockedIPv4(resp *dns.Msg) bool {
 	return isBlockedResponse(resp)
 }
 
-// isBlockedIPv6 returns true if the response is a blocked response: REFUSED
-// with EDE Blocked.  Symmetric with isBlockedIPv4 -- both A and AAAA blocked
-// queries receive REFUSED + EDE so that dnsmasq DNSSEC validation is bypassed.
+// isBlockedIPv6 returns true if the response represents a blocked AAAA query.
+// In default "null" mode: NOERROR with :: answer and EDE Blocked.
+// In other modes: EDE Blocked is the primary signal regardless of rcode.
 func isBlockedIPv6(resp *dns.Msg) bool {
 	return isBlockedResponse(resp)
 }
 
-// isBlockedResponse is the canonical check: REFUSED rcode plus EDE Blocked.
+// isBlockedResponse checks for any blocking mode by looking for EDE Blocked.
+// All blocking modes (null, nxdomain, nodata, refused) include EDE code 15.
 func isBlockedResponse(resp *dns.Msg) bool {
-	if resp == nil || resp.Rcode != dns.RcodeRefused {
+	if resp == nil {
 		return false
 	}
 	return hasEDEBlocked(resp)

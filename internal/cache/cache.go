@@ -5,6 +5,7 @@
 package cache
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -85,9 +86,17 @@ func cacheKey(msg *dns.Msg) string {
 	var b strings.Builder
 	b.WriteString(strings.ToLower(q.Header().Name))
 	b.WriteByte('/')
-	b.WriteString(dns.TypeToString[qtype])
+	if s, ok := dns.TypeToString[qtype]; ok {
+		b.WriteString(s)
+	} else {
+		fmt.Fprintf(&b, "TYPE%d", qtype)
+	}
 	b.WriteByte('/')
-	b.WriteString(dns.ClassToString[q.Header().Class])
+	if s, ok := dns.ClassToString[q.Header().Class]; ok {
+		b.WriteString(s)
+	} else {
+		fmt.Fprintf(&b, "CLASS%d", q.Header().Class)
+	}
 	if hasDOBit(msg) {
 		b.WriteString("/DO")
 	}

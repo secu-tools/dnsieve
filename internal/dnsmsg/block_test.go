@@ -203,54 +203,161 @@ func TestInspectWireResponse_Invalid(t *testing.T) {
 	}
 }
 
-func TestMakeBlockedResponse_A(t *testing.T) {
+func TestMakeBlockedResponse_NullMode_A(t *testing.T) {
 	query := makeQuery("blocked.example.com", dns.TypeA)
-	resp := MakeBlockedResponse(query)
+	resp := MakeBlockedResponse(query, BlockingModeNull, "dns.quad9.net")
 
-	if resp.Rcode != dns.RcodeRefused {
-		t.Errorf("blocked A: rcode=%s, want REFUSED", dns.RcodeToString[resp.Rcode])
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("null mode A: rcode=%s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
-	if len(resp.Answer) != 0 {
-		t.Errorf("blocked A: expected no answer records, got %d", len(resp.Answer))
+	if len(resp.Answer) != 1 {
+		t.Fatalf("null mode A: expected 1 answer record, got %d", len(resp.Answer))
+	}
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatalf("null mode A: expected *dns.A, got %T", resp.Answer[0])
+	}
+	if a.Addr != netip.AddrFrom4([4]byte{0, 0, 0, 0}) {
+		t.Errorf("null mode A: addr=%s, want 0.0.0.0", a.Addr)
 	}
 	if !hasEDEBlocked(resp) {
-		t.Error("blocked A: expected EDE Blocked (code 15) in Pseudo section")
+		t.Error("null mode A: expected EDE Blocked (code 15)")
 	}
 }
 
-func TestMakeBlockedResponse_AAAA(t *testing.T) {
+func TestMakeBlockedResponse_NullMode_AAAA(t *testing.T) {
 	query := makeQuery("blocked.example.com", dns.TypeAAAA)
-	resp := MakeBlockedResponse(query)
+	resp := MakeBlockedResponse(query, BlockingModeNull, "dns.quad9.net")
 
-	if resp.Rcode != dns.RcodeRefused {
-		t.Errorf("blocked AAAA: rcode=%s, want REFUSED", dns.RcodeToString[resp.Rcode])
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("null mode AAAA: rcode=%s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
-	if len(resp.Answer) != 0 {
-		t.Errorf("blocked AAAA: expected no answer records, got %d", len(resp.Answer))
+	if len(resp.Answer) != 1 {
+		t.Fatalf("null mode AAAA: expected 1 answer record, got %d", len(resp.Answer))
+	}
+	aaaa, ok := resp.Answer[0].(*dns.AAAA)
+	if !ok {
+		t.Fatalf("null mode AAAA: expected *dns.AAAA, got %T", resp.Answer[0])
+	}
+	if aaaa.Addr != netip.IPv6Unspecified() {
+		t.Errorf("null mode AAAA: addr=%s, want ::", aaaa.Addr)
 	}
 	if !hasEDEBlocked(resp) {
-		t.Error("blocked AAAA: expected EDE Blocked (code 15) in Pseudo section")
+		t.Error("null mode AAAA: expected EDE Blocked (code 15)")
 	}
 }
 
-func TestMakeBlockedResponse_OtherType(t *testing.T) {
+func TestMakeBlockedResponse_NullMode_MX_NODATA(t *testing.T) {
 	query := makeQuery("blocked.example.com", dns.TypeMX)
-	resp := MakeBlockedResponse(query)
+	resp := MakeBlockedResponse(query, BlockingModeNull, "")
 
-	if resp.Rcode != dns.RcodeRefused {
-		t.Errorf("blocked MX: rcode=%s, want REFUSED", dns.RcodeToString[resp.Rcode])
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("null mode MX: rcode=%s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 	if len(resp.Answer) != 0 {
-		t.Errorf("blocked MX: expected no answer records, got %d", len(resp.Answer))
+		t.Errorf("null mode MX: expected no answer records (NODATA), got %d", len(resp.Answer))
 	}
 	if !hasEDEBlocked(resp) {
-		t.Error("blocked MX: expected EDE Blocked (code 15) in Pseudo section")
+		t.Error("null mode MX: expected EDE Blocked (code 15)")
 	}
 }
 
-func TestMakeBlockedResponse_EDE(t *testing.T) {
+func TestMakeBlockedResponse_NullMode_TXT_NODATA(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeTXT)
+	resp := MakeBlockedResponse(query, BlockingModeNull, "")
+
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("null mode TXT: rcode=%s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) != 0 {
+		t.Errorf("null mode TXT: expected NODATA, got %d answers", len(resp.Answer))
+	}
+}
+
+func TestMakeBlockedResponse_NXDomainMode_A(t *testing.T) {
 	query := makeQuery("blocked.example.com", dns.TypeA)
-	resp := MakeBlockedResponse(query)
+	resp := MakeBlockedResponse(query, BlockingModeNXDomain, "security.cloudflare-dns.com")
+
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("nxdomain mode A: rcode=%s, want NXDOMAIN", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) != 0 {
+		t.Errorf("nxdomain mode A: expected no answer records, got %d", len(resp.Answer))
+	}
+	if !hasEDEBlocked(resp) {
+		t.Error("nxdomain mode A: expected EDE Blocked (code 15)")
+	}
+}
+
+func TestMakeBlockedResponse_NXDomainMode_AAAA(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeAAAA)
+	resp := MakeBlockedResponse(query, BlockingModeNXDomain, "")
+
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("nxdomain mode AAAA: rcode=%s, want NXDOMAIN", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) != 0 {
+		t.Errorf("nxdomain mode AAAA: expected no answers, got %d", len(resp.Answer))
+	}
+}
+
+func TestMakeBlockedResponse_NODATAMode_A(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	resp := MakeBlockedResponse(query, BlockingModeNODATA, "dns.quad9.net")
+
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("nodata mode A: rcode=%s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) != 0 {
+		t.Errorf("nodata mode A: expected no answer records, got %d", len(resp.Answer))
+	}
+	if !hasEDEBlocked(resp) {
+		t.Error("nodata mode A: expected EDE Blocked (code 15)")
+	}
+}
+
+func TestMakeBlockedResponse_NODATAMode_AAAA(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeAAAA)
+	resp := MakeBlockedResponse(query, BlockingModeNODATA, "")
+
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("nodata mode AAAA: rcode=%s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) != 0 {
+		t.Errorf("nodata mode AAAA: expected no answers, got %d", len(resp.Answer))
+	}
+}
+
+func TestMakeBlockedResponse_RefusedMode_A(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	resp := MakeBlockedResponse(query, BlockingModeRefused, "dns.quad9.net")
+
+	if resp.Rcode != dns.RcodeRefused {
+		t.Errorf("refused mode A: rcode=%s, want REFUSED", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) != 0 {
+		t.Errorf("refused mode A: expected no answer records, got %d", len(resp.Answer))
+	}
+	if !hasEDEBlocked(resp) {
+		t.Error("refused mode A: expected EDE Blocked (code 15)")
+	}
+}
+
+func TestMakeBlockedResponse_RefusedMode_AAAA(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeAAAA)
+	resp := MakeBlockedResponse(query, BlockingModeRefused, "")
+
+	if resp.Rcode != dns.RcodeRefused {
+		t.Errorf("refused mode AAAA: rcode=%s, want REFUSED", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) != 0 {
+		t.Errorf("refused mode AAAA: expected no answers, got %d", len(resp.Answer))
+	}
+}
+
+func TestMakeBlockedResponse_EDE_WithBlockedBy(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	resp := MakeBlockedResponse(query, BlockingModeNull, "dns.quad9.net")
 
 	var ede *dns.EDE
 	for _, rr := range resp.Pseudo {
@@ -265,16 +372,48 @@ func TestMakeBlockedResponse_EDE(t *testing.T) {
 	if ede.InfoCode != dns.ExtendedErrorBlocked {
 		t.Errorf("EDE InfoCode=%d, want %d (Blocked)", ede.InfoCode, dns.ExtendedErrorBlocked)
 	}
-	if ede.ExtraText == "" {
-		t.Error("EDE ExtraText should not be empty")
+	want := "Blocked (dns.quad9.net)"
+	if ede.ExtraText != want {
+		t.Errorf("EDE ExtraText=%q, want %q", ede.ExtraText, want)
+	}
+}
+
+func TestMakeBlockedResponse_EDE_WithoutBlockedBy(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	resp := MakeBlockedResponse(query, BlockingModeNull, "")
+
+	var ede *dns.EDE
+	for _, rr := range resp.Pseudo {
+		if e, ok := rr.(*dns.EDE); ok {
+			ede = e
+			break
+		}
+	}
+	if ede == nil {
+		t.Fatal("expected EDE option in Pseudo section")
+	}
+	if ede.ExtraText != "Blocked" {
+		t.Errorf("EDE ExtraText=%q, want \"Blocked\"", ede.ExtraText)
+	}
+}
+
+func TestMakeBlockedResponse_EDE_AllModes(t *testing.T) {
+	modes := []string{BlockingModeNull, BlockingModeNXDomain, BlockingModeNODATA, BlockingModeRefused}
+	for _, mode := range modes {
+		t.Run(mode, func(t *testing.T) {
+			query := makeQuery("blocked.example.com", dns.TypeA)
+			resp := MakeBlockedResponse(query, mode, "test-upstream")
+
+			if !hasEDEBlocked(resp) {
+				t.Errorf("mode %s: expected EDE Blocked (code 15)", mode)
+			}
+		})
 	}
 }
 
 func TestMakeBlockedResponse_UDPSizeSet(t *testing.T) {
-	// UDPSize must be non-zero so the OPT record (with EDE) is included
-	// in the wire format before PrepareClientResponse sets the final value.
 	query := makeQuery("blocked.example.com", dns.TypeA)
-	resp := MakeBlockedResponse(query)
+	resp := MakeBlockedResponse(query, BlockingModeNull, "")
 
 	if resp.UDPSize == 0 {
 		t.Error("UDPSize should be non-zero so OPT record is always emitted")
@@ -284,7 +423,7 @@ func TestMakeBlockedResponse_UDPSizeSet(t *testing.T) {
 func TestMakeBlockedResponse_IDEchoed(t *testing.T) {
 	query := makeQuery("blocked.example.com", dns.TypeA)
 	query.ID = 0xABCD
-	resp := MakeBlockedResponse(query)
+	resp := MakeBlockedResponse(query, BlockingModeNull, "")
 
 	if resp.ID != query.ID {
 		t.Errorf("ID=%04x, want %04x", resp.ID, query.ID)
@@ -293,53 +432,118 @@ func TestMakeBlockedResponse_IDEchoed(t *testing.T) {
 
 func TestMakeBlockedResponse_RecursionAvailable(t *testing.T) {
 	query := makeQuery("blocked.example.com", dns.TypeA)
-	resp := MakeBlockedResponse(query)
+	resp := MakeBlockedResponse(query, BlockingModeNull, "")
 
 	if !resp.RecursionAvailable {
 		t.Error("RA bit should be set in blocked response")
 	}
 }
 
-func TestMakeBlockedResponse_NoSpoofedIP(t *testing.T) {
-	// Verify that neither 0.0.0.0 nor :: appear in any answer record.
-	query := makeQuery("blocked.example.com", dns.TypeA)
-	resp := MakeBlockedResponse(query)
+func TestMakeBlockedResponse_NullMode_CNAME_NODATA(t *testing.T) {
+	// CNAME queries should get NODATA in null mode (no synthesized records).
+	query := makeQuery("blocked.example.com", dns.TypeCNAME)
+	resp := MakeBlockedResponse(query, BlockingModeNull, "")
 
-	for _, rr := range resp.Answer {
-		switch a := rr.(type) {
-		case *dns.A:
-			if a.Addr == netip.AddrFrom4([4]byte{}) {
-				t.Error("blocked response must not include 0.0.0.0 in Answer")
-			}
-		case *dns.AAAA:
-			if a.Addr == netip.IPv6Unspecified() {
-				t.Error("blocked response must not include :: in Answer")
-			}
-		}
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("null mode CNAME: rcode=%s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) != 0 {
+		t.Errorf("null mode CNAME: expected NODATA, got %d answers", len(resp.Answer))
 	}
 }
 
-func TestMakeBlockedResponse_WireRoundTrip(t *testing.T) {
-	// Verify the response can be packed and unpacked, preserving EDE.
+func TestMakeBlockedResponse_NullMode_SRV_NODATA(t *testing.T) {
+	query := makeQuery("_sip._tcp.blocked.example.com", dns.TypeSRV)
+	resp := MakeBlockedResponse(query, BlockingModeNull, "")
+
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("null mode SRV: rcode=%s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) != 0 {
+		t.Errorf("null mode SRV: expected NODATA, got %d answers", len(resp.Answer))
+	}
+}
+
+func TestMakeBlockedResponse_DefaultMode_FallsBackToNull(t *testing.T) {
+	// An empty string mode should default to null behavior.
 	query := makeQuery("blocked.example.com", dns.TypeA)
-	resp := MakeBlockedResponse(query)
+	resp := MakeBlockedResponse(query, "", "")
 
-	if err := resp.Pack(); err != nil {
-		t.Fatalf("Pack: %v", err)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("default mode A: rcode=%s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
-	wire := make([]byte, len(resp.Data))
-	copy(wire, resp.Data)
+	if len(resp.Answer) != 1 {
+		t.Fatalf("default mode A: expected 1 answer, got %d", len(resp.Answer))
+	}
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatalf("default mode A: expected *dns.A, got %T", resp.Answer[0])
+	}
+	if a.Addr != netip.AddrFrom4([4]byte{0, 0, 0, 0}) {
+		t.Errorf("default mode A: addr=%s, want 0.0.0.0", a.Addr)
+	}
+}
 
-	got := new(dns.Msg)
-	got.Data = wire
-	if err := got.Unpack(); err != nil {
-		t.Fatalf("Unpack: %v", err)
+func TestMakeBlockedResponse_WireRoundTrip_AllModes(t *testing.T) {
+	modes := []struct {
+		mode  string
+		rcode uint16
+	}{
+		{BlockingModeNull, dns.RcodeSuccess},
+		{BlockingModeNXDomain, dns.RcodeNameError},
+		{BlockingModeNODATA, dns.RcodeSuccess},
+		{BlockingModeRefused, dns.RcodeRefused},
 	}
-	if got.Rcode != dns.RcodeRefused {
-		t.Errorf("after roundtrip rcode=%s, want REFUSED", dns.RcodeToString[got.Rcode])
+	for _, tc := range modes {
+		t.Run(tc.mode, func(t *testing.T) {
+			query := makeQuery("blocked.example.com", dns.TypeA)
+			resp := MakeBlockedResponse(query, tc.mode, "test-upstream")
+
+			if err := resp.Pack(); err != nil {
+				t.Fatalf("Pack: %v", err)
+			}
+			wire := make([]byte, len(resp.Data))
+			copy(wire, resp.Data)
+
+			got := new(dns.Msg)
+			got.Data = wire
+			if err := got.Unpack(); err != nil {
+				t.Fatalf("Unpack: %v", err)
+			}
+			if got.Rcode != tc.rcode {
+				t.Errorf("after roundtrip rcode=%s, want %s",
+					dns.RcodeToString[got.Rcode], dns.RcodeToString[tc.rcode])
+			}
+			if !hasEDEBlocked(got) {
+				t.Error("after roundtrip: EDE Blocked not preserved")
+			}
+		})
 	}
-	if !hasEDEBlocked(got) {
-		t.Error("after roundtrip: EDE Blocked not preserved in Pseudo section")
+}
+
+func TestMakeBlockedResponse_NullMode_CorrectName(t *testing.T) {
+	// Verify the synthesized answer record uses the correct query name.
+	query := makeQuery("specific.blocked.example.com", dns.TypeA)
+	resp := MakeBlockedResponse(query, BlockingModeNull, "")
+
+	if len(resp.Answer) != 1 {
+		t.Fatalf("expected 1 answer, got %d", len(resp.Answer))
+	}
+	if resp.Answer[0].Header().Name != "specific.blocked.example.com." {
+		t.Errorf("answer name=%s, want specific.blocked.example.com.",
+			resp.Answer[0].Header().Name)
+	}
+}
+
+func TestMakeBlockedResponse_NullMode_TTL(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	resp := MakeBlockedResponse(query, BlockingModeNull, "")
+
+	if len(resp.Answer) != 1 {
+		t.Fatalf("expected 1 answer, got %d", len(resp.Answer))
+	}
+	if resp.Answer[0].Header().TTL != blockedTTL {
+		t.Errorf("answer TTL=%d, want %d", resp.Answer[0].Header().TTL, blockedTTL)
 	}
 }
 
@@ -625,5 +829,187 @@ func TestInspectResponse_HasDNSSEC_NoRRSIG_OnlySOA(t *testing.T) {
 	result := InspectResponse(resp)
 	if result.HasDNSSEC {
 		t.Error("NXDOMAIN with SOA but no RRSIG should have HasDNSSEC=false")
+	}
+}
+
+// =============================================================================
+// F-02: BADCOOKIE (RFC 7873) tests
+// =============================================================================
+
+// TestInspectResponse_BADCOOKIE_TreatedAsServFail verifies that RCODE 23
+// (BADCOOKIE) is treated as a server failure so it is never cached or
+// selected as a valid upstream response.
+func TestInspectResponse_BADCOOKIE_TreatedAsServFail(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	resp := makeReply(query, int(dns.RcodeBadCookie))
+
+	result := InspectResponse(resp)
+	if !result.ServFail {
+		t.Error("BADCOOKIE should be treated as ServFail")
+	}
+	if result.Blocked {
+		t.Error("BADCOOKIE should not be treated as blocked")
+	}
+}
+
+// TestInspectResponse_BADCOOKIE_NotBlocked verifies BADCOOKIE is not
+// misclassified as a block signal.
+func TestInspectResponse_BADCOOKIE_NotBlocked(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	resp := makeReply(query, int(dns.RcodeBadCookie))
+	// Add some answer records to ensure the block-IP check path isn't reached
+	resp.Answer = append(resp.Answer, &dns.A{
+		Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300},
+		A:   rdata.A{Addr: netip.MustParseAddr("93.184.216.34")},
+	})
+
+	result := InspectResponse(resp)
+	if !result.ServFail {
+		t.Error("BADCOOKIE should be ServFail even with answer records")
+	}
+	if result.Blocked {
+		t.Error("BADCOOKIE should not be blocked")
+	}
+}
+
+// TestInspectResponse_BADCOOKIE_HasDNSSEC_False verifies BADCOOKIE does not
+// trigger DNSSEC detection.
+func TestInspectResponse_BADCOOKIE_HasDNSSEC_False(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	resp := makeReply(query, int(dns.RcodeBadCookie))
+	resp.AuthenticatedData = true
+
+	result := InspectResponse(resp)
+	if result.HasDNSSEC {
+		t.Error("BADCOOKIE response should not have HasDNSSEC=true")
+	}
+}
+
+// =============================================================================
+// Additional InspectResponse edge cases
+// =============================================================================
+
+// TestInspectResponse_FORMERR verifies format error responses are not
+// classified as blocked or ServFail.
+func TestInspectResponse_FORMERR(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	resp := makeReply(query, dns.RcodeFormatError)
+
+	result := InspectResponse(resp)
+	if result.ServFail {
+		t.Error("FORMERR should not be ServFail")
+	}
+	if result.Blocked {
+		t.Error("FORMERR should not be blocked")
+	}
+	if result.NXDomain {
+		t.Error("FORMERR should not be NXDomain")
+	}
+}
+
+// TestInspectResponse_NOTIMPL verifies NOTIMPL responses.
+func TestInspectResponse_NOTIMPL(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	resp := makeReply(query, dns.RcodeNotImplemented)
+
+	result := InspectResponse(resp)
+	if result.ServFail {
+		t.Error("NOTIMPL should not be ServFail")
+	}
+	if result.Blocked {
+		t.Error("NOTIMPL should not be blocked")
+	}
+}
+
+// TestAllServersAgree_MixedGenuineAndBlocked verifies that AllServersAgree
+// returns false when responses disagree about block status.
+func TestAllServersAgree_MixedGenuineAndBlocked(t *testing.T) {
+	// One genuine NXDOMAIN (with SOA), one blocked NXDOMAIN (without SOA)
+	results := []InspectResult{
+		{NXDomain: true, Blocked: false}, // genuine
+		{NXDomain: true, Blocked: true},  // blocked
+	}
+	if AllServersAgree(results) {
+		t.Error("servers should not agree when one is blocked and one is genuine")
+	}
+}
+
+// TestAllServersAgree_AllGenuine verifies all genuine NXDOMAINs agree.
+func TestAllServersAgree_AllGenuine(t *testing.T) {
+	results := []InspectResult{
+		{NXDomain: true, Blocked: false},
+		{NXDomain: true, Blocked: false},
+	}
+	if !AllServersAgree(results) {
+		t.Error("servers should agree when all are genuine NXDOMAIN")
+	}
+}
+
+// TestExtractMinTTL_EmptyMessage verifies ExtractMinTTL returns 0 for
+// messages with no records.
+func TestExtractMinTTL_EmptyMessage(t *testing.T) {
+	msg := new(dns.Msg)
+	if ttl := ExtractMinTTL(msg); ttl != 0 {
+		t.Errorf("expected 0 for empty message, got %d", ttl)
+	}
+}
+
+// TestExtractMinTTL_MultipleRecords verifies min TTL extraction.
+func TestExtractMinTTL_MultipleRecords(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	resp := makeReply(query, dns.RcodeSuccess,
+		&dns.A{
+			Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300},
+			A:   rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
+		},
+		&dns.A{
+			Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 60},
+			A:   rdata.A{Addr: netip.MustParseAddr("5.6.7.8")},
+		},
+	)
+	if ttl := ExtractMinTTL(resp); ttl != 60 {
+		t.Errorf("expected 60, got %d", ttl)
+	}
+}
+
+// TestMakeBlockedResponse_PreservesQueryID verifies the blocked response
+// carries the query's transaction ID.
+func TestMakeBlockedResponse_PreservesQueryID(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	query.ID = 12345
+
+	resp := MakeBlockedResponse(query, BlockingModeNull, "test-upstream")
+	if resp.ID != 12345 {
+		t.Errorf("expected ID=12345, got %d", resp.ID)
+	}
+}
+
+// TestMakeBlockedResponse_HasEDERecord verifies that blocked responses include
+// an EDE pseudo-record (RFC 8914).
+func TestMakeBlockedResponse_HasEDERecord(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	resp := MakeBlockedResponse(query, BlockingModeNull, "")
+
+	hasEDE := false
+	for _, rr := range resp.Pseudo {
+		if _, ok := rr.(*dns.EDE); ok {
+			hasEDE = true
+			break
+		}
+	}
+	if !hasEDE {
+		t.Error("blocked response should include an EDE record")
+	}
+}
+
+// TestMakeBlockedResponse_InvalidMode verifies that an unknown blocking mode
+// defaults to null-route (RcodeSuccess with 0.0.0.0 answer).
+func TestMakeBlockedResponse_InvalidMode(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	resp := MakeBlockedResponse(query, "invalid_mode", "")
+
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("unknown mode should default to null-route (NOERROR), got %s",
+			dns.RcodeToString[resp.Rcode])
 	}
 }

@@ -753,3 +753,308 @@ func TestCacheKey_DOBitSegregation(t *testing.T) {
 		t.Error("DO=0 query should still return the DO=0 cache entry")
 	}
 }
+
+// =============================================================================
+// F-01: Cache key collision tests for unknown RR types/classes
+// =============================================================================
+
+// TestCacheKey_UnknownTypesAreDistinct verifies that two queries with different
+// unknown RR types produce distinct cache keys and do not collide.
+func TestCacheKey_UnknownTypesAreDistinct(t *testing.T) {
+	c := New(100, 3600, 5, 0)
+
+	// Use two different unknown type numbers — must construct manually
+	// since dnsutil.SetQuestion returns nil for unknown types.
+	q1 := new(dns.Msg)
+	q1.ID = dns.ID()
+	q1.RecursionDesired = true
+	q1.Question = []dns.RR{&dns.RFC3597{
+		Hdr:     dns.Header{Name: "unknown.example.com.", Class: dns.ClassINET},
+		RFC3597: rdata.RFC3597{RRType: 65534},
+	}}
+
+	q2 := new(dns.Msg)
+	q2.ID = dns.ID()
+	q2.RecursionDesired = true
+	q2.Question = []dns.RR{&dns.RFC3597{
+		Hdr:     dns.Header{Name: "unknown.example.com.", Class: dns.ClassINET},
+		RFC3597: rdata.RFC3597{RRType: 65533},
+	}}
+
+	resp1 := new(dns.Msg)
+	dnsutil.SetReply(resp1, q1)
+	c.Put(q1, resp1, false)
+
+	// q2 should miss; it must not collide with q1.
+	if entry, _ := c.Get(q2); entry != nil {
+		t.Error("different unknown types must not share cache entries")
+	}
+
+	resp2 := new(dns.Msg)
+	dnsutil.SetReply(resp2, q2)
+	c.Put(q2, resp2, false)
+
+	if c.Len() != 2 {
+		t.Errorf("expected 2 entries for distinct unknown types, got %d", c.Len())
+	}
+}
+
+// TestCacheKey_UnknownClassesAreDistinct verifies that unknown DNS classes
+// produce distinct cache keys.
+func TestCacheKey_UnknownClassesAreDistinct(t *testing.T) {
+	c := New(100, 3600, 5, 0)
+
+	q1 := new(dns.Msg)
+	q1.ID = 1
+	q1.Question = []dns.RR{&dns.RFC3597{
+		Hdr:     dns.Header{Name: "classtest.example.com.", Class: 65534},
+		RFC3597: rdata.RFC3597{RRType: dns.TypeA},
+	}}
+
+	q2 := new(dns.Msg)
+	q2.ID = 2
+	q2.Question = []dns.RR{&dns.RFC3597{
+		Hdr:     dns.Header{Name: "classtest.example.com.", Class: 65533},
+		RFC3597: rdata.RFC3597{RRType: dns.TypeA},
+	}}
+
+	resp1 := new(dns.Msg)
+	dnsutil.SetReply(resp1, q1)
+	c.Put(q1, resp1, false)
+
+	if entry, _ := c.Get(q2); entry != nil {
+		t.Error("different unknown classes must not share cache entries")
+	}
+}
+
+// TestCacheKey_KnownVsUnknownType verifies that a known type like A (1) and
+// an unknown type produce separate cache keys with non-empty type components.
+func TestCacheKey_KnownVsUnknownType(t *testing.T) {
+	c := New(100, 3600, 5, 0)
+
+	qKnown := makeQuery("mixed.example.com", dns.TypeA)
+	qUnknown := new(dns.Msg)
+	qUnknown.ID = dns.ID()
+	qUnknown.RecursionDesired = true
+	qUnknown.Question = []dns.RR{&dns.RFC3597{
+		Hdr:     dns.Header{Name: "mixed.example.com.", Class: dns.ClassINET},
+		RFC3597: rdata.RFC3597{RRType: 65500},
+	}}
+
+	resp := makeResp(qKnown, 300)
+	c.Put(qKnown, resp, false)
+
+	if entry, _ := c.Get(qUnknown); entry != nil {
+		t.Error("known vs unknown type must not share cache entries")
+	}
+}
+
+// TestCache_GetPut_UnknownTypeNoCollision is a round-trip test storing and
+// retrieving entries with unknown RR types.
+func makeUnknownQuery(name string, qtype uint16) *dns.Msg {
+	q := new(dns.Msg)
+	q.ID = dns.ID()
+	q.RecursionDesired = true
+	q.Question = []dns.RR{&dns.RFC3597{
+		Hdr:     dns.Header{Name: dnsutil.Fqdn(name), Class: dns.ClassINET},
+		RFC3597: rdata.RFC3597{RRType: qtype},
+	}}
+	return q
+}
+
+func TestCache_GetPut_UnknownTypeNoCollision(t *testing.T) {
+	c := New(100, 3600, 5, 0)
+
+	for _, qtype := range []uint16{65534, 65533, 65000, 64000} {
+		q := makeUnknownQuery("rr-test.example.com", qtype)
+		resp := new(dns.Msg)
+		dnsutil.SetReply(resp, q)
+		c.Put(q, resp, false)
+	}
+
+	if c.Len() != 4 {
+		t.Errorf("expected 4 entries for 4 distinct unknown types, got %d", c.Len())
+	}
+
+	for _, qtype := range []uint16{65534, 65533, 65000, 64000} {
+		q := makeUnknownQuery("rr-test.example.com", qtype)
+		if entry, _ := c.Get(q); entry == nil {
+			t.Errorf("cache miss for unknown type %d", qtype)
+		}
+	}
+}
+
+// =============================================================================
+// F-07: Negative caching TTL tests
+// =============================================================================
+
+// TestComputeTTL_NXDOMAINWithSOA verifies that NXDOMAIN responses with SOA
+// records use the SOA TTL for cache duration.
+func TestComputeTTL_NXDOMAINWithSOA(t *testing.T) {
+	c := New(100, 3600, 5, 0)
+
+	query := makeQuery("nxdomain.example.com", dns.TypeA)
+	resp := new(dns.Msg)
+	dnsutil.SetReply(resp, query)
+	resp.Rcode = dns.RcodeNameError
+	resp.Ns = append(resp.Ns, &dns.SOA{
+		Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 900},
+	})
+
+	ttl := c.computeTTL(resp, false)
+	if ttl < 5*time.Second {
+		t.Errorf("expected TTL >= minTTL for NXDOMAIN with SOA, got %v", ttl)
+	}
+	// SOA TTL is 900s, should be used as basis.
+	if ttl > 901*time.Second {
+		t.Errorf("expected TTL <= 901s from SOA, got %v", ttl)
+	}
+}
+
+// TestComputeTTL_NoRecords verifies fallback to minTTL when no records present.
+func TestComputeTTL_NoRecords(t *testing.T) {
+	c := New(100, 3600, 5, 0)
+
+	query := makeQuery("nodata.example.com", dns.TypeA)
+	resp := new(dns.Msg)
+	dnsutil.SetReply(resp, query)
+
+	ttl := c.computeTTL(resp, false)
+	if ttl != 5*time.Second {
+		t.Errorf("expected minTTL fallback (5s) for no-record response, got %v", ttl)
+	}
+}
+
+// TestComputeTTL_Blocked verifies blocked responses use blockedTTL.
+func TestComputeTTL_Blocked(t *testing.T) {
+	c := New(100, 3600, 5, 0)
+
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	resp := makeResp(query, 300)
+
+	ttl := c.computeTTL(resp, true)
+	if ttl != 3600*time.Second {
+		t.Errorf("expected blockedTTL (3600s) for blocked resp, got %v", ttl)
+	}
+}
+
+// TestComputeTTL_MinTTLFloor verifies that minTTL floor is enforced.
+func TestComputeTTL_MinTTLFloor(t *testing.T) {
+	c := New(100, 3600, 60, 0) // minTTL=60s
+
+	query := makeQuery("short-ttl.example.com", dns.TypeA)
+	resp := makeResp(query, 5) // 5s TTL, below minTTL
+
+	ttl := c.computeTTL(resp, false)
+	if ttl != 60*time.Second {
+		t.Errorf("expected minTTL floor (60s), got %v", ttl)
+	}
+}
+
+// TestComputeTTL_MultipleRecords verifies minimum TTL is used across records.
+func TestComputeTTL_MultipleRecords(t *testing.T) {
+	c := New(100, 3600, 5, 0)
+
+	query := makeQuery("multi.example.com", dns.TypeA)
+	resp := new(dns.Msg)
+	dnsutil.SetReply(resp, query)
+	resp.Answer = append(resp.Answer,
+		&dns.A{
+			Hdr: dns.Header{Name: "multi.example.com.", Class: dns.ClassINET, TTL: 300},
+		},
+		&dns.A{
+			Hdr: dns.Header{Name: "multi.example.com.", Class: dns.ClassINET, TTL: 60},
+		},
+	)
+
+	ttl := c.computeTTL(resp, false)
+	if ttl != 60*time.Second {
+		t.Errorf("expected min TTL (60s), got %v", ttl)
+	}
+}
+
+// =============================================================================
+// Eviction tests
+// =============================================================================
+
+// TestEvictOldest_PrefersExpired verifies that eviction first removes expired
+// entries before falling back to earliest-expiring.
+func TestEvictOldest_PrefersExpired(t *testing.T) {
+	c := New(3, 1, 1, 0)
+
+	// Insert 3 entries with very short TTLs
+	for i := 0; i < 3; i++ {
+		q := makeQuery(fmt.Sprintf("evict%d.example.com", i), dns.TypeA)
+		r := makeResp(q, 1)
+		c.Put(q, r, false)
+	}
+
+	// Wait for entries to expire
+	time.Sleep(1200 * time.Millisecond)
+
+	// Insert a new entry; should evict an expired one
+	q := makeQuery("new.example.com", dns.TypeA)
+	r := makeResp(q, 300)
+	c.Put(q, r, false)
+
+	if c.Len() > 3 {
+		t.Errorf("expected at most 3 entries after eviction, got %d", c.Len())
+	}
+
+	// The new entry should be retrievable
+	if entry, _ := c.Get(q); entry == nil {
+		t.Error("new entry should be in cache after eviction")
+	}
+}
+
+// =============================================================================
+// Concurrent safety tests
+// =============================================================================
+
+// TestConcurrentPutGetFlush verifies no races under mixed operations.
+func TestConcurrentPutGetFlush(t *testing.T) {
+	c := New(100, 3600, 5, 25)
+	c.SetRefreshFunc(func(q *dns.Msg) {
+		resp := makeResp(q, 300)
+		c.Put(q, resp, false)
+	})
+
+	done := make(chan struct{})
+
+	// Writers
+	for i := 0; i < 5; i++ {
+		go func(n int) {
+			defer func() { done <- struct{}{} }()
+			for j := 0; j < 50; j++ {
+				q := makeQuery(fmt.Sprintf("cc%d-%d.example.com", n, j), dns.TypeA)
+				r := makeResp(q, 300)
+				c.Put(q, r, j%3 == 0)
+			}
+		}(i)
+	}
+
+	// Readers
+	for i := 0; i < 5; i++ {
+		go func(n int) {
+			defer func() { done <- struct{}{} }()
+			for j := 0; j < 50; j++ {
+				q := makeQuery(fmt.Sprintf("cc%d-%d.example.com", n, j), dns.TypeA)
+				entry, _ := c.Get(q)
+				if entry != nil {
+					_ = MakeCachedResponse(q, entry)
+				}
+			}
+		}(i)
+	}
+
+	// Flusher
+	go func() {
+		defer func() { done <- struct{}{} }()
+		time.Sleep(10 * time.Millisecond)
+		c.Flush()
+	}()
+
+	for i := 0; i < 11; i++ {
+		<-done
+	}
+}

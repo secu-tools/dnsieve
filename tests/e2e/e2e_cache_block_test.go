@@ -6,6 +6,7 @@
 package e2e
 
 import (
+	"net/netip"
 	"testing"
 	"time"
 
@@ -58,7 +59,7 @@ func TestE2E_Cache_Disabled(t *testing.T) {
 }
 
 // TestE2E_Cache_Blocked verifies that blocked domains are cached.
-// A blocked response is NXDOMAIN + EDE Blocked (RFC 8914 code 15).
+// Default null mode: NOERROR + 0.0.0.0/:: + EDE Blocked (RFC 8914 code 15).
 func TestE2E_Cache_Blocked(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
@@ -76,7 +77,7 @@ func TestE2E_Cache_Blocked(t *testing.T) {
 	blocked2 := isBlockedIPv4(resp2)
 
 	if blocked1 && blocked2 {
-		t.Logf("cache blocked: confirmed NXDOMAIN+EDE, second elapsed=%v", elapsed)
+		t.Logf("cache blocked: confirmed EDE Blocked, second elapsed=%v", elapsed)
 	} else if !blocked1 {
 		t.Logf("info: %s not blocked by configured upstreams", knownBlockedDomain)
 	}
@@ -186,8 +187,9 @@ func TestE2E_Cache_NXDOMAINIsCached(t *testing.T) {
 // Block detection
 // ============================================================
 
-// TestE2E_Block_IPv4 verifies a known blocked domain returns NXDOMAIN with
-// EDE Blocked (RFC 8914 code 15), not 0.0.0.0.
+// TestE2E_Block_IPv4 verifies a known blocked domain returns a blocked
+// response with EDE Blocked (RFC 8914 code 15). Default null mode responds
+// with NOERROR + 0.0.0.0.
 func TestE2E_Block_IPv4(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
@@ -196,14 +198,15 @@ func TestE2E_Block_IPv4(t *testing.T) {
 
 	resp := queryUDP(t, port, knownBlockedDomain, dns.TypeA)
 	if isBlockedIPv4(resp) {
-		t.Logf("block IPv4: confirmed NXDOMAIN + EDE Blocked")
+		t.Logf("block IPv4: confirmed EDE Blocked (rcode=%s)", dns.RcodeToString[resp.Rcode])
 	} else {
 		t.Logf("info: %s not blocked (depends on upstream)", knownBlockedDomain)
 	}
 }
 
-// TestE2E_Block_IPv6 verifies a blocked domain returns NXDOMAIN with EDE
-// Blocked for AAAA queries, not ::.
+// TestE2E_Block_IPv6 verifies a blocked domain returns a blocked response
+// with EDE Blocked for AAAA queries. Default null mode responds with
+// NOERROR + ::.
 func TestE2E_Block_IPv6(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
@@ -212,14 +215,15 @@ func TestE2E_Block_IPv6(t *testing.T) {
 
 	resp := queryUDP(t, port, knownBlockedDomain, dns.TypeAAAA)
 	if isBlockedIPv6(resp) {
-		t.Logf("block IPv6: confirmed NXDOMAIN + EDE Blocked")
+		t.Logf("block IPv6: confirmed EDE Blocked (rcode=%s)", dns.RcodeToString[resp.Rcode])
 	} else {
 		t.Logf("info: %s AAAA not blocked", knownBlockedDomain)
 	}
 }
 
 // TestE2E_Block_NeverLeaked verifies a blocked domain response never contains
-// real answer records (the proxy now returns NXDOMAIN with no Answer section).
+// real routable IP addresses. In default null mode the answer contains
+// 0.0.0.0 (A) or :: (AAAA) which are non-routable placeholders.
 func TestE2E_Block_NeverLeaked(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
@@ -230,9 +234,13 @@ func TestE2E_Block_NeverLeaked(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		resp := queryUDP(t, port, knownBlockedDomain, dns.TypeA)
 		if isBlockedResponse(resp) {
-			if len(resp.Answer) != 0 {
-				t.Errorf("attempt %d: blocked NXDOMAIN response contains %d unexpected answer record(s)",
-					i+1, len(resp.Answer))
+			for _, rr := range resp.Answer {
+				if a, ok := rr.(*dns.A); ok {
+					if a.Addr != netip.AddrFrom4([4]byte{0, 0, 0, 0}) {
+						t.Errorf("attempt %d: blocked response leaked real IP %s",
+							i+1, a.Addr)
+					}
+				}
 			}
 		}
 	}

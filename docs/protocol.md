@@ -91,7 +91,79 @@ verbatim.
 - Configurable: strip (default), forward, or substitute with a fixed subnet
 
 ### Cookies (RFC 7873)
-- Configurable: strip or reoriginate per-upstream (default: reoriginate)
+
+Configurable: `"strip"` or `"reoriginate"` per-upstream (default: `"reoriginate"`).
+
+#### strip mode
+
+All COOKIE EDNS0 options are removed from queries forwarded to upstreams and
+from responses sent back to clients. No cookie state is maintained.
+
+#### reoriginate mode
+
+The proxy acts as the DNS cookie originator. The client's own cookies are always
+discarded; the proxy generates and maintains its own cookies on behalf of clients.
+
+**Cookie state storage**
+
+Cookie state is held in an in-memory map inside the EDNS middleware. Two maps
+are maintained per `Resolver` instance:
+
+- `clients` -- maps upstream address (e.g. `"1.1.1.1:853"`) to the proxy's own
+  8-byte (16 hex-char) client cookie for that upstream. Generated once per
+  upstream using `crypto/rand` on first use; stable for the lifetime of the
+  process. Never written to disk.
+- `servers` -- maps upstream address to the most recently received server cookie
+  (hex-encoded). Populated from upstream responses; cleared on process restart.
+
+Both maps are protected by a `sync.RWMutex`.
+
+**Query path**
+
+When `PrepareUpstreamQuery` builds the OPT record for an upstream:
+
+1. The proxy's stable client cookie for that upstream is looked up (or generated).
+2. If a server cookie has been stored for that upstream from a previous response,
+   it is appended after the client cookie.
+3. A `COOKIE` EDNS0 option is added: `<client-cookie(16 hex)>[<server-cookie>]`.
+4. The incoming client's COOKIE option is not forwarded.
+
+**Response path**
+
+When `ProcessResponseCookieOnly` is called immediately after each upstream
+responds (correct upstream address is available at that point):
+
+1. If the response contains a `COOKIE` option with a valid server cookie --
+   total length 32-80 hex chars (16 client + 16-64 server, i.e. 8-32 bytes per
+   RFC 7873 s4.1) -- the server-cookie portion is stored for that upstream.
+2. Server cookies outside the valid length range are silently dropped.
+
+When `ProcessUpstreamResponse` is called on the selected best response:
+
+1. All `COOKIE` options are stripped before the response is forwarded to clients.
+   Clients never see the proxy's upstream cookie state.
+
+**RFC 7873 compliance notes**
+
+| Requirement | Status |
+|---|---|
+| Client cookie exactly 8 bytes (RFC 7873 s4.1) | Implemented |
+| Client cookie stable per upstream | Implemented |
+| Server cookie 8-32 bytes validated on receipt | Implemented |
+| Client cookie included in every upstream query | Implemented |
+| Server cookie included when one is known | Implemented |
+| Cookies stripped from responses to clients | Implemented |
+| BADCOOKIE (RCODE 23) retry with fresh cookie | Not implemented (see below) |
+
+**Known limitation: BADCOOKIE handling**
+
+RFC 7873 Section 5.4 requires that if an upstream returns RCODE 23 (BADCOOKIE),
+the client must not use the answer and must retry the query. The current
+implementation does not detect RCODE 23 from upstreams. A BADCOOKIE response is
+treated as a server error (excluded from the consensus result). In practice this
+is rare: it only occurs when a server rotates its secret and the stored server
+cookie becomes stale. The next query after the bad response will carry only the
+client cookie (no stale server cookie), and normal operation resumes.
 
 ### NSID (RFC 5001)
 - Configurable: strip (default), forward, or substitute with proxy's own ID
@@ -126,7 +198,7 @@ DNSieve detects blocked domains by inspecting upstream responses:
 
 ### Consensus Algorithm
 
-1. If **any** upstream signals blocked -> cache blocked, return REFUSED + EDE Blocked
+1. If **any** upstream signals blocked -> cache blocked, return blocked response
 2. If not blocked, among the valid responses prefer a DNSSEC response (one that
    carries RRSIG records in the Answer or Authority section, or has AD=1) over a
    plain unsigned response. The lowest-index DNSSEC response wins; if no upstream
@@ -137,15 +209,33 @@ DNSieve detects blocked domains by inspecting upstream responses:
 
 ## Blocked Response Format
 
-Blocked responses return:
-- `RCODE` = `REFUSED` (rcode 5) -- bypasses DNSSEC validation in dnsmasq (Pi-hole).
-  dnsmasq's `process_reply()` short-circuits on any rcode that is not NOERROR or
-  NXDOMAIN, so REFUSED is never subjected to BOGUS detection. Pi-hole FTL's own
-  `answer_disallowed()` uses the same pattern (REFUSED + EDE Blocked).
-- `Answer` section is **empty** -- no spoofed IP is returned
-- `Pseudo` section contains an **Extended DNS Error** (EDE) option with
-  `InfoCode = 15` (Blocked) per RFC 8914 -- supporting clients such as
-  Pi-hole FTL >= 5.18 classify this as "Blocked (upstream)" rather than an error
+The response format depends on the configured `blocking.mode`
+(see [configuration.md](configuration.md#blocking-mode)):
+
+| Mode        | Rcode    | Answer                          |
+|-------------|----------|---------------------------------|
+| `null`      | NOERROR  | 0.0.0.0 (A), :: (AAAA), empty (other types) |
+| `nxdomain`  | NXDOMAIN | Empty                           |
+| `nodata`    | NOERROR  | Empty                           |
+| `refused`   | REFUSED  | Empty                           |
+
+All modes include:
+- An **Extended DNS Error** (EDE) option with `InfoCode = 15` (Blocked)
+  per RFC 8914. Supporting clients such as Pi-hole FTL >= 5.18 classify
+  this as "Blocked (upstream)" rather than an error.
+- EDE extra text identifying the upstream that detected the block,
+  for example: `Blocked (dns.quad9.net)`.
+
+The default mode is `null` (NOERROR with 0.0.0.0/::), which is the
+recommended default by both Pi-hole and Technitium. Connections to
+blocked domains fail immediately with "connection refused" because
+0.0.0.0 and :: are non-routable addresses. Clients do not experience
+timeouts or retry storms.
+
+In `null` mode, the synthesized answer record uses a 10-second TTL.
+Query types other than A and AAAA receive NODATA (NOERROR with empty
+answer), since there is no meaningful null address to return for
+record types like MX, TXT, CNAME, or SRV.
 
 ## Cache Behavior
 

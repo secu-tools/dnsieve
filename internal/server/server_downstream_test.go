@@ -485,8 +485,8 @@ func TestServePlain_CacheHit(t *testing.T) {
 }
 
 // TestServePlain_BlockedQuery verifies that when the upstream signals a blocked
-// domain (0.0.0.0 answer), the listener returns REFUSED with EDE Blocked to
-// the client, bypassing DNSSEC validation on validating resolvers (dnsmasq).
+// domain (0.0.0.0 answer), the listener returns the configured blocking mode
+// response. Default null mode: NOERROR with 0.0.0.0 answer and EDE Blocked.
 func TestServePlain_BlockedQuery(t *testing.T) {
 	q := makeQuery("blocked.example.com", dns.TypeA)
 	handler := newTestHandler(t, []*dns.Msg{makeBlockedResp(q)})
@@ -499,11 +499,8 @@ func TestServePlain_BlockedQuery(t *testing.T) {
 		fmt.Sprintf("127.0.0.1:%d", port),
 		makeQuery("blocked.example.com", dns.TypeA),
 	)
-	if resp.Rcode != dns.RcodeRefused {
-		t.Fatalf("blocked UDP: rcode=%s, want REFUSED", dns.RcodeToString[resp.Rcode])
-	}
-	if len(resp.Answer) != 0 {
-		t.Errorf("blocked UDP: expected no answer records, got %d", len(resp.Answer))
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("blocked UDP: rcode=%s, want NOERROR (null mode)", dns.RcodeToString[resp.Rcode])
 	}
 	if !hasEDEBlocked(resp) {
 		t.Error("blocked UDP: expected EDE Blocked (RFC 8914 code 15) in response")
@@ -569,8 +566,8 @@ func TestServeDoT_SuccessfulQuery(t *testing.T) {
 	}
 }
 
-// TestServeDoT_BlockedQuery verifies that the DoT listener returns REFUSED
-// with EDE Blocked for a blocked domain.
+// TestServeDoT_BlockedQuery verifies that the DoT listener returns the
+// configured blocking mode response. Default null mode: NOERROR with EDE Blocked.
 func TestServeDoT_BlockedQuery(t *testing.T) {
 	q := makeQuery("blocked.example.com", dns.TypeA)
 	handler := newTestHandler(t, []*dns.Msg{makeBlockedResp(q)})
@@ -583,11 +580,8 @@ func TestServeDoT_BlockedQuery(t *testing.T) {
 		t, fmt.Sprintf("127.0.0.1:%d", port),
 		makeQuery("blocked.example.com", dns.TypeA), cert.pool,
 	)
-	if resp.Rcode != dns.RcodeRefused {
-		t.Fatalf("DoT blocked: rcode=%s, want REFUSED", dns.RcodeToString[resp.Rcode])
-	}
-	if len(resp.Answer) != 0 {
-		t.Errorf("DoT blocked: expected no answer records, got %d", len(resp.Answer))
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("DoT blocked: rcode=%s, want NOERROR (null mode)", dns.RcodeToString[resp.Rcode])
 	}
 	if !hasEDEBlocked(resp) {
 		t.Error("DoT blocked: expected EDE Blocked (RFC 8914 code 15) in response")
@@ -670,8 +664,8 @@ func TestServeDoH_GET_SuccessPath(t *testing.T) {
 	}
 }
 
-// TestServeDoH_BlockedQuery verifies the DoH listener returns REFUSED with
-// EDE Blocked for a blocked domain.
+// TestServeDoH_BlockedQuery verifies the DoH listener returns the configured
+// blocking mode response. Default null mode: NOERROR with EDE Blocked.
 func TestServeDoH_BlockedQuery(t *testing.T) {
 	q := makeQuery("blocked.example.com", dns.TypeA)
 	handler := newTestHandler(t, []*dns.Msg{makeBlockedResp(q)})
@@ -681,11 +675,8 @@ func TestServeDoH_BlockedQuery(t *testing.T) {
 
 	hc := &http.Client{Timeout: 5 * time.Second}
 	resp := sendDoHPost(t, baseURL, makeQuery("blocked.example.com", dns.TypeA), hc)
-	if resp.Rcode != dns.RcodeRefused {
-		t.Fatalf("DoH blocked: rcode=%s, want REFUSED", dns.RcodeToString[resp.Rcode])
-	}
-	if len(resp.Answer) != 0 {
-		t.Errorf("DoH blocked: expected no answer records, got %d", len(resp.Answer))
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("DoH blocked: rcode=%s, want NOERROR (null mode)", dns.RcodeToString[resp.Rcode])
 	}
 	if !hasEDEBlocked(resp) {
 		t.Error("DoH blocked: expected EDE Blocked (RFC 8914 code 15) in response")
@@ -812,7 +803,7 @@ func TestServeDoH_HTTPS_POST(t *testing.T) {
 }
 
 // TestServeDoH_HTTPS_BlockedQuery verifies the HTTPS DoH listener correctly
-// returns REFUSED with EDE Blocked for a blocked domain.
+// returns the configured blocking mode response with EDE Blocked.
 func TestServeDoH_HTTPS_BlockedQuery(t *testing.T) {
 	q := makeQuery("blocked.example.com", dns.TypeA)
 	handler := newTestHandler(t, []*dns.Msg{makeBlockedResp(q)})
@@ -831,20 +822,17 @@ func TestServeDoH_HTTPS_BlockedQuery(t *testing.T) {
 		},
 	}
 	resp := sendDoHPost(t, baseURL, makeQuery("blocked.example.com", dns.TypeA), hc)
-	if resp.Rcode != dns.RcodeRefused {
-		t.Fatalf("HTTPS DoH blocked: rcode=%s, want REFUSED", dns.RcodeToString[resp.Rcode])
-	}
-	if len(resp.Answer) != 0 {
-		t.Errorf("HTTPS DoH blocked: expected no answer records, got %d", len(resp.Answer))
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("HTTPS DoH blocked: rcode=%s, want NOERROR (null mode)", dns.RcodeToString[resp.Rcode])
 	}
 	if !hasEDEBlocked(resp) {
 		t.Error("HTTPS DoH blocked: expected EDE Blocked (RFC 8914 code 15) in response")
 	}
 }
 
-// TestServePlain_BlockedAAAA_REFUSED verifies that a blocked AAAA query also
-// results in REFUSED with EDE Blocked (no :: answer).
-func TestServePlain_BlockedAAAA_REFUSED(t *testing.T) {
+// TestServePlain_BlockedAAAA verifies that a blocked AAAA query returns
+// the configured blocking mode response with EDE Blocked.
+func TestServePlain_BlockedAAAA(t *testing.T) {
 	q := makeQuery("blocked6.example.com", dns.TypeAAAA)
 
 	// Simulate an upstream returning :: for a blocked AAAA query.
@@ -864,11 +852,8 @@ func TestServePlain_BlockedAAAA_REFUSED(t *testing.T) {
 		fmt.Sprintf("127.0.0.1:%d", port),
 		makeQuery("blocked6.example.com", dns.TypeAAAA),
 	)
-	if resp.Rcode != dns.RcodeRefused {
-		t.Fatalf("blocked AAAA UDP: rcode=%s, want REFUSED", dns.RcodeToString[resp.Rcode])
-	}
-	if len(resp.Answer) != 0 {
-		t.Errorf("blocked AAAA UDP: expected no answer records, got %d", len(resp.Answer))
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("blocked AAAA UDP: rcode=%s, want NOERROR (null mode)", dns.RcodeToString[resp.Rcode])
 	}
 	if !hasEDEBlocked(resp) {
 		t.Error("blocked AAAA UDP: expected EDE Blocked (code 15)")
@@ -888,17 +873,17 @@ func TestServePlain_BlockedEDE_TCP(t *testing.T) {
 		fmt.Sprintf("127.0.0.1:%d", port),
 		makeQuery("blocked.example.com", dns.TypeA),
 	)
-	if resp.Rcode != dns.RcodeRefused {
-		t.Fatalf("blocked TCP: rcode=%s, want REFUSED", dns.RcodeToString[resp.Rcode])
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("blocked TCP: rcode=%s, want NOERROR (null mode)", dns.RcodeToString[resp.Rcode])
 	}
 	if !hasEDEBlocked(resp) {
 		t.Error("blocked TCP: expected EDE Blocked (code 15)")
 	}
 }
 
-// TestServePlain_BlockedCached_REFUSED verifies that a blocked domain served
-// from cache still returns REFUSED with EDE Blocked.
-func TestServePlain_BlockedCached_REFUSED(t *testing.T) {
+// TestServePlain_BlockedCached verifies that a blocked domain served
+// from cache still returns the blocking mode response with EDE Blocked.
+func TestServePlain_BlockedCached(t *testing.T) {
 	q := makeQuery("cached-blocked.example.com", dns.TypeA)
 	handler := newTestHandler(t, []*dns.Msg{makeBlockedResp(q)})
 
@@ -907,19 +892,16 @@ func TestServePlain_BlockedCached_REFUSED(t *testing.T) {
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
-	// First query: upstream is hit --result is cached.
+	// First query: upstream is hit -- result is cached.
 	r1 := sendUDPDNSQuery(t, addr, makeQuery("cached-blocked.example.com", dns.TypeA))
-	if r1.Rcode != dns.RcodeRefused {
-		t.Fatalf("first blocked query: rcode=%s, want REFUSED", dns.RcodeToString[r1.Rcode])
+	if r1.Rcode != dns.RcodeSuccess {
+		t.Fatalf("first blocked query: rcode=%s, want NOERROR (null mode)", dns.RcodeToString[r1.Rcode])
 	}
 
 	// Second query: served from cache.
 	r2 := sendUDPDNSQuery(t, addr, makeQuery("cached-blocked.example.com", dns.TypeA))
-	if r2.Rcode != dns.RcodeRefused {
-		t.Fatalf("cached blocked query: rcode=%s, want REFUSED", dns.RcodeToString[r2.Rcode])
-	}
-	if len(r2.Answer) != 0 {
-		t.Errorf("cached blocked query: expected no answer records, got %d", len(r2.Answer))
+	if r2.Rcode != dns.RcodeSuccess {
+		t.Fatalf("cached blocked query: rcode=%s, want NOERROR (null mode)", dns.RcodeToString[r2.Rcode])
 	}
 	if !hasEDEBlocked(r2) {
 		t.Error("cached blocked query: expected EDE Blocked (code 15)")

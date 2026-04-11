@@ -57,6 +57,26 @@ func FuzzInspectWireResponse(f *testing.F) {
 	// Some garbage
 	f.Add([]byte{0xff, 0xff, 0xff, 0xff})
 
+	// BADCOOKIE response (RCODE 23 = 0x17, extended rcode in OPT)
+	badCookieResp := new(dns.Msg)
+	dnsutil.SetReply(badCookieResp, query)
+	badCookieResp.Rcode = dns.RcodeBadCookie
+	if err := badCookieResp.Pack(); err == nil {
+		wireBadCookie := make([]byte, len(badCookieResp.Data))
+		copy(wireBadCookie, badCookieResp.Data)
+		f.Add(wireBadCookie)
+	}
+
+	// REFUSED response
+	refusedResp := new(dns.Msg)
+	dnsutil.SetReply(refusedResp, query)
+	refusedResp.Rcode = dns.RcodeRefused
+	if err := refusedResp.Pack(); err == nil {
+		wireRefused := make([]byte, len(refusedResp.Data))
+		copy(wireRefused, refusedResp.Data)
+		f.Add(wireRefused)
+	}
+
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// This should never panic regardless of input
 		msg, result := InspectWireResponse(data)

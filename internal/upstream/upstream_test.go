@@ -1392,3 +1392,189 @@ func TestWhitelistResolver_IsWhitelisted_IDN_WildcardUnicode(t *testing.T) {
 		t.Error("IsWhitelisted(\"other.example.com\") should not match IDN wildcard entry")
 	}
 }
+
+// =============================================================================
+// F-02: BADCOOKIE (RFC 7873) tests
+// =============================================================================
+
+// makeBadCookieResp creates a response with RCODE 23 (BADCOOKIE).
+func makeBadCookieResp(query *dns.Msg) *dns.Msg {
+	resp := new(dns.Msg)
+	dnsutil.SetReply(resp, query)
+	resp.Rcode = dns.RcodeBadCookie
+	return resp
+}
+
+// TestResolve_BadCookie_NotCacheable verifies that when all upstreams return
+// BADCOOKIE, the result is SERVFAIL and not cacheable.
+func TestResolve_BadCookie_NotCacheable(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	clients := []Client{
+		&mockClient{name: "server1", response: makeBadCookieResp(query)},
+		&mockClient{name: "server2", response: makeBadCookieResp(query)},
+	}
+
+	r := newTestResolverWithClients(clients)
+	result := r.Resolve(context.Background(), query)
+
+	if result.BestResponse == nil {
+		t.Fatal("expected a SERVFAIL response")
+	}
+	if result.BestResponse.Rcode != dns.RcodeServerFailure {
+		t.Errorf("expected SERVFAIL, got %s", dns.RcodeToString[result.BestResponse.Rcode])
+	}
+	if result.Cacheable {
+		t.Error("BADCOOKIE result should not be cacheable")
+	}
+}
+
+// TestResolve_BadCookie_OneGoodUpstream verifies that when one upstream
+// returns BADCOOKIE and another returns a valid response, the valid
+// response is selected.
+func TestResolve_BadCookie_OneGoodUpstream(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	clients := []Client{
+		&mockClient{name: "badcookie-server", response: makeBadCookieResp(query)},
+		&mockClient{name: "good-server", response: makeNormalResp(query)},
+	}
+
+	r := newTestResolverWithClients(clients)
+	result := r.Resolve(context.Background(), query)
+
+	if result.BestResponse == nil {
+		t.Fatal("expected a response")
+	}
+	if result.BestResponse.Rcode != dns.RcodeSuccess {
+		t.Errorf("expected NOERROR from good server, got %s",
+			dns.RcodeToString[result.BestResponse.Rcode])
+	}
+	if result.Blocked {
+		t.Error("should not be treated as blocked")
+	}
+}
+
+// TestResolve_BadCookie_AllUpstreams verifies that when ALL upstreams
+// return BADCOOKIE, the resolver produces SERVFAIL (not a cached error).
+func TestResolve_BadCookie_AllUpstreams(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	clients := []Client{
+		&mockClient{name: "server1", response: makeBadCookieResp(query)},
+		&mockClient{name: "server2", response: makeBadCookieResp(query)},
+		&mockClient{name: "server3", response: makeBadCookieResp(query)},
+	}
+
+	r := newTestResolverWithClients(clients)
+	result := r.Resolve(context.Background(), query)
+
+	if result.BestResponse == nil {
+		t.Fatal("expected a response")
+	}
+	if result.BestResponse.Rcode != dns.RcodeServerFailure {
+		t.Errorf("expected SERVFAIL when all upstreams return BADCOOKIE, got %s",
+			dns.RcodeToString[result.BestResponse.Rcode])
+	}
+	if result.Cacheable {
+		t.Error("all-BADCOOKIE result should not be cacheable")
+	}
+}
+
+// =============================================================================
+// makeServFail edge cases
+// =============================================================================
+
+// TestMakeServFail_AllNilResults verifies SERVFAIL is returned when all
+// results are nil (all upstreams timed out).
+func TestMakeServFail_AllNilResults(t *testing.T) {
+	result := makeServFail([]*Result{nil, nil, nil})
+	if result == nil {
+		t.Fatal("expected SERVFAIL response")
+	}
+	if result.Rcode != dns.RcodeServerFailure {
+		t.Errorf("expected SERVFAIL, got %s", dns.RcodeToString[result.Rcode])
+	}
+}
+
+// TestMakeServFail_WithTemplate verifies SERVFAIL preserves query ID and
+// question from the first available template.
+func TestMakeServFail_WithTemplate(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	resp := makeNormalResp(query)
+	resp.ID = 9999
+	results := []*Result{
+		nil,
+		{Msg: resp, Err: errors.New("upstream error")},
+	}
+
+	sf := makeServFail(results)
+	if sf == nil {
+		t.Fatal("expected SERVFAIL response")
+	}
+	if sf.ID != 9999 {
+		t.Errorf("expected ID=9999, got %d", sf.ID)
+	}
+	if sf.Rcode != dns.RcodeServerFailure {
+		t.Errorf("expected SERVFAIL rcode")
+	}
+}
+
+// =============================================================================
+// pickBestResponse edge cases
+// =============================================================================
+
+// TestPickBestResponse_AllNilResults verifies nil return when no valid results exist.
+func TestPickBestResponse_AllNilResults(t *testing.T) {
+	result := pickBestResponse([]*Result{nil, nil})
+	if result != nil {
+		t.Error("expected nil when all results are nil")
+	}
+}
+
+// TestPickBestResponse_PrefersDNSSEC verifies DNSSEC responses are preferred.
+func TestPickBestResponse_PrefersDNSSEC(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	normalResp := makeNormalResp(query)
+	dnssecResp := makeNormalResp(query)
+
+	results := []*Result{
+		{Index: 0, Msg: normalResp, Inspect: dnsmsg.InspectResult{HasDNSSEC: false}},
+		{Index: 1, Msg: dnssecResp, Inspect: dnsmsg.InspectResult{HasDNSSEC: true}},
+	}
+
+	best := pickBestResponse(results)
+	if best != dnssecResp {
+		t.Error("should prefer DNSSEC response")
+	}
+}
+
+// =============================================================================
+// NXDOMAIN disagreement tests
+// =============================================================================
+
+// TestHasNXDomainDisagreement_AllAgree verifies no disagreement when all OK.
+func TestHasNXDomainDisagreement_AllAgree(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	r := newTestResolverWithClients(nil)
+	results := []*Result{
+		{Msg: makeNormalResp(query), Inspect: dnsmsg.InspectResult{}},
+		{Msg: makeNormalResp(query), Inspect: dnsmsg.InspectResult{}},
+	}
+
+	if r.hasNXDomainDisagreement(results) {
+		t.Error("no disagreement expected when all agree")
+	}
+}
+
+// TestHasNXDomainDisagreement_Disagreement verifies disagreement detection
+// when some return NXDOMAIN and others don't.
+func TestHasNXDomainDisagreement_Disagreement(t *testing.T) {
+	query := makeQuery("disagreement.example.com", dns.TypeA)
+	r := newTestResolverWithClients(nil)
+	results := []*Result{
+		{Msg: makeNormalResp(query), Inspect: dnsmsg.InspectResult{NXDomain: false}},
+		{Msg: makeNXDomainResp(query, true), Inspect: dnsmsg.InspectResult{NXDomain: true}},
+	}
+
+	if !r.hasNXDomainDisagreement(results) {
+		t.Error("expected disagreement when one is NXDOMAIN and one is not")
+	}
+}

@@ -174,14 +174,14 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 	if result.Blocked {
 		h.logger.Infof("%s is blocked by %s", qname, result.BlockedBy)
 
-		blockedResp := dnsmsg.MakeBlockedResponse(query)
+		blockedResp := dnsmsg.MakeBlockedResponse(query, h.cfg.Blocking.Mode, result.BlockedBy)
 
 		if h.cfg.Cache.Enabled && result.Cacheable {
 			h.cache.Put(query, blockedResp, true)
 		}
 
-		h.logger.Debugf("Query %s %s -> final: rcode=NXDOMAIN blocked=true cached=%v",
-			qname, qtype, h.cfg.Cache.Enabled && result.Cacheable)
+		h.logger.Debugf("Query %s %s -> final: rcode=%s blocked=true cached=%v",
+			qname, qtype, dns.RcodeToString[blockedResp.Rcode], h.cfg.Cache.Enabled && result.Cacheable)
 		return blockedResp
 	}
 
@@ -324,7 +324,7 @@ func Run(cfg *config.Config, logger *logging.Logger) error {
 			}
 			if result.Blocked {
 				logger.Debugf("Cache background-refresh: %s %s is now blocked, updating cache", qname, qtype)
-				blockedResp := dnsmsg.MakeBlockedResponse(query)
+				blockedResp := dnsmsg.MakeBlockedResponse(query, cfg.Blocking.Mode, result.BlockedBy)
 				c.Put(query, blockedResp, true)
 			} else {
 				logger.Debugf("Cache background-refresh success: %s %s (rcode=%d)", qname, qtype, result.BestResponse.Rcode)

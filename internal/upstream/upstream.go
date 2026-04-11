@@ -157,6 +157,13 @@ func (r *Resolver) resolveUpstream(ctx context.Context, idx int, c Client, query
 		r.logger.Warnf("Slow upstream[%d] %s took %dms to resolve %s", idx, c, elapsed.Milliseconds(), qname)
 	}
 
+	// RFC 7873: update per-upstream cookie state immediately after receiving
+	// the response so that the correct upstream address is recorded. This must
+	// happen before result aggregation, where the address is no longer tracked.
+	if err == nil && resp != nil && r.edns != nil {
+		r.edns.ProcessResponseCookieOnly(resp, c.String())
+	}
+
 	var inspect dnsmsg.InspectResult
 	if err == nil && resp != nil {
 		inspect = dnsmsg.InspectResponse(resp)

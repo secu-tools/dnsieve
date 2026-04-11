@@ -162,6 +162,33 @@ type TCPKeepaliveConfig struct {
 	UpstreamTimeoutSec int `toml:"upstream_timeout_sec"`
 }
 
+// BlockingConfig controls how DNSieve responds to clients when an upstream
+// DNS server signals that a domain is blocked.
+type BlockingConfig struct {
+	// Mode selects the DNS response style for blocked domains.
+	//
+	// Supported modes (following Pi-hole and Technitium conventions):
+	//   "null"     - (Default, recommended) NOERROR with 0.0.0.0 for A queries
+	//                and :: for AAAA queries. Other query types receive NODATA
+	//                (NOERROR with empty answer). Clients see an immediate
+	//                connection failure with no timeout. Both Pi-hole and
+	//                Technitium recommend this approach.
+	//   "nxdomain" - NXDOMAIN with empty answer section. Signals that the
+	//                domain does not exist. Some clients retry more aggressively
+	//                than with "null" mode.
+	//   "nodata"   - NOERROR with empty answer section. Signals that the domain
+	//                exists but has no records for the requested type. Better
+	//                client acceptance than NXDOMAIN in some environments.
+	//   "refused"  - REFUSED with empty answer section. Signals that the server
+	//                refuses to answer the query. Caution: some clients may fall
+	//                back to another DNS resolver, bypassing the proxy entirely.
+	//
+	// All modes include Extended DNS Error (EDE) code 15 "Blocked" (RFC 8914)
+	// with extra text identifying which upstream service detected the block.
+	// Example EDE text: "Blocked (dns.quad9.net)"
+	Mode string `toml:"mode"`
+}
+
 // DDRConfig controls Discovery of Designated Resolvers (RFC 9461/9462).
 type DDRConfig struct {
 	Enabled bool `toml:"enabled"`
@@ -174,6 +201,7 @@ type Config struct {
 	TLS              TLSConfig          `toml:"tls"`
 	Downstream       Downstream         `toml:"downstream"`
 	Cache            CacheConfig        `toml:"cache"`
+	Blocking         BlockingConfig     `toml:"blocking"`
 	Logging          LoggingConfig      `toml:"logging"`
 	Whitelist        WhitelistConfig    `toml:"whitelist"`
 	Privacy          PrivacyConfig      `toml:"privacy"`
@@ -217,6 +245,9 @@ func DefaultConfig() *Config {
 			BlockedTTL:   86400,
 			MinTTL:       60,
 			RenewPercent: 10,
+		},
+		Blocking: BlockingConfig{
+			Mode: "null",
 		},
 		Logging: LoggingConfig{
 			LogLevel:        "info",
@@ -407,6 +438,10 @@ func (c *Config) Validate() (warnings []string, errors []string) {
 	w = c.validateWhitelist()
 	warnings = append(warnings, w...)
 
+	w, e = c.validateBlocking()
+	warnings = append(warnings, w...)
+	errors = append(errors, e...)
+
 	w, e = c.validatePrivacy()
 	warnings = append(warnings, w...)
 	errors = append(errors, e...)
@@ -547,6 +582,22 @@ func (c *Config) validateWhitelist() (warnings []string) {
 	return warnings
 }
 
+// validateBlocking checks blocking configuration for invalid values.
+func (c *Config) validateBlocking() (warnings []string, errors []string) {
+	switch c.Blocking.Mode {
+	case "null", "nxdomain", "nodata", "refused":
+		// valid modes
+	case "":
+		// empty is corrected by applyDefaults
+	default:
+		errors = append(errors, fmt.Sprintf("blocking.mode=%q is invalid, must be null, nxdomain, nodata, or refused", c.Blocking.Mode))
+	}
+	if c.Blocking.Mode == "refused" {
+		warnings = append(warnings, "blocking.mode=\"refused\" may cause clients to fall back to another DNS resolver, bypassing the proxy")
+	}
+	return warnings, errors
+}
+
 // validatePrivacy checks privacy and EDNS0 option configuration.
 func (c *Config) validatePrivacy() (warnings []string, errors []string) {
 	switch c.Privacy.ECS.Mode {
@@ -590,6 +641,7 @@ func (c *Config) validatePrivacy() (warnings []string, errors []string) {
 func applyDefaults(cfg *Config) {
 	applyUpstreamDefaults(cfg)
 	applyCacheDefaults(cfg)
+	applyBlockingDefaults(cfg)
 	applyLoggingDefaults(cfg)
 	applyDownstreamDefaults(cfg)
 	applyWhitelistDefaults(cfg)
@@ -615,6 +667,12 @@ func applyCacheDefaults(cfg *Config) {
 	}
 	if cfg.Cache.MinTTL <= 0 {
 		cfg.Cache.MinTTL = 60
+	}
+}
+
+func applyBlockingDefaults(cfg *Config) {
+	if cfg.Blocking.Mode == "" {
+		cfg.Blocking.Mode = "null"
 	}
 }
 
@@ -854,6 +912,44 @@ min_ttl = 60
 # consensus rules apply). If the result is not cacheable, the old entry stays
 # until it naturally expires. Set to 0 to disable. Range: 0-99. Default: 10.
 renew_percent = 10
+
+
+# =============================================================================
+# Blocking Mode
+# =============================================================================
+# Controls how DNSieve responds when an upstream DNS server signals that a
+# domain is blocked (malware, phishing, tracking, etc.).
+#
+# Both Pi-hole and Technitium DNS Server recommend "null" mode as the default.
+# See docs/configuration.md for a detailed comparison of each mode.
+#
+# All modes include Extended DNS Error (EDE) code 15 "Blocked" (RFC 8914)
+# with extra text identifying which upstream service detected the block.
+# Example EDE extra text: "Blocked (dns.quad9.net)"
+
+[blocking]
+# Blocking response mode:
+#
+#   "null"      - (Default, recommended) NOERROR with 0.0.0.0 for A queries
+#                 and :: for AAAA queries. Other query types get empty NODATA.
+#                 Clients see an immediate connection failure with no timeout.
+#                 0.0.0.0 is "this host on this network" (RFC 1122 Section
+#                 3.2.1.3). :: is the IPv6 unspecified address (RFC 4291
+#                 Section 2.5.2). Connections fail instantly with "connection
+#                 refused" -- no HTTP timeout, no retry storm.
+#
+#   "nxdomain"  - NXDOMAIN with empty answer. Tells clients the domain does
+#                 not exist. Some clients retry more aggressively with this
+#                 mode compared to "null".
+#
+#   "nodata"    - NOERROR with empty answer. Tells clients the domain exists
+#                 but has no records for the requested type. Better client
+#                 acceptance than NXDOMAIN in some environments.
+#
+#   "refused"   - REFUSED with empty answer. Tells clients the server refuses
+#                 the query. WARNING: some clients may fall back to another
+#                 DNS resolver, bypassing this proxy entirely.
+mode = "null"
 
 
 # =============================================================================

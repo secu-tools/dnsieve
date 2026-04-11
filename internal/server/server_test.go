@@ -149,11 +149,8 @@ func TestHandleQuery_BlockedQuery(t *testing.T) {
 	if resp == nil {
 		t.Fatal("expected response")
 	}
-	if resp.Rcode != dns.RcodeRefused {
-		t.Errorf("blocked response rcode=%s, want REFUSED", dns.RcodeToString[resp.Rcode])
-	}
-	if len(resp.Answer) != 0 {
-		t.Errorf("blocked response should have no answer records, got %d", len(resp.Answer))
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("blocked response rcode=%s, want NOERROR (null mode)", dns.RcodeToString[resp.Rcode])
 	}
 	if !hasEDEBlocked(resp) {
 		t.Error("blocked response must include EDE Blocked (code 15)")
@@ -196,13 +193,17 @@ func TestHandleQuery_BlockedNeverLeaked(t *testing.T) {
 	handler := newTestHandler(t, []*dns.Msg{makeBlockedResp(query)})
 	resp := handler.HandleQuery(context.Background(), query)
 
-	// Blocked response must be REFUSED with no Answer records.
-	// No real IP (or spoofed 0.0.0.0) must appear.
-	if resp.Rcode != dns.RcodeRefused {
-		t.Errorf("blocked response rcode=%s, want REFUSED", dns.RcodeToString[resp.Rcode])
+	// In null mode, blocked A queries return NOERROR with 0.0.0.0.
+	// Verify no real routable IP appears.
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("blocked response rcode=%s, want NOERROR (null mode)", dns.RcodeToString[resp.Rcode])
 	}
-	if len(resp.Answer) != 0 {
-		t.Errorf("blocked response leaked %d answer record(s)", len(resp.Answer))
+	for _, rr := range resp.Answer {
+		if a, ok := rr.(*dns.A); ok {
+			if a.Addr != (netip.AddrFrom4([4]byte{0, 0, 0, 0})) {
+				t.Errorf("blocked response leaked real IP %s", a.Addr)
+			}
+		}
 	}
 }
 
@@ -220,11 +221,8 @@ func TestHandleQuery_AAAA_Blocked(t *testing.T) {
 	handler := newTestHandler(t, []*dns.Msg{upstreamBlocked})
 	resp := handler.HandleQuery(context.Background(), query)
 
-	if resp.Rcode != dns.RcodeRefused {
-		t.Errorf("blocked AAAA rcode=%s, want REFUSED", dns.RcodeToString[resp.Rcode])
-	}
-	if len(resp.Answer) != 0 {
-		t.Errorf("blocked AAAA should have no answer records, got %d", len(resp.Answer))
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("blocked AAAA rcode=%s, want NOERROR (null mode)", dns.RcodeToString[resp.Rcode])
 	}
 	if !hasEDEBlocked(resp) {
 		t.Error("blocked AAAA must include EDE Blocked (code 15)")
@@ -1027,7 +1025,7 @@ func TestHandleQuery_IPv6_AAAA_Normal(t *testing.T) {
 }
 
 // TestHandleQuery_IPv6_AAAA_Blocked_Unspecified verifies that :: is treated as
-// a block indicator and the proxy returns REFUSED with EDE Blocked.
+// a block indicator and the proxy returns the configured blocking mode response.
 func TestHandleQuery_IPv6_AAAA_Blocked_Unspecified(t *testing.T) {
 	query := makeQuery("blocked6.example.com", dns.TypeAAAA)
 	resp := new(dns.Msg)
@@ -1043,11 +1041,8 @@ func TestHandleQuery_IPv6_AAAA_Blocked_Unspecified(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected response")
 	}
-	if result.Rcode != dns.RcodeRefused {
-		t.Errorf("blocked AAAA rcode=%s, want REFUSED", dns.RcodeToString[result.Rcode])
-	}
-	if len(result.Answer) != 0 {
-		t.Errorf("blocked AAAA should have no answer records, got %d", len(result.Answer))
+	if result.Rcode != dns.RcodeSuccess {
+		t.Errorf("blocked AAAA rcode=%s, want NOERROR (null mode)", dns.RcodeToString[result.Rcode])
 	}
 	if !hasEDEBlocked(result) {
 		t.Error("blocked AAAA must include EDE Blocked (code 15)")
@@ -1655,7 +1650,8 @@ func TestDohHandler_JSONAccept_ContentType(t *testing.T) {
 }
 
 // TestDohHandler_JSONAccept_BlockedDomain verifies that a blocked domain
-// served via the JSON API carries Cache-Control: no-store (REFUSED rcode).
+// served via the JSON API carries a short Cache-Control max-age (null mode
+// uses a 10s TTL for the synthesized answer).
 func TestDohHandler_JSONAccept_BlockedDomain(t *testing.T) {
 	query := makeQuery("blocked.example.com", dns.TypeA)
 	query.ID = 0
@@ -1678,8 +1674,11 @@ func TestDohHandler_JSONAccept_BlockedDomain(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d, want 200 (DNS status in body for JSON API)", w.Code)
 	}
-	if cc := w.Result().Header.Get("Cache-Control"); cc != "no-store" {
-		t.Errorf("Cache-Control=%q, want no-store for blocked JSON response", cc)
+	// Null mode returns NOERROR (not REFUSED), so responses are cacheable
+	// with a short TTL rather than no-store.
+	cc := w.Result().Header.Get("Cache-Control")
+	if cc == "" {
+		t.Error("expected Cache-Control header")
 	}
 	if ct := w.Result().Header.Get("Content-Type"); ct != "application/dns-json" {
 		t.Errorf("Content-Type=%q, want application/dns-json", ct)
@@ -1729,5 +1728,153 @@ func TestHandleQuery_GenuineNXDomain_NotBlocked(t *testing.T) {
 	}
 	if len(resp.Answer) != 0 {
 		t.Errorf("genuine NXDOMAIN should have no answer records, got %d", len(resp.Answer))
+	}
+}
+
+// =============================================================================
+// F-02: BADCOOKIE through server handler
+// =============================================================================
+
+// TestHandleQuery_BADCOOKIE_ReturnsServFail verifies that when all upstreams
+// return BADCOOKIE, the handler returns SERVFAIL to the client.
+func TestHandleQuery_BADCOOKIE_ReturnsServFail(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	badCookieResp := new(dns.Msg)
+	dnsutil.SetReply(badCookieResp, query)
+	badCookieResp.Rcode = dns.RcodeBadCookie
+
+	handler := newTestHandler(t, []*dns.Msg{badCookieResp})
+	resp := handler.HandleQuery(context.Background(), query)
+
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	if resp.Rcode != dns.RcodeServerFailure {
+		t.Errorf("expected SERVFAIL for BADCOOKIE, got %s",
+			dns.RcodeToString[resp.Rcode])
+	}
+}
+
+// =============================================================================
+// F-03: Whitelist resolver error handling
+// =============================================================================
+
+// TestHandleQuery_WhitelistResolverError_ReturnsSERVFAIL verifies that when
+// the whitelist resolver fails, the handler returns SERVFAIL.
+func TestHandleQuery_WhitelistResolverError_ReturnsSERVFAIL(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+	cfg.Cache.MaxEntries = 100
+	cfg.Whitelist.Enabled = true
+	cfg.Whitelist.Domains = []string{"whitelisted.example.com"}
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	c := cache.New(100, 3600, 5, 0)
+
+	// Normal upstream that works
+	normalResp := makeNormalResp(makeQuery("whitelisted.example.com", dns.TypeA))
+	clients := []upstream.Client{
+		&mockUpstreamClient{name: "normal", response: normalResp},
+	}
+	resolver := upstream.NewResolverFromClients(clients, 2*time.Second, 50*time.Millisecond, logger)
+
+	// Whitelist resolver that always errors
+	wlClient := &mockUpstreamClient{
+		name: "wl-fail",
+		err:  fmt.Errorf("whitelist upstream unavailable"),
+	}
+	wlResolver := upstream.NewWhitelistResolverFromClient(wlClient, &cfg.Whitelist)
+
+	handler := NewHandler(resolver, wlResolver, c, logger, cfg)
+
+	query := makeQuery("whitelisted.example.com", dns.TypeA)
+	resp := handler.HandleQuery(context.Background(), query)
+
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	if resp.Rcode != dns.RcodeServerFailure {
+		t.Errorf("expected SERVFAIL when whitelist resolver fails, got %s",
+			dns.RcodeToString[resp.Rcode])
+	}
+}
+
+// =============================================================================
+// DoH-specific tests
+// =============================================================================
+
+// TestComputeMaxAge_EmptyMessage verifies default max-age when no TTL-bearing
+// records exist in an empty message.
+func TestComputeMaxAge_EmptyMessage(t *testing.T) {
+	msg := new(dns.Msg)
+	age := computeMaxAge(msg)
+	if age != 1800 {
+		t.Errorf("expected default 1800 for no records, got %d", age)
+	}
+}
+
+// TestComputeMaxAge_WithRecords verifies min TTL from records is used.
+func TestComputeMaxAge_WithRecords(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	resp := makeNormalResp(query)
+	resp.Answer[0].Header().TTL = 120
+
+	age := computeMaxAge(resp)
+	if age != 120 {
+		t.Errorf("expected 120 from TTL, got %d", age)
+	}
+}
+
+// TestComputeMaxAge_Floor verifies minimum of 1.
+func TestComputeMaxAge_Floor(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	resp := makeNormalResp(query)
+	resp.Answer[0].Header().TTL = 0
+
+	age := computeMaxAge(resp)
+	if age < 1 {
+		t.Errorf("expected min 1, got %d", age)
+	}
+}
+
+// =============================================================================
+// Handler multi-question rejection
+// =============================================================================
+
+// TestHandleQuery_MultipleQuestions_FORMERR verifies that queries with more
+// than one question are rejected with FORMERR.
+func TestHandleQuery_MultipleQuestions_FORMERR(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	extra := &dns.A{
+		Hdr: dns.Header{Name: "other.example.com.", Class: dns.ClassINET},
+	}
+	query.Question = append(query.Question, extra)
+
+	handler := newTestHandler(t, []*dns.Msg{makeNormalResp(makeQuery("example.com", dns.TypeA))})
+	resp := handler.HandleQuery(context.Background(), query)
+
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	if resp.Rcode != dns.RcodeFormatError {
+		t.Errorf("expected FORMERR for multi-question, got %s",
+			dns.RcodeToString[resp.Rcode])
+	}
+}
+
+// TestHandleQuery_EmptyQuestion_FORMERR verifies empty question rejection.
+func TestHandleQuery_EmptyQuestion_FORMERR(t *testing.T) {
+	query := new(dns.Msg)
+	query.ID = 1234
+
+	handler := newTestHandler(t, []*dns.Msg{makeNormalResp(makeQuery("example.com", dns.TypeA))})
+	resp := handler.HandleQuery(context.Background(), query)
+
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	if resp.Rcode != dns.RcodeFormatError {
+		t.Errorf("expected FORMERR for empty question, got %s",
+			dns.RcodeToString[resp.Rcode])
 	}
 }

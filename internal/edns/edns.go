@@ -116,8 +116,9 @@ func (m *Middleware) ProcessUpstreamResponse(resp *dns.Msg, upstreamAddr string)
 	for _, rr := range resp.Pseudo {
 		switch o := rr.(type) {
 		case *dns.COOKIE:
-			m.processResponseCookie(o, upstreamAddr)
-			// Strip cookies from client response (proxy handles them)
+			// Strip cookies from the response sent to clients. Per-upstream
+			// cookie state is updated at the resolver layer via
+			// ProcessResponseCookieOnly, which uses the correct upstream address.
 			continue
 		case *dns.NSID:
 			if m.cfg.Privacy.NSID.Mode == "strip" {
@@ -302,13 +303,36 @@ func (m *Middleware) addCookieOption(out *dns.Msg, upstreamAddr string) {
 	}
 }
 
+// ProcessResponseCookieOnly extracts the server cookie from an upstream
+// response and stores it for the given upstream address. This must be
+// called per-upstream immediately after each response is received so that
+// the correct upstream address is associated with the cookie state. It does
+// NOT strip the cookie from the message (that is done by
+// ProcessUpstreamResponse when the best response is assembled for the client).
+func (m *Middleware) ProcessResponseCookieOnly(resp *dns.Msg, upstreamAddr string) {
+	if resp == nil {
+		return
+	}
+	for _, rr := range resp.Pseudo {
+		if cookie, ok := rr.(*dns.COOKIE); ok {
+			m.processResponseCookie(cookie, upstreamAddr)
+			return
+		}
+	}
+}
+
 func (m *Middleware) processResponseCookie(cookie *dns.COOKIE, upstreamAddr string) {
 	if m.cfg.Privacy.Cookies.Mode != "reoriginate" || m.cookies == nil {
 		return
 	}
-	if len(cookie.Cookie) > 16 {
-		m.cookies.setServerCookie(upstreamAddr, cookie.Cookie[16:])
+	// RFC 7873 s4.1: the client cookie is exactly 8 bytes (16 hex chars).
+	// Server cookies must be 8-32 bytes (16-64 hex chars). Reject anything
+	// outside that range; an oversized cookie from a rogue upstream is dropped.
+	// Total valid range: 32 (16 client + 16 server min) to 80 (16+64 server max).
+	if len(cookie.Cookie) < 32 || len(cookie.Cookie) > 80 {
+		return
 	}
+	m.cookies.setServerCookie(upstreamAddr, cookie.Cookie[16:])
 }
 
 // --- NSID Handling (RFC 5001) ---
