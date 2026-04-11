@@ -106,6 +106,10 @@ func queryLocal(t *testing.T, port int, name string, qtype uint16) *dns.Msg {
 		c.Transport.ReadTimeout = 15 * time.Second
 		query := dnsutil.SetQuestion(new(dns.Msg), dnsutil.Fqdn(name), qtype)
 		query.RecursionDesired = true
+		// Advertise EDNS0 so the receive buffer is large enough for
+		// responses that carry DNSSEC records (NSEC + RRSIG can exceed
+		// the legacy 512-byte non-EDNS limit).
+		query.UDPSize = dns.DefaultMsgSize
 
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		resp, _, err := c.Exchange(ctx, query, "udp", addr)

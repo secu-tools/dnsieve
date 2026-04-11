@@ -88,6 +88,10 @@ func queryUDP(t *testing.T, port int, name string, qtype uint16) *dns.Msg {
 
 		msg := dnsutil.SetQuestion(new(dns.Msg), dnsutil.Fqdn(name), qtype)
 		msg.RecursionDesired = true
+		// Advertise EDNS0 so the receive buffer is large enough for
+		// responses that carry DNSSEC records (NSEC + RRSIG can exceed
+		// the legacy 512-byte non-EDNS limit).
+		msg.UDPSize = dns.DefaultMsgSize
 
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		resp, _, err := c.Exchange(ctx, msg, "udp", addr)
