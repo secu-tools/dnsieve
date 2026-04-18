@@ -99,17 +99,21 @@ func runTests(cfg *config.Config, domains []string) []ServerResult {
 	var results []ServerResult
 
 	bootstrapDNS := cfg.UpstreamSettings.BootstrapDNS
+	ipFamily := cfg.UpstreamSettings.BootstrapIPFamily
+	if ipFamily == "" {
+		ipFamily = "auto"
+	}
 
 	for _, u := range cfg.Upstream {
 		verifyCert := u.ShouldVerifyCert(cfg.UpstreamSettings.VerifyCertificates)
-		r := testServer(u, verifyCert, bootstrapDNS, domains)
+		r := testServer(u, verifyCert, bootstrapDNS, ipFamily, domains)
 		results = append(results, r)
 	}
 
 	return results
 }
 
-func testServer(srv config.UpstreamServer, verifyCert bool, bootstrapDNS string, domains []string) ServerResult {
+func testServer(srv config.UpstreamServer, verifyCert bool, bootstrapDNS, ipFamily string, domains []string) ServerResult {
 	r := ServerResult{
 		Address:  srv.Address,
 		Protocol: srv.Protocol,
@@ -118,7 +122,7 @@ func testServer(srv config.UpstreamServer, verifyCert bool, bootstrapDNS string,
 	r.ResolveOK = checkBootstrapResolve(&r, srv, bootstrapDNS)
 
 	bootstrapIPs := upstream.ParseBootstrapDNSAddrs(bootstrapDNS)
-	client, err := createClient(srv, verifyCert, bootstrapIPs)
+	client, err := createClient(srv, verifyCert, bootstrapIPs, ipFamily)
 	if err != nil {
 		r.Errors = append(r.Errors, fmt.Sprintf("client creation failed: %v", err))
 		return r
@@ -212,12 +216,12 @@ func computeStats(r *ServerResult) {
 	}
 }
 
-func createClient(srv config.UpstreamServer, verifyCert bool, bootstrapIPs []string) (upstream.Client, error) {
+func createClient(srv config.UpstreamServer, verifyCert bool, bootstrapIPs []string, ipFamily string) (upstream.Client, error) {
 	switch srv.Protocol {
 	case "doh":
-		return upstream.NewDoHClient(srv.Address, verifyCert, bootstrapIPs...)
+		return upstream.NewDoHClient(srv.Address, verifyCert, ipFamily, bootstrapIPs...)
 	case "dot":
-		return upstream.NewDoTClient(srv.Address, verifyCert, bootstrapIPs...)
+		return upstream.NewDoTClient(srv.Address, verifyCert, ipFamily, bootstrapIPs...)
 	case "udp":
 		return upstream.NewPlainClient(srv.Address)
 	default:

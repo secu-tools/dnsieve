@@ -23,7 +23,9 @@ type DoTClient struct {
 // NewDoTClient creates a DoT client for the given server address (host:port).
 // bootstrapIPs is an optional list of host:port addresses used to resolve
 // the DoT server hostname instead of the system resolver.
-func NewDoTClient(address string, verifyCert bool, bootstrapIPs ...string) (*DoTClient, error) {
+// ipFamily controls bootstrap address-family selection: "ipv4", "ipv6", or
+// "auto" (default) to race both as per RFC 6555.
+func NewDoTClient(address string, verifyCert bool, ipFamily string, bootstrapIPs ...string) (*DoTClient, error) {
 	if address == "" {
 		return nil, fmt.Errorf("empty DoT address")
 	}
@@ -50,7 +52,7 @@ func NewDoTClient(address string, verifyCert bool, bootstrapIPs ...string) (*DoT
 	if len(bootstrapIPs) > 0 && net.ParseIP(host) == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if ip, err := resolveViaBootstrap(ctx, host, bootstrapIPs); err == nil {
+		if ip, err := resolveViaBootstrap(ctx, host, bootstrapIPs, ipFamily); err == nil {
 			address = net.JoinHostPort(ip, port)
 		}
 		// On resolution failure, fall through and use the original address

@@ -137,7 +137,7 @@ func TestE2E_RFC9715_LargeResponseTruncation(t *testing.T) {
 func TestE2E_RFC9715_SmallResponse(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	resp := queryUDPWithOPT(t, port, "example.com", dns.TypeA, 1232)
@@ -172,7 +172,7 @@ func TestE2E_RFC9715_TCPFallback(t *testing.T) {
 func TestE2E_RFC3225_DOBit(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	query := makePlainQuery("example.com", dns.TypeA)

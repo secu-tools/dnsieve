@@ -233,10 +233,48 @@ IPv6-specific unit tests include:
 - `TestNewPlainClient_BareIPv6` -- bare IPv6 address normalised to `[addr]:53`
 - `TestNewDoTClient_BareIPv6` -- bare IPv6 address normalised to `[addr]:853`
 
-## Linting
 
-```bash
-go fmt ./...
-go vet ./...
-gocognit -over 25 ./internal/...
+---
+
+## CI Network Reliability: bootstrap_ip_family
+
+On IPv4-only CI runners (for example GitHub-hosted Ubuntu runners with no
+outbound IPv6), the default bootstrap behaviour -- racing both an A and a
+AAAA lookup -- can return an IPv6 address that is unreachable, causing every
+upstream DoH/DoT connection attempt to fail with "network is unreachable" and
+the proxy to return SERVFAIL.
+
+The `bootstrap_ip_family` config option locks the bootstrap resolver to one
+address family:
+
+| Value | Behaviour |
+|-------|-----------|
+| `"auto"` | Race A and AAAA; fastest answer wins (default) |
+| `"ipv4"` | Send only A queries; IPv4 address always returned |
+| `"ipv6"` | Send only AAAA queries; IPv6 address always returned |
+
+Example TOML:
+
+```toml
+[upstream_settings]
+bootstrap_ip_family = "ipv4"
 ```
+
+### How tests handle this
+
+**E2E tests** that depend on live upstream responses use
+`startServerReachable` instead of `startServer`. This helper tries three
+strategies in order -- `"auto"`, `"ipv4"`, `"ipv6"` -- sending a health-check
+query (`example.com A`) after each start. The first strategy that returns a
+non-SERVFAIL response is locked in for the remainder of that test. If all
+three strategies fail the test is marked as failed, never silently skipped:
+this ensures a real network outage or proxy bug is always visible.
+
+**Smoke tests** detect IPv6 connectivity once in `TestMain` by attempting a
+TCP connection to `[2620:fe::fe]:53` (Quad9 IPv6). When unreachable, all
+generated TOML configs include `bootstrap_ip_family = "ipv4"` automatically.
+
+This approach is deterministic: tests do not skip randomly, and a genuine
+upstream connectivity failure always produces a test failure rather than a
+silent skip.
+

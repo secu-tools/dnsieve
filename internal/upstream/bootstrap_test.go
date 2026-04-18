@@ -142,7 +142,7 @@ func TestLookupHostViaBootstrap_Success(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	ip, err := lookupHostViaBootstrap(ctx, "dns.quad9.net", addr)
+	ip, err := lookupHostViaBootstrap(ctx, "dns.quad9.net", addr, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestLookupHostViaBootstrap_ServerFail(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := lookupHostViaBootstrap(ctx, "dns.quad9.net", addr)
+	_, err := lookupHostViaBootstrap(ctx, "dns.quad9.net", addr, "auto")
 	if err == nil {
 		t.Error("expected error for SERVFAIL response")
 	}
@@ -167,7 +167,7 @@ func TestLookupHostViaBootstrap_BadAddr(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	_, err := lookupHostViaBootstrap(ctx, "example.com", "127.0.0.1:1")
+	_, err := lookupHostViaBootstrap(ctx, "example.com", "127.0.0.1:1", "auto")
 	if err == nil {
 		t.Error("expected error for unreachable bootstrap server")
 	}
@@ -182,7 +182,7 @@ func TestResolveViaBootstrap_FirstWins(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	ip, err := resolveViaBootstrap(ctx, "example.com", []string{fast, slow})
+	ip, err := resolveViaBootstrap(ctx, "example.com", []string{fast, slow}, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestResolveViaBootstrap_FallbackToSecond(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	ip, err := resolveViaBootstrap(ctx, "example.com", []string{bad, good})
+	ip, err := resolveViaBootstrap(ctx, "example.com", []string{bad, good}, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestResolveViaBootstrap_AllFail(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, err := resolveViaBootstrap(ctx, "example.com", []string{"127.0.0.1:1", "127.0.0.1:2"})
+	_, err := resolveViaBootstrap(ctx, "example.com", []string{"127.0.0.1:1", "127.0.0.1:2"}, "auto")
 	if err == nil {
 		t.Error("expected error when all bootstrap servers fail")
 	}
@@ -220,7 +220,7 @@ func TestResolveViaBootstrap_AllFail(t *testing.T) {
 
 func TestResolveViaBootstrap_NoAddrs(t *testing.T) {
 	ctx := context.Background()
-	_, err := resolveViaBootstrap(ctx, "example.com", nil)
+	_, err := resolveViaBootstrap(ctx, "example.com", nil, "auto")
 	if err == nil {
 		t.Error("expected error for empty bootstrap list")
 	}
@@ -230,7 +230,7 @@ func TestResolveViaBootstrap_NoAddrs(t *testing.T) {
 
 func TestMakeBootstrapDialer_NumericIP(t *testing.T) {
 	// Numeric IP addresses should not trigger bootstrap resolution.
-	dialer := makeBootstrapDialer([]string{"127.0.0.1:1"}) // unreachable bootstrap
+	dialer := makeBootstrapDialer([]string{"127.0.0.1:1"}, "auto") // unreachable bootstrap
 
 	// Connecting to a numeric IP should NOT query the (unreachable) bootstrap.
 	// Use a local listener to prove the connection goes through.
@@ -281,7 +281,7 @@ func TestMakeBootstrapDialer_HostnameLookup(t *testing.T) {
 	lnAddr := ln.Addr().(*net.TCPAddr)
 	bootstrap := startMockBootstrapServer(t, lnAddr.IP.String(), false)
 
-	dialer := makeBootstrapDialer([]string{bootstrap})
+	dialer := makeBootstrapDialer([]string{bootstrap}, "auto")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -300,7 +300,7 @@ func TestMakeBootstrapDialer_HostnameLookup(t *testing.T) {
 
 func TestNewDoHClient_WithBootstrap_Accepted(t *testing.T) {
 	// Ensure NewDoHClient accepts bootstrap IPs without error.
-	c, err := NewDoHClient("https://dns.quad9.net/dns-query", true, "9.9.9.9:53")
+	c, err := NewDoHClient("https://dns.quad9.net/dns-query", true, "auto", "9.9.9.9:53")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestNewDoHClient_WithBootstrap_Accepted(t *testing.T) {
 }
 
 func TestNewDoHClient_NoBootstrap_Accepted(t *testing.T) {
-	c, err := NewDoHClient("https://dns.quad9.net/dns-query", true)
+	c, err := NewDoHClient("https://dns.quad9.net/dns-query", true, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestNewDoHClient_NoBootstrap_Accepted(t *testing.T) {
 }
 
 func TestNewDoHClient_MultipleBootstrap_Accepted(t *testing.T) {
-	c, err := NewDoHClient("https://dns.quad9.net/dns-query", true, "9.9.9.9:53", "149.112.112.112:53")
+	c, err := NewDoHClient("https://dns.quad9.net/dns-query", true, "auto", "9.9.9.9:53", "149.112.112.112:53")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestNewDoHClient_MultipleBootstrap_Accepted(t *testing.T) {
 // --- Integration: NewDoTClient with bootstrap ---
 
 func TestNewDoTClient_NoBootstrap_Accepted(t *testing.T) {
-	c, err := NewDoTClient("dns.quad9.net:853", true)
+	c, err := NewDoTClient("dns.quad9.net:853", true, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestNewDoTClient_NoBootstrap_Accepted(t *testing.T) {
 
 func TestNewDoTClient_WithBootstrap_NumericHost(t *testing.T) {
 	// When address is already a numeric IP, bootstrap lookup is skipped.
-	c, err := NewDoTClient("9.9.9.9:853", true, "9.9.9.9:53")
+	c, err := NewDoTClient("9.9.9.9:853", true, "auto", "9.9.9.9:53")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -358,7 +358,7 @@ func TestNewDoTClient_WithBootstrap_NumericHost(t *testing.T) {
 func TestNewDoTClient_WithBootstrap_FallsBackOnFail(t *testing.T) {
 	// Bootstrap lookup fails (port 1 is unreachable); client creation should
 	// succeed and fall back to the original address.
-	c, err := NewDoTClient("dns.quad9.net:853", true, "127.0.0.1:1")
+	c, err := NewDoTClient("dns.quad9.net:853", true, "auto", "127.0.0.1:1")
 	if err != nil {
 		t.Fatalf("client creation should not fail if bootstrap lookup fails: %v", err)
 	}
@@ -389,7 +389,7 @@ func TestLookupHostViaBootstrap_ARecordQuery(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	ip, err := lookupHostViaBootstrap(ctx, "test.example.com", addr)
+	ip, err := lookupHostViaBootstrap(ctx, "test.example.com", addr, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestLookupHostViaBootstrap_NoARecord(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := lookupHostViaBootstrap(ctx, "norecord.example.com", addr)
+	_, err := lookupHostViaBootstrap(ctx, "norecord.example.com", addr, "auto")
 	if err == nil {
 		t.Error("expected error when no A record returned")
 	}
@@ -432,7 +432,7 @@ func TestLookupHostViaBootstrap_ServerError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := lookupHostViaBootstrap(ctx, "fail.example.com", addr)
+	_, err := lookupHostViaBootstrap(ctx, "fail.example.com", addr, "auto")
 	if err == nil {
 		t.Error("expected error when server returns SERVFAIL")
 	}
@@ -464,7 +464,7 @@ func TestResolveViaBootstrap_MultipleAddrs(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	ip, err := resolveViaBootstrap(ctx, "test.example.com", []string{addr1, addr2})
+	ip, err := resolveViaBootstrap(ctx, "test.example.com", []string{addr1, addr2}, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestResolveViaBootstrap_MultipleAddrs(t *testing.T) {
 // TestResolveViaBootstrap_EmptyAddrs verifies error on empty bootstrap list.
 func TestResolveViaBootstrap_EmptyAddrs(t *testing.T) {
 	ctx := context.Background()
-	_, err := resolveViaBootstrap(ctx, "test.example.com", nil)
+	_, err := resolveViaBootstrap(ctx, "test.example.com", nil, "auto")
 	if err == nil {
 		t.Error("expected error with empty bootstrap addresses")
 	}
@@ -583,7 +583,7 @@ func TestLookupHostViaBootstrap_AAAAOnly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	ip, err := lookupHostViaBootstrap(ctx, "ipv6host.example.com", addr)
+	ip, err := lookupHostViaBootstrap(ctx, "ipv6host.example.com", addr, "auto")
 	if err != nil {
 		t.Fatalf("AAAA-only bootstrap: unexpected error: %v", err)
 	}
@@ -650,7 +650,7 @@ func TestLookupHostViaBootstrap_AOnly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	ip, err := lookupHostViaBootstrap(ctx, "example.com", addr)
+	ip, err := lookupHostViaBootstrap(ctx, "example.com", addr, "auto")
 	if err != nil {
 		t.Fatalf("A-only bootstrap: unexpected error: %v", err)
 	}
@@ -690,7 +690,7 @@ func TestLookupHostViaBootstrap_BothRespond(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	ip, err := lookupHostViaBootstrap(ctx, "dual.example.com", addr)
+	ip, err := lookupHostViaBootstrap(ctx, "dual.example.com", addr, "auto")
 	if err != nil {
 		t.Fatalf("dual A/AAAA bootstrap: unexpected error: %v", err)
 	}

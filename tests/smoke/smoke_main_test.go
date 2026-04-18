@@ -39,6 +39,11 @@ var dnsieveBinary string
 // smokeTmpDir is the root temp directory for this test run, cleaned up in TestMain.
 var smokeTmpDir string
 
+// testIPv6Reachable is true when the test host can reach a public IPv6 address.
+// It is set once in TestMain and used by config helpers to select the
+// appropriate bootstrap_ip_family setting for generated TOML configs.
+var testIPv6Reachable bool
+
 // TestMain builds the DNSieve binary once and then runs all smoke tests.
 // All temporary files are created inside smokeTmpDir, which is removed after
 // the test suite finishes.
@@ -78,6 +83,16 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	fmt.Println("=== SMOKE build complete")
+
+	// Probe IPv6 connectivity once. If unreachable, config helpers will add
+	// bootstrap_ip_family = "ipv4" so the binary does not attempt AAAA
+	// bootstrap lookups that would fail on IPv4-only CI runners.
+	testIPv6Reachable = probeIPv6()
+	if testIPv6Reachable {
+		fmt.Println("=== SMOKE IPv6 probe: reachable")
+	} else {
+		fmt.Println("=== SMOKE IPv6 probe: unreachable -- bootstrap_ip_family will be set to ipv4")
+	}
 
 	os.Exit(m.Run())
 }

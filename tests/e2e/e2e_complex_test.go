@@ -53,7 +53,7 @@ func TestE2E_Complex_MultipleEDNS(t *testing.T) {
 	cfg.Privacy.ECS.Mode = "strip"
 	cfg.Privacy.NSID.Mode = "substitute"
 	cfg.Privacy.NSID.Value = "proxy-test"
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	query := makePlainQuery("example.com", dns.TypeA)
@@ -163,7 +163,7 @@ func TestE2E_Concurrency_MultipleClients(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
 	cfg.Cache.Enabled = true
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	const numClients = 10

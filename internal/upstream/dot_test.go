@@ -143,7 +143,7 @@ func makeSuccessResponse(query *dns.Msg) *dns.Msg {
 // TestNewDoTClient_BareIPv4DefaultPort verifies that a raw IPv4 address without
 // a port gets the default DoT port (853) appended.
 func TestNewDoTClient_BareIPv4DefaultPort(t *testing.T) {
-	c, err := NewDoTClient("1.1.1.1", false)
+	c, err := NewDoTClient("1.1.1.1", false, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestNewDoTClient_BareIPv4DefaultPort(t *testing.T) {
 // TestNewDoTClient_HostnameWithPort verifies that a hostname:port address
 // preserves the port and uses the hostname as the TLS ServerName.
 func TestNewDoTClient_HostnameWithPort(t *testing.T) {
-	c, err := NewDoTClient("dns.example.com:853", false)
+	c, err := NewDoTClient("dns.example.com:853", false, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestNewDoTClient_HostnameWithPort(t *testing.T) {
 // TestNewDoTClient_VerifyCertTrue verifies that verifyCert=true sets
 // InsecureSkipVerify to false (certificate verification is enabled).
 func TestNewDoTClient_VerifyCertTrue(t *testing.T) {
-	c, err := NewDoTClient("1.1.1.1:853", true)
+	c, err := NewDoTClient("1.1.1.1:853", true, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestNewDoTClient_VerifyCertTrue(t *testing.T) {
 // TestNewDoTClient_VerifyCertFalse verifies that verifyCert=false sets
 // InsecureSkipVerify to true (certificate verification is disabled).
 func TestNewDoTClient_VerifyCertFalse(t *testing.T) {
-	c, err := NewDoTClient("1.1.1.1:853", false)
+	c, err := NewDoTClient("1.1.1.1:853", false, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestNewDoTClient_VerifyCertFalse(t *testing.T) {
 // --- String ---
 
 func TestDoTClient_String(t *testing.T) {
-	c, err := NewDoTClient("1.1.1.1:853", false)
+	c, err := NewDoTClient("1.1.1.1:853", false, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestDoTClient_SuccessfulQuery(t *testing.T) {
 	addr := startTLSDNSServer(t, cert, makeSuccessResponse)
 
 	// verifyCert=false so the client accepts our self-signed cert.
-	client, err := NewDoTClient(addr, false)
+	client, err := NewDoTClient(addr, false, "auto")
 	if err != nil {
 		t.Fatalf("NewDoTClient: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestDoTClient_SuccessfulAAAAQuery(t *testing.T) {
 		return resp
 	})
 
-	client, err := NewDoTClient(addr, false)
+	client, err := NewDoTClient(addr, false, "auto")
 	if err != nil {
 		t.Fatalf("NewDoTClient: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestDoTClient_NXDomainResponse(t *testing.T) {
 		return resp
 	})
 
-	client, err := NewDoTClient(addr, false)
+	client, err := NewDoTClient(addr, false, "auto")
 	if err != nil {
 		t.Fatalf("NewDoTClient: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestDoTClient_ServerClosesConnection(t *testing.T) {
 		return nil
 	})
 
-	client, err := NewDoTClient(addr, false)
+	client, err := NewDoTClient(addr, false, "auto")
 	if err != nil {
 		t.Fatalf("NewDoTClient: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestDoTClient_ContextAlreadyExpired(t *testing.T) {
 	cert := generateSelfSignedCert(t)
 	addr := startTLSDNSServer(t, cert, makeSuccessResponse)
 
-	client, err := NewDoTClient(addr, false)
+	client, err := NewDoTClient(addr, false, "auto")
 	if err != nil {
 		t.Fatalf("NewDoTClient: %v", err)
 	}
@@ -352,7 +352,7 @@ func TestDoTClient_ContextAlreadyExpired(t *testing.T) {
 // returns a non-nil error.
 func TestDoTClient_UnreachableServer(t *testing.T) {
 	// Port 1 should be unreachable.
-	client, err := NewDoTClient("127.0.0.1:1", false)
+	client, err := NewDoTClient("127.0.0.1:1", false, "auto")
 	if err != nil {
 		t.Fatalf("NewDoTClient: %v", err)
 	}
@@ -371,7 +371,7 @@ func TestDoTClient_UnreachableServer(t *testing.T) {
 // does not repeat the upstream address. The address is already present in
 // DoTClient.String() so including it again in the error is redundant.
 func TestDoTClient_NoAddressInError(t *testing.T) {
-	client, err := NewDoTClient("127.0.0.1:1", false)
+	client, err := NewDoTClient("127.0.0.1:1", false, "auto")
 	if err != nil {
 		t.Fatalf("NewDoTClient: %v", err)
 	}
@@ -437,7 +437,7 @@ func TestDoTClient_MultipleSequentialQueries(t *testing.T) {
 	cert := generateSelfSignedCert(t)
 	addr := startTLSDNSServer(t, cert, makeSuccessResponse)
 
-	client, err := NewDoTClient(addr, false)
+	client, err := NewDoTClient(addr, false, "auto")
 	if err != nil {
 		t.Fatalf("NewDoTClient: %v", err)
 	}
@@ -464,7 +464,7 @@ func TestDoTClient_WithBootstrap(t *testing.T) {
 	bootstrapAddr := startMockBootstrapServer(t, "127.0.0.1", false)
 
 	// "dns.example.test" is not a real hostname; the bootstrap should resolve it.
-	c, err := NewDoTClient("dns.example.test:853", false, bootstrapAddr)
+	c, err := NewDoTClient("dns.example.test:853", false, "auto", bootstrapAddr)
 	if err != nil {
 		t.Fatalf("NewDoTClient with bootstrap: %v", err)
 	}
@@ -483,7 +483,7 @@ func TestDoTClient_WithBootstrap(t *testing.T) {
 // constructor.
 func TestDoTClient_BootstrapFailureFallback(t *testing.T) {
 	// Bootstrap server at port 1 is unreachable.
-	c, err := NewDoTClient("dns.example.test:853", false, "127.0.0.1:1")
+	c, err := NewDoTClient("dns.example.test:853", false, "auto", "127.0.0.1:1")
 	if err != nil {
 		t.Fatalf("NewDoTClient should not fail on bootstrap timeout: %v", err)
 	}

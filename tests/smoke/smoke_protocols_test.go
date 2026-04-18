@@ -91,7 +91,7 @@ protocol = "doh"
 timeout_ms = 5000
 min_wait_ms = 200
 verify_certificates = true
-
+%s
 [downstream.plain]
 enabled = true
 listen_addresses = ["127.0.0.1"]
@@ -109,7 +109,7 @@ use_plaintext_http = true
 [cache]
 enabled = true
 max_entries = 1000
-`, plainPort, dohPort)
+`, bootstrapIPFamilyTOML(), plainPort, dohPort)
 }
 
 // dotConfig returns a TOML config that enables DoT with the given certificate.
@@ -126,7 +126,7 @@ protocol = "doh"
 timeout_ms = 5000
 min_wait_ms = 200
 verify_certificates = true
-
+%s
 [tls]
 cert_base64 = %q
 key_base64  = %q
@@ -147,7 +147,7 @@ enabled = false
 [cache]
 enabled = true
 max_entries = 1000
-`, cert.certB64, cert.keyB64, plainPort, dotPort)
+`, bootstrapIPFamilyTOML(), cert.certB64, cert.keyB64, plainPort, dotPort)
 }
 
 // doHPost sends a DNS message to the DoH endpoint and returns the response.

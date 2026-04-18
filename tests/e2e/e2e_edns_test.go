@@ -23,7 +23,7 @@ func TestE2E_EDNS_ECS_Strip(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
 	cfg.Privacy.ECS.Mode = "strip"
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	resp := queryWithECS(t, port, "example.com", dns.TypeA, "1.2.3.0/24")
@@ -38,7 +38,7 @@ func TestE2E_EDNS_ECS_Forward(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
 	cfg.Privacy.ECS.Mode = "forward"
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	resp := queryWithECS(t, port, "example.com", dns.TypeA, "192.0.2.0/24")
@@ -54,7 +54,7 @@ func TestE2E_EDNS_ECS_Substitute(t *testing.T) {
 	cfg := plainConfig(port)
 	cfg.Privacy.ECS.Mode = "substitute"
 	cfg.Privacy.ECS.Subnet = "203.0.113.0/24"
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	resp := queryWithECS(t, port, "example.com", dns.TypeA, "1.2.3.0/24")
@@ -69,7 +69,7 @@ func TestE2E_EDNS_ECS_IPv6(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
 	cfg.Privacy.ECS.Mode = "forward"
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	resp := queryWithECS(t, port, "example.com", dns.TypeA, "2001:db8::/32")
@@ -88,7 +88,7 @@ func TestE2E_EDNS_Cookies_Strip(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
 	cfg.Privacy.Cookies.Mode = "strip"
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	resp := queryWithCookie(t, port, "example.com", dns.TypeA, "aabbccdd11223344")
@@ -103,7 +103,7 @@ func TestE2E_EDNS_Cookies_Reoriginate(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
 	cfg.Privacy.Cookies.Mode = "reoriginate"
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	resp1 := queryUDP(t, port, "example.com", dns.TypeA)
@@ -134,7 +134,7 @@ func TestE2E_EDNS_NSID_Strip(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
 	cfg.Privacy.NSID.Mode = "strip"
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	resp := queryWithNSID(t, port, "example.com", dns.TypeA)
@@ -149,7 +149,7 @@ func TestE2E_EDNS_NSID_Forward(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
 	cfg.Privacy.NSID.Mode = "forward"
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	resp := queryWithNSID(t, port, "example.com", dns.TypeA)
@@ -165,7 +165,7 @@ func TestE2E_EDNS_NSID_Substitute(t *testing.T) {
 	cfg := plainConfig(port)
 	cfg.Privacy.NSID.Mode = "substitute"
 	cfg.Privacy.NSID.Value = "dnsieve-e2e-test"
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	resp := queryWithNSID(t, port, "example.com", dns.TypeA)
@@ -193,7 +193,7 @@ func TestE2E_EDNS_TCPKeepalive(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
 	cfg.TCPKeepalive.ClientTimeoutSec = 30
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	resp := queryTCP(t, port, "example.com", dns.TypeA)
@@ -218,7 +218,7 @@ func TestE2E_EDNS_TCPKeepalive(t *testing.T) {
 func TestE2E_EDNS_TCPKeepalive_NotOnUDP(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	resp := queryUDP(t, port, "example.com", dns.TypeA)

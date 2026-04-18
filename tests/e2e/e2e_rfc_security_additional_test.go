@@ -79,7 +79,7 @@ func TestE2E_RFC2181_RRSetTTLUniformity(t *testing.T) {
 func TestE2E_RFC3597_UnknownQTypeHandled(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	// dnsutil.SetQuestion returns nil for unknown qtypes, so build the message directly.
@@ -105,6 +105,7 @@ func TestE2E_RFC3597_UnknownQTypeHandled(t *testing.T) {
 
 	switch resp.Rcode {
 	case dns.RcodeSuccess, dns.RcodeNameError, dns.RcodeNotImplemented, dns.RcodeRefused:
+		// all acceptable
 	default:
 		t.Errorf("RFC 3597 e2e: unexpected rcode=%s", dns.RcodeToString[resp.Rcode])
 	}

@@ -38,6 +38,12 @@ type UpstreamSettings struct {
 	MinWaitMS          int    `toml:"min_wait_ms"`
 	VerifyCertificates bool   `toml:"verify_certificates"`
 	BootstrapDNS       string `toml:"bootstrap_dns"`
+	// BootstrapIPFamily controls which address family the bootstrap DNS
+	// resolver queries when resolving upstream hostnames.
+	// "auto" races A and AAAA and uses whichever responds first (RFC 6555).
+	// "ipv4" queries only A records; use on IPv4-only hosts.
+	// "ipv6" queries only AAAA records; use on IPv6-only hosts.
+	BootstrapIPFamily string `toml:"bootstrap_ip_family"`
 }
 
 // TLSConfig holds shared TLS certificate settings used by both DoT and DoH
@@ -221,6 +227,7 @@ func DefaultConfig() *Config {
 			MinWaitMS:          200,
 			VerifyCertificates: true,
 			BootstrapDNS:       "9.9.9.9:53,149.112.112.112:53",
+			BootstrapIPFamily:  "auto",
 		},
 		Downstream: Downstream{
 			Plain: DownstreamPlain{
@@ -824,6 +831,21 @@ verify_certificates = true
 # the fastest response wins. Defaults to both Quad9 anycast IPs.
 # Set to empty string to use the system resolver instead.
 bootstrap_dns = "9.9.9.9:53,149.112.112.112:53"
+
+# Address family used when the bootstrap DNS resolves DoH/DoT hostnames.
+# The bootstrap lookup races an A query and a AAAA query (RFC 6555 Happy
+# Eyeballs) and connects to whichever responds first. On hosts where one
+# address family has no outbound connectivity the wrong address type can
+# win, causing every upstream connection to fail.
+#
+#   "auto" -- race A and AAAA, fastest wins (default; best for dual-stack)
+#   "ipv4" -- query only A records  (use on IPv4-only hosts / containers)
+#   "ipv6" -- query only AAAA records (use on IPv6-only hosts)
+#
+# This setting only affects how upstream hostnames are resolved. The
+# encrypted DNS traffic itself flows over whatever address is returned.
+# Leave as "auto" on dual-stack hosts.
+# bootstrap_ip_family = "auto"
 
 
 # =============================================================================

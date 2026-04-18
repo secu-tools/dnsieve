@@ -127,6 +127,30 @@ dedicated bootstrap server to avoid circular dependencies:
 bootstrap_dns = "9.9.9.9:53"
 ```
 
+### Bootstrap IP Family
+
+The bootstrap lookup races an A query and a AAAA query concurrently
+(RFC 6555 Happy Eyeballs) and uses the first response. On hosts where one
+address family is unreachable this can cause connection failures if the
+wrong address type wins the race. `bootstrap_ip_family` locks the lookup to
+one family:
+
+| Value | Behaviour |
+|-------|-----------|
+| `"auto"` | Race A and AAAA; fastest response wins. **Default.** |
+| `"ipv4"` | Query only A records. Use on IPv4-only hosts. |
+| `"ipv6"` | Query only AAAA records. Use on IPv6-only hosts. |
+
+```toml
+[upstream_settings]
+bootstrap_ip_family = "ipv4"   # IPv4-only host
+```
+
+This setting affects only the bootstrap hostname resolution step (resolving
+`dns.quad9.net` to an IP before connecting). The encrypted DNS traffic itself
+flows over whichever address was resolved -- there is no separate restriction
+on the upstream connection. Leave as `"auto"` on dual-stack hosts.
+
 ## TLS Certificate (Shared)
 
 A single TLS certificate is shared by both DoT and DoH downstream listeners.

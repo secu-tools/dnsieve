@@ -366,7 +366,7 @@ func TestCreateClient_UnsupportedProtocol(t *testing.T) {
 		Address:  "example.com:12345",
 		Protocol: "unsupported",
 	}
-	_, err := createClient(srv, false, nil)
+	_, err := createClient(srv, false, nil, "auto")
 	if err == nil {
 		t.Error("expected error for unsupported protocol")
 	}
@@ -377,7 +377,7 @@ func TestCreateClient_UDP(t *testing.T) {
 		Address:  "9.9.9.9:53",
 		Protocol: "udp",
 	}
-	c, err := createClient(srv, false, nil)
+	c, err := createClient(srv, false, nil, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

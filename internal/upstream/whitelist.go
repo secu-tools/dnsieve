@@ -67,7 +67,7 @@ func NewWhitelistResolver(cfg *config.WhitelistConfig, verifyCert bool) (*Whitel
 		Address:  addr,
 		Protocol: proto,
 	}
-	c, err := newClient(srv, verifyCert, nil)
+	c, err := newClient(srv, verifyCert, nil, "auto")
 	if err != nil {
 		return nil, err
 	}

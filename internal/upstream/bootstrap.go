@@ -70,7 +70,10 @@ func queryBootstrapRecord(ctx context.Context, client *dns.Client, host, bootstr
 // bootstrapAddr (host:port, UDP) and returns the first IP that responds
 // successfully, preferring whichever record type arrives first. This supports
 // both IPv4-only and IPv6-only environments (Happy Eyeballs, RFC 6555).
-func lookupHostViaBootstrap(ctx context.Context, host, bootstrapAddr string) (string, error) {
+// ipFamily controls which record types are queried: "ipv4" sends only A,
+// "ipv6" sends only AAAA, and any other value (including "auto" or "") races
+// both.
+func lookupHostViaBootstrap(ctx context.Context, host, bootstrapAddr, ipFamily string) (string, error) {
 	type result struct {
 		ip  string
 		err error
@@ -96,11 +99,21 @@ func lookupHostViaBootstrap(ctx context.Context, host, bootstrapAddr string) (st
 		}
 	}
 
-	go sendQuery(dns.TypeA)
-	go sendQuery(dns.TypeAAAA)
+	var expected int
+	if ipFamily == "ipv4" {
+		expected = 1
+		go sendQuery(dns.TypeA)
+	} else if ipFamily == "ipv6" {
+		expected = 1
+		go sendQuery(dns.TypeAAAA)
+	} else {
+		expected = 2
+		go sendQuery(dns.TypeA)
+		go sendQuery(dns.TypeAAAA)
+	}
 
 	var lastErr error
-	for i := 0; i < 2; i++ {
+	for i := 0; i < expected; i++ {
 		select {
 		case r := <-ch:
 			if r.err == nil {
@@ -121,7 +134,8 @@ func lookupHostViaBootstrap(ctx context.Context, host, bootstrapAddr string) (st
 // resolveViaBootstrap queries all bootstrapAddrs in parallel and returns the
 // IP from the first successful response. It cancels the remaining in-flight
 // queries once a result is obtained.
-func resolveViaBootstrap(ctx context.Context, host string, bootstrapAddrs []string) (string, error) {
+// ipFamily is forwarded to each individual lookup; see lookupHostViaBootstrap.
+func resolveViaBootstrap(ctx context.Context, host string, bootstrapAddrs []string, ipFamily string) (string, error) {
 	if len(bootstrapAddrs) == 0 {
 		return "", fmt.Errorf("no bootstrap DNS addresses")
 	}
@@ -138,7 +152,7 @@ func resolveViaBootstrap(ctx context.Context, host string, bootstrapAddrs []stri
 	for _, addr := range bootstrapAddrs {
 		addr := addr
 		go func() {
-			ip, err := lookupHostViaBootstrap(ctx, host, addr)
+			ip, err := lookupHostViaBootstrap(ctx, host, addr, ipFamily)
 			select {
 			case ch <- result{ip, err}:
 			case <-ctx.Done():
@@ -168,7 +182,8 @@ func resolveViaBootstrap(ctx context.Context, host string, bootstrapAddrs []stri
 // makeBootstrapDialer returns a DialContext function that resolves hostnames
 // via the given bootstrap DNS addresses before dialling. If the address is
 // already a numeric IP, the default dialer is used directly.
-func makeBootstrapDialer(bootstrapAddrs []string) func(ctx context.Context, network, addr string) (net.Conn, error) {
+// ipFamily is forwarded to resolveViaBootstrap; see lookupHostViaBootstrap.
+func makeBootstrapDialer(bootstrapAddrs []string, ipFamily string) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
@@ -178,7 +193,7 @@ func makeBootstrapDialer(bootstrapAddrs []string) func(ctx context.Context, netw
 		if net.ParseIP(host) != nil {
 			return (&net.Dialer{}).DialContext(ctx, network, addr)
 		}
-		ip, err := resolveViaBootstrap(ctx, host, bootstrapAddrs)
+		ip, err := resolveViaBootstrap(ctx, host, bootstrapAddrs, ipFamily)
 		if err != nil {
 			return nil, fmt.Errorf("bootstrap dial %s: %w", host, err)
 		}

@@ -620,14 +620,14 @@ func TestWhitelistResolver_Disabled(t *testing.T) {
 }
 
 func TestNewDoHClient_EmptyURL(t *testing.T) {
-	_, err := NewDoHClient("", true)
+	_, err := NewDoHClient("", true, "auto")
 	if err == nil {
 		t.Error("expected error for empty DoH URL")
 	}
 }
 
 func TestNewDoTClient_EmptyAddress(t *testing.T) {
-	_, err := NewDoTClient("", true)
+	_, err := NewDoTClient("", true, "auto")
 	if err == nil {
 		t.Error("expected error for empty DoT address")
 	}
@@ -711,7 +711,7 @@ func TestNewPlainClient_IPv6WithPort(t *testing.T) {
 }
 
 func TestNewDoTClient_BareHostname(t *testing.T) {
-	c, err := NewDoTClient("dns.quad9.net", true)
+	c, err := NewDoTClient("dns.quad9.net", true, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -724,7 +724,7 @@ func TestNewDoTClient_BareHostname(t *testing.T) {
 }
 
 func TestNewDoTClient_BareIPv6(t *testing.T) {
-	c, err := NewDoTClient("2620:fe::fe", true)
+	c, err := NewDoTClient("2620:fe::fe", true, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -737,7 +737,7 @@ func TestNewDoTClient_BareIPv6(t *testing.T) {
 }
 
 func TestNewDoTClient_IPv6WithPort(t *testing.T) {
-	c, err := NewDoTClient("[2620:fe::fe]:853", true)
+	c, err := NewDoTClient("[2620:fe::fe]:853", true, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -750,7 +750,7 @@ func TestNewDoTClient_IPv6WithPort(t *testing.T) {
 }
 
 func TestNewDoTClient_IPv4WithPort(t *testing.T) {
-	c, err := NewDoTClient("9.9.9.9:853", true)
+	c, err := NewDoTClient("9.9.9.9:853", true, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -760,7 +760,7 @@ func TestNewDoTClient_IPv4WithPort(t *testing.T) {
 }
 
 func TestNewDoHClient_ValidURL(t *testing.T) {
-	c, err := NewDoHClient("https://dns.quad9.net/dns-query", true)
+	c, err := NewDoHClient("https://dns.quad9.net/dns-query", true, "auto")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -770,7 +770,7 @@ func TestNewDoHClient_ValidURL(t *testing.T) {
 }
 
 func TestNewDoHClient_EmptyURL_Second(t *testing.T) {
-	_, err := NewDoHClient("", true)
+	_, err := NewDoHClient("", true, "auto")
 	if err == nil {
 		t.Error("expected error for empty DoH URL")
 	}
@@ -874,11 +874,11 @@ func TestResolve_DNSSEC_PrefersOverFirst(t *testing.T) {
 	query := makeQuery("example.com", dns.TypeA)
 
 	clients := []Client{
-		// Index 0: normal, no DNSSEC → would normally win on priority alone
+		// Index 0: normal, no DNSSEC �?would normally win on priority alone
 		&mockClient{name: "server1-plain", response: makeNormalResp(query)},
 		// Index 1: normal, no DNSSEC
 		&mockClient{name: "server2-plain", response: makeNormalResp(query)},
-		// Index 2: has DNSSEC (AD=1) — should override the above
+		// Index 2: has DNSSEC (AD=1) �?should override the above
 		&mockClient{name: "server3-dnssec", response: makeDNSSECResp(query, "3.3.3.3")},
 	}
 
@@ -909,9 +909,9 @@ func TestResolve_DNSSEC_PrefersFirstDNSSEC(t *testing.T) {
 	clients := []Client{
 		// Index 0: no DNSSEC
 		&mockClient{name: "server1-plain", response: makeNormalResp(query)},
-		// Index 1: DNSSEC — should win (lowest-index DNSSEC)
+		// Index 1: DNSSEC �?should win (lowest-index DNSSEC)
 		&mockClient{name: "server2-dnssec", response: makeDNSSECResp(query, "2.2.2.2")},
-		// Index 2: DNSSEC — should lose to server2 on index order
+		// Index 2: DNSSEC �?should lose to server2 on index order
 		&mockClient{name: "server3-dnssec", response: makeDNSSECResp(query, "3.3.3.3")},
 	}
 

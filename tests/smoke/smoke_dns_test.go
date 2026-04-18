@@ -105,7 +105,6 @@ func TestSmoke_Cache_HitIsFast(t *testing.T) {
 	start := time.Now()
 	resp2 := queryUDP(t, port, "example.com", dns.TypeA)
 	elapsed := time.Since(start)
-
 	if resp2.Rcode != dns.RcodeSuccess {
 		t.Fatalf("second query: rcode=%s", dns.RcodeToString[resp2.Rcode])
 	}

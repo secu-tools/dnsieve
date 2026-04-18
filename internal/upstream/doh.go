@@ -26,7 +26,9 @@ type DoHClient struct {
 // NewDoHClient creates a DoH client for the given server URL.
 // bootstrapIPs is an optional list of host:port addresses used to resolve
 // the DoH server hostname instead of the system resolver.
-func NewDoHClient(url string, verifyCert bool, bootstrapIPs ...string) (*DoHClient, error) {
+// ipFamily controls bootstrap address-family selection: "ipv4", "ipv6", or
+// "auto" (default) to race both as per RFC 6555.
+func NewDoHClient(url string, verifyCert bool, ipFamily string, bootstrapIPs ...string) (*DoHClient, error) {
 	if url == "" {
 		return nil, fmt.Errorf("empty DoH URL")
 	}
@@ -57,7 +59,7 @@ func NewDoHClient(url string, verifyCert bool, bootstrapIPs ...string) (*DoHClie
 		ResponseHeaderTimeout: 5 * time.Second,
 	}
 	if len(bootstrapIPs) > 0 {
-		transport.DialContext = makeBootstrapDialer(bootstrapIPs)
+		transport.DialContext = makeBootstrapDialer(bootstrapIPs, ipFamily)
 	}
 
 	return &DoHClient{

@@ -18,6 +18,28 @@ import (
 	"codeberg.org/miekg/dns/dnsutil"
 )
 
+// probeIPv6 returns true when the test host can open a TCP connection to a
+// known public IPv6 address. Quad9's anycast address (2620:fe::fe) is used.
+// A 2-second timeout is enough to detect a non-routable IPv6 stack quickly.
+func probeIPv6() bool {
+	conn, err := net.DialTimeout("tcp6", "[2620:fe::fe]:53", 2*time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+// bootstrapIPFamilyTOML returns the TOML line to set bootstrap_ip_family
+// when the test host cannot reach IPv6. Returns an empty string when IPv6 is
+// available so configs remain minimal in that case.
+func bootstrapIPFamilyTOML() string {
+	if !testIPv6Reachable {
+		return `bootstrap_ip_family = "ipv4"` + "\n"
+	}
+	return ""
+}
+
 // smokeTempDir creates a subdirectory inside smokeTmpDir for a single test.
 // It is NOT registered as t.Cleanup because the global cleanup in TestMain
 // handles removal of the entire smokeTmpDir tree.
@@ -130,7 +152,7 @@ protocol = "doh"
 timeout_ms = 5000
 min_wait_ms = 200
 verify_certificates = true
-
+%s
 [downstream.plain]
 enabled = true
 listen_addresses = ["127.0.0.1"]
@@ -146,7 +168,7 @@ enabled = false
 enabled = true
 max_entries = 1000
 min_ttl = 30
-`, port)
+`, bootstrapIPFamilyTOML(), port)
 }
 
 // writeConfig writes config content to a file named config.toml inside dir

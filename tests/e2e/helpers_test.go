@@ -226,6 +226,54 @@ func makePlainQuery(name string, qtype uint16) *dns.Msg {
 // transient failures (transport errors or SERVFAIL from an upstream).
 const maxQueryAttempts = 3
 
+// startServerReachable starts a DNSieve proxy and confirms that at least one
+// upstream resolver is reachable before returning. It probes using three
+// bootstrap IP-family strategies in order: "auto" (RFC 6555 race), "ipv4"
+// (A records only), then "ipv6" (AAAA records only). The server is restarted
+// with each strategy until a probe query returns NOERROR. If every strategy
+// returns SERVFAIL the test is failed immediately -- not skipped -- because a
+// SERVFAIL at this stage indicates a real network outage, not a test defect.
+//
+// Using this function instead of startServer ensures that tests depending on
+// live upstream responses behave deterministically on IPv4-only CI runners
+// (attempt 2 forces IPv4 bootstrap) without random skipping.
+func startServerReachable(t *testing.T, cfg *config.Config) context.CancelFunc {
+	t.Helper()
+	port := cfg.Downstream.Plain.Port
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	for _, family := range []string{"auto", "ipv4", "ipv6"} {
+		// Clone the upstream settings so the caller's config is not modified.
+		us := cfg.UpstreamSettings
+		us.BootstrapIPFamily = family
+		cfgCopy := *cfg
+		cfgCopy.UpstreamSettings = us
+
+		cancel := startServer(t, &cfgCopy)
+
+		// Probe upstream health with a short-circuit query.
+		c := dns.NewClient()
+		c.Transport.ReadTimeout = 5 * time.Second
+		q := dnsutil.SetQuestion(new(dns.Msg), dnsutil.Fqdn("example.com"), dns.TypeA)
+		q.RecursionDesired = true
+		ctx, ctxCancel := context.WithTimeout(context.Background(), 6*time.Second)
+		resp, _, err := c.Exchange(ctx, q, "udp", addr)
+		ctxCancel()
+
+		if err == nil && resp != nil && resp.Rcode != dns.RcodeServerFailure {
+			t.Logf("upstream reachable (bootstrap_ip_family=%q)", family)
+			return cancel
+		}
+
+		cancel()
+		t.Logf("bootstrap_ip_family=%q: upstream unreachable, trying next strategy", family)
+	}
+
+	t.Fatal("upstream unreachable with all bootstrap IP family strategies (auto, ipv4, ipv6); " +
+		"no network connectivity -- cannot run this test")
+	return nil
+}
+
 // queryUDP sends a DNS query over UDP and returns the response.
 func queryUDP(t *testing.T, port int, name string, qtype uint16) *dns.Msg {
 	t.Helper()
