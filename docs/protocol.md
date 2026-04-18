@@ -53,7 +53,9 @@ Uses TLS 1.2 minimum.
 ### DoH Server
 
 Serves DNS-over-HTTPS on the `/dns-query` path. Supports:
-- **POST** -- `Content-Type: application/dns-message`, body is raw DNS wire
+- **POST** -- `Content-Type: application/dns-message`, body is raw DNS wire.
+  The media type is parsed per RFC 2045: MIME parameters (e.g. `charset=utf-8`)
+  and case differences (e.g. `Application/DNS-Message`) are accepted.
 - **GET** -- `?dns=<base64url>` parameter with base64url-encoded DNS query
 - **JSON API** -- `?name=<domain>&type=<type>` with `Accept: application/dns-json` (Google JSON DNS API compatible)
 - **OPTIONS** -- CORS preflight responses
@@ -158,12 +160,13 @@ When `ProcessUpstreamResponse` is called on the selected best response:
 **Known limitation: BADCOOKIE handling**
 
 RFC 7873 Section 5.4 requires that if an upstream returns RCODE 23 (BADCOOKIE),
-the client must not use the answer and must retry the query. The current
-implementation does not detect RCODE 23 from upstreams. A BADCOOKIE response is
-treated as a server error (excluded from the consensus result). In practice this
-is rare: it only occurs when a server rotates its secret and the stored server
-cookie becomes stale. The next query after the bad response will carry only the
-client cookie (no stale server cookie), and normal operation resumes.
+the client must not use the answer and must retry the query. The proxy detects
+RCODE 23 from upstreams and classifies it as a server error, excluding the
+response from the consensus result. A one-shot protocol-level retry with a
+refreshed cookie is not performed. In practice this is rare: it only occurs when
+a server rotates its secret and the stored server cookie becomes stale. The next
+query after the BADCOOKIE response will carry only the client cookie (no stale
+server cookie), and normal operation resumes.
 
 ### NSID (RFC 5001)
 - Configurable: strip (default), forward, or substitute with proxy's own ID
@@ -182,6 +185,9 @@ client cookie (no stale server cookie), and normal operation resumes.
 ### DDR (RFC 9461/9462)
 - When enabled, queries for `_dns.resolver.arpa. SVCB` are answered locally
   advertising the proxy's encrypted endpoints
+- DoT SVCB records include `alpn=dot` and `port=<port>` service parameters
+- DoH SVCB records include `alpn=h2`, `port=<port>`, and `dohpath=/dns-query{?dns}`
+  service parameters (RFC 9461 s4)
 
 ## Block Detection
 
@@ -212,19 +218,24 @@ DNSieve detects blocked domains by inspecting upstream responses:
 The response format depends on the configured `blocking.mode`
 (see [configuration.md](configuration.md#blocking-mode)):
 
-| Mode        | Rcode    | Answer                          |
-|-------------|----------|---------------------------------|
-| `null`      | NOERROR  | 0.0.0.0 (A), :: (AAAA), empty (other types) |
-| `nxdomain`  | NXDOMAIN | Empty                           |
-| `nodata`    | NOERROR  | Empty                           |
-| `refused`   | REFUSED  | Empty                           |
+| Mode        | Rcode    | Answer                          | Authority                        |
+|-------------|----------|---------------------------------|----------------------------------|
+| `null`      | NOERROR  | 0.0.0.0 (A), :: (AAAA), empty (other types) | None            |
+| `nxdomain`  | NXDOMAIN | Empty                           | Synthesized SOA (RFC 2308 s3)    |
+| `nodata`    | NOERROR  | Empty                           | Synthesized SOA (RFC 2308 s2.2)  |
+| `refused`   | REFUSED  | Empty                           | None                             |
 
 All modes include:
 - An **Extended DNS Error** (EDE) option with `InfoCode = 15` (Blocked)
-  per RFC 8914. Supporting clients such as Pi-hole FTL >= 5.18 classify
-  this as "Blocked (upstream)" rather than an error.
+  per RFC 8914, only when the client sent a query with an OPT record
+  (RFC 6891: EDNS0 extension mechanism is required to carry EDE). Supporting
+  clients such as Pi-hole FTL >= 5.18 classify this as "Blocked (upstream)"
+  rather than an error.
 - EDE extra text identifying the upstream that detected the block,
   for example: `Blocked (dns.quad9.net)`.
+
+Non-EDNS clients (queries without an OPT record) receive no OPT record in
+the response, and therefore no EDE. This is correct per RFC 6891 s7.
 
 The default mode is `null` (NOERROR with 0.0.0.0/::), which is the
 recommended default by both Pi-hole and Technitium. Connections to
@@ -239,7 +250,7 @@ record types like MX, TXT, CNAME, or SRV.
 
 ## Cache Behavior
 
-- LRU eviction when capacity is reached
+- TTL-priority eviction when capacity is reached (entry closest to expiry is removed first)
 - TTL honored from upstream responses (floored by `min_ttl`)
 - Blocked responses cached with `blocked_ttl`
 - Entries not cached when upstreams disagree or have errors

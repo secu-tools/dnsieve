@@ -520,3 +520,304 @@ func startCustomBootstrapServer(t *testing.T, handler func(*dns.Msg) *dns.Msg) (
 	}
 	return addr, cleanup
 }
+
+// startMockBootstrapServerAAAA starts a local UDP DNS server that responds to
+// AAAA queries with the given IPv6 address and returns NXDOMAIN for A queries,
+// simulating an IPv6-only environment.
+func startMockBootstrapServerAAAA(t *testing.T, replyIPv6 string) string {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, err := conn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			q := new(dns.Msg)
+			q.Data = make([]byte, n)
+			copy(q.Data, buf[:n])
+			if err := q.Unpack(); err != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			dnsutil.SetReply(resp, q)
+			resp.Response = true
+			if len(q.Question) > 0 {
+				switch dns.RRToType(q.Question[0]) {
+				case dns.TypeAAAA:
+					resp.Rcode = dns.RcodeSuccess
+					ip := netip.MustParseAddr(replyIPv6)
+					resp.Answer = append(resp.Answer, &dns.AAAA{
+						Hdr: dns.Header{
+							Name:  q.Question[0].Header().Name,
+							Class: dns.ClassINET,
+							TTL:   300,
+						},
+						AAAA: rdata.AAAA{Addr: ip},
+					})
+				default:
+					resp.Rcode = dns.RcodeNameError // A queries fail
+				}
+			}
+			if err := resp.Pack(); err != nil {
+				continue
+			}
+			conn.WriteTo(resp.Data, addr)
+		}
+	}()
+
+	return conn.LocalAddr().String()
+}
+
+// TestLookupHostViaBootstrap_AAAAOnly verifies that bootstrap lookup succeeds
+// when the server only responds to AAAA queries (IPv6-only environment).
+func TestLookupHostViaBootstrap_AAAAOnly(t *testing.T) {
+	addr := startMockBootstrapServerAAAA(t, "2001:db8::1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ip, err := lookupHostViaBootstrap(ctx, "ipv6host.example.com", addr)
+	if err != nil {
+		t.Fatalf("AAAA-only bootstrap: unexpected error: %v", err)
+	}
+	if ip != "2001:db8::1" {
+		t.Errorf("AAAA-only bootstrap: got IP %q, want 2001:db8::1", ip)
+	}
+}
+
+// startMockBootstrapServerAOnly starts a local UDP DNS server that only
+// responds to A queries (no AAAA support).
+func startMockBootstrapServerAOnly(t *testing.T, replyIP string) string {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, err := conn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			q := new(dns.Msg)
+			q.Data = make([]byte, n)
+			copy(q.Data, buf[:n])
+			if err := q.Unpack(); err != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			dnsutil.SetReply(resp, q)
+			resp.Response = true
+			if len(q.Question) > 0 && dns.RRToType(q.Question[0]) == dns.TypeA {
+				resp.Rcode = dns.RcodeSuccess
+				ip := netip.MustParseAddr(replyIP)
+				resp.Answer = append(resp.Answer, &dns.A{
+					Hdr: dns.Header{
+						Name:  q.Question[0].Header().Name,
+						Class: dns.ClassINET,
+						TTL:   300,
+					},
+					A: rdata.A{Addr: ip},
+				})
+			} else {
+				resp.Rcode = dns.RcodeNameError
+			}
+			if err := resp.Pack(); err != nil {
+				continue
+			}
+			conn.WriteTo(resp.Data, addr)
+		}
+	}()
+
+	return conn.LocalAddr().String()
+}
+
+// TestLookupHostViaBootstrap_AOnly verifies that bootstrap lookup still
+// succeeds when the server only responds to A queries.
+func TestLookupHostViaBootstrap_AOnly(t *testing.T) {
+	addr := startMockBootstrapServerAOnly(t, "192.0.2.1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ip, err := lookupHostViaBootstrap(ctx, "example.com", addr)
+	if err != nil {
+		t.Fatalf("A-only bootstrap: unexpected error: %v", err)
+	}
+	if ip != "192.0.2.1" {
+		t.Errorf("A-only bootstrap: got IP %q, want 192.0.2.1", ip)
+	}
+}
+
+// TestLookupHostViaBootstrap_BothRespond verifies that bootstrap lookup
+// returns a valid IP when both A and AAAA answer (race, first wins).
+func TestLookupHostViaBootstrap_BothRespond(t *testing.T) {
+	// Server responds to both A and AAAA.
+	addr, cleanup := startCustomBootstrapServer(t, func(msg *dns.Msg) *dns.Msg {
+		resp := new(dns.Msg)
+		dnsutil.SetReply(resp, msg)
+		resp.Response = true
+		if len(msg.Question) > 0 {
+			switch dns.RRToType(msg.Question[0]) {
+			case dns.TypeA:
+				resp.Rcode = dns.RcodeSuccess
+				resp.Answer = append(resp.Answer, &dns.A{
+					Hdr: dns.Header{Name: msg.Question[0].Header().Name, Class: dns.ClassINET, TTL: 300},
+					A:   rdata.A{Addr: netip.MustParseAddr("198.51.100.1")},
+				})
+			case dns.TypeAAAA:
+				resp.Rcode = dns.RcodeSuccess
+				resp.Answer = append(resp.Answer, &dns.AAAA{
+					Hdr:  dns.Header{Name: msg.Question[0].Header().Name, Class: dns.ClassINET, TTL: 300},
+					AAAA: rdata.AAAA{Addr: netip.MustParseAddr("2001:db8::2")},
+				})
+			}
+		}
+		return resp
+	})
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ip, err := lookupHostViaBootstrap(ctx, "dual.example.com", addr)
+	if err != nil {
+		t.Fatalf("dual A/AAAA bootstrap: unexpected error: %v", err)
+	}
+	// Either A or AAAA is valid.
+	if ip != "198.51.100.1" && ip != "2001:db8::2" {
+		t.Errorf("dual A/AAAA bootstrap: got unexpected IP %q", ip)
+	}
+}
+
+// --- queryBootstrapRecord unit tests ---
+
+// startMockBootstrapForRecord starts a minimal UDP DNS server that returns a
+// configured rcode and optional A record. Used to test queryBootstrapRecord
+// directly. Returns the server address and a cleanup function.
+func startMockBootstrapForRecord(t *testing.T, rcode uint16, ip string) (addr string, cleanup func()) {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 512)
+		for {
+			n, remote, readErr := pc.ReadFrom(buf)
+			if readErr != nil {
+				return
+			}
+			req := new(dns.Msg)
+			req.Data = buf[:n]
+			if unpackErr := req.Unpack(); unpackErr != nil {
+				continue
+			}
+			resp := new(dns.Msg)
+			resp.Response = true
+			resp.ID = req.ID
+			resp.Question = req.Question
+			resp.Rcode = rcode
+			if rcode == dns.RcodeSuccess && ip != "" {
+				resp.Answer = append(resp.Answer, &dns.A{
+					Hdr: dns.Header{
+						Name:  dnsutil.Fqdn("example.com"),
+						Class: dns.ClassINET,
+						TTL:   60,
+					},
+					A: rdata.A{Addr: netip.MustParseAddr(ip)},
+				})
+			}
+			if packErr := resp.Pack(); packErr != nil {
+				continue
+			}
+			_, _ = pc.WriteTo(resp.Data, remote)
+		}
+	}()
+	cleanup = func() {
+		pc.Close()
+		<-done
+	}
+	return pc.LocalAddr().String(), cleanup
+}
+
+// TestQueryBootstrapRecord_Success verifies that a successful A query returns
+// the IP address from the answer section.
+func TestQueryBootstrapRecord_Success(t *testing.T) {
+	addr, cleanup := startMockBootstrapForRecord(t, dns.RcodeSuccess, "192.0.2.1")
+	defer cleanup()
+
+	transport := &dns.Transport{
+		ReadTimeout:  2 * time.Second,
+		WriteTimeout: 2 * time.Second,
+		Dialer:       &net.Dialer{Timeout: 2 * time.Second},
+	}
+	client := &dns.Client{Transport: transport}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	ip, err := queryBootstrapRecord(ctx, client, "example.com", addr, dns.TypeA)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ip != "192.0.2.1" {
+		t.Errorf("ip=%q, want 192.0.2.1", ip)
+	}
+}
+
+// TestQueryBootstrapRecord_RcodeError verifies that a non-NOERROR rcode from
+// the bootstrap server is returned as an error.
+func TestQueryBootstrapRecord_RcodeError(t *testing.T) {
+	addr, cleanup := startMockBootstrapForRecord(t, dns.RcodeNameError, "")
+	defer cleanup()
+
+	transport := &dns.Transport{
+		ReadTimeout:  2 * time.Second,
+		WriteTimeout: 2 * time.Second,
+		Dialer:       &net.Dialer{Timeout: 2 * time.Second},
+	}
+	client := &dns.Client{Transport: transport}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	_, err := queryBootstrapRecord(ctx, client, "example.com", addr, dns.TypeA)
+	if err == nil {
+		t.Error("expected error for NXDOMAIN rcode, got nil")
+	}
+}
+
+// TestQueryBootstrapRecord_NoAnswer verifies that an empty answer section
+// is returned as an error (no A/AAAA records found).
+func TestQueryBootstrapRecord_NoAnswer(t *testing.T) {
+	addr, cleanup := startMockBootstrapForRecord(t, dns.RcodeSuccess, "")
+	defer cleanup()
+
+	transport := &dns.Transport{
+		ReadTimeout:  2 * time.Second,
+		WriteTimeout: 2 * time.Second,
+		Dialer:       &net.Dialer{Timeout: 2 * time.Second},
+	}
+	client := &dns.Client{Transport: transport}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	_, err := queryBootstrapRecord(ctx, client, "example.com", addr, dns.TypeA)
+	if err == nil {
+		t.Error("expected error for empty answer section, got nil")
+	}
+}

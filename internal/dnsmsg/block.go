@@ -47,6 +47,39 @@ const (
 // with its own blocked_ttl setting.
 const blockedTTL uint32 = 10
 
+// blockedSOATTL is the TTL used for the synthesized SOA record added to
+// NXDOMAIN and NODATA blocked responses. Per RFC 2308, the SOA MINIMUM
+// field governs the negative caching TTL seen by downstream resolvers.
+const blockedSOATTL uint32 = blockedTTL
+
+// makeSynthesizedSOA builds a minimal SOA record for inclusion in the
+// Authority section of synthesized NXDOMAIN/NODATA blocked responses.
+// Per RFC 2308 Section 5, the MINIMUM field of the SOA controls how long
+// downstream resolvers cache the negative answer.
+//
+// The SOA uses a static synthetic zone identity because the proxy acts as
+// an authoritative blocking resolver and does not know the real upstream
+// zone. Downstream caches that honour the SOA MINIMUM will cache the
+// negative answer for blockedSOATTL seconds.
+func makeSynthesizedSOA(ownerName string) *dns.SOA {
+	return &dns.SOA{
+		Hdr: dns.Header{
+			Name:  ownerName,
+			Class: dns.ClassINET,
+			TTL:   blockedSOATTL,
+		},
+		SOA: rdata.SOA{
+			Ns:      "ns.dnsieve.invalid.",
+			Mbox:    "hostmaster.dnsieve.invalid.",
+			Serial:  1,
+			Refresh: 3600,
+			Retry:   600,
+			Expire:  86400,
+			Minttl:  blockedSOATTL,
+		},
+	}
+}
+
 // InspectResult holds the outcome of inspecting a DNS response.
 type InspectResult struct {
 	Blocked   bool // A blocking signal was detected
@@ -219,11 +252,20 @@ func MakeBlockedResponse(query *dns.Msg, mode string, blockedBy string) *dns.Msg
 	switch mode {
 	case BlockingModeNXDomain:
 		resp.Rcode = dns.RcodeNameError
-		// No answer section -- domain does not exist
+		// RFC 2308: include a synthesized SOA in the Authority section so
+		// that downstream resolvers cache the negative answer correctly and
+		// interpret the MINIMUM field as the negative TTL.
+		if len(query.Question) > 0 {
+			resp.Ns = append(resp.Ns, makeSynthesizedSOA(query.Question[0].Header().Name))
+		}
 
 	case BlockingModeNODATA:
 		resp.Rcode = dns.RcodeSuccess
-		// No answer section -- domain exists but no records
+		// RFC 2308: include a synthesized SOA in the Authority section for
+		// NODATA responses so downstream caches observe the negative TTL.
+		if len(query.Question) > 0 {
+			resp.Ns = append(resp.Ns, makeSynthesizedSOA(query.Question[0].Header().Name))
+		}
 
 	case BlockingModeRefused:
 		resp.Rcode = dns.RcodeRefused

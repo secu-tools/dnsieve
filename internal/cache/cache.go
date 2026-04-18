@@ -1,7 +1,10 @@
 // Copyright (c) 2020-2026 Jack L. (Cpt-JackL) (https://jack-l.com)
 // SPDX-License-Identifier: MIT
 // Package cache provides a concurrent-safe DNS response cache with TTL
-// expiration and LRU eviction for DNSieve.
+// expiration and TTL-priority eviction for DNSieve.
+// When capacity is reached, the entry with the earliest expiration time is
+// evicted first (not least-recently-used). This avoids premature eviction of
+// long-lived records while still bounding memory use.
 package cache
 
 import (
@@ -251,7 +254,8 @@ func (c *Cache) computeTTL(msg *dns.Msg, blocked bool) time.Duration {
 	return minRRTTL
 }
 
-// evictOldest removes the entry with the earliest expiration time.
+// evictOldest removes the entry with the earliest expiration time (TTL-priority
+// eviction). Expired entries are removed immediately when encountered.
 // Must be called with c.mu held.
 func (c *Cache) evictOldest() {
 	var oldestKey string

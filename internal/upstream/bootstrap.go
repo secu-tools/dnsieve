@@ -42,22 +42,13 @@ func ParseBootstrapDNSAddrs(s string) []string {
 	return addrs
 }
 
-// lookupHostViaBootstrap sends a single A-record query for host to the
-// given bootstrapAddr (host:port, UDP) and returns the first A record IP.
-func lookupHostViaBootstrap(ctx context.Context, host, bootstrapAddr string) (string, error) {
-	m := dnsutil.SetQuestion(new(dns.Msg), dnsutil.Fqdn(host), dns.TypeA)
+// queryBootstrapRecord sends a single DNS query of the given type to
+// bootstrapAddr and returns the first IP address found in the answer, or an
+// error. Used as the per-record-type worker by lookupHostViaBootstrap.
+func queryBootstrapRecord(ctx context.Context, client *dns.Client, host, bootstrapAddr string, qtype uint16) (string, error) {
+	m := dnsutil.SetQuestion(new(dns.Msg), dnsutil.Fqdn(host), qtype)
 	m.RecursionDesired = true
-
-	queryCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-
-	transport := &dns.Transport{
-		ReadTimeout:  3 * time.Second,
-		WriteTimeout: 3 * time.Second,
-		Dialer:       &net.Dialer{Timeout: 3 * time.Second},
-	}
-	client := &dns.Client{Transport: transport}
-	resp, _, err := client.Exchange(queryCtx, m, "udp", bootstrapAddr)
+	resp, _, err := client.Exchange(ctx, m, "udp", bootstrapAddr)
 	if err != nil {
 		return "", err
 	}
@@ -65,11 +56,66 @@ func lookupHostViaBootstrap(ctx context.Context, host, bootstrapAddr string) (st
 		return "", fmt.Errorf("bootstrap DNS rcode %d for %s", resp.Rcode, host)
 	}
 	for _, rr := range resp.Answer {
-		if a, ok := rr.(*dns.A); ok {
+		switch a := rr.(type) {
+		case *dns.A:
+			return a.Addr.String(), nil
+		case *dns.AAAA:
 			return a.Addr.String(), nil
 		}
 	}
-	return "", fmt.Errorf("no A record for %s via %s", host, bootstrapAddr)
+	return "", fmt.Errorf("no A/AAAA record for %s via %s", host, bootstrapAddr)
+}
+
+// lookupHostViaBootstrap sends A and AAAA queries concurrently to the given
+// bootstrapAddr (host:port, UDP) and returns the first IP that responds
+// successfully, preferring whichever record type arrives first. This supports
+// both IPv4-only and IPv6-only environments (Happy Eyeballs, RFC 6555).
+func lookupHostViaBootstrap(ctx context.Context, host, bootstrapAddr string) (string, error) {
+	type result struct {
+		ip  string
+		err error
+	}
+
+	queryCtx, queryCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer queryCancel()
+
+	ch := make(chan result, 2)
+
+	transport := &dns.Transport{
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 3 * time.Second,
+		Dialer:       &net.Dialer{Timeout: 3 * time.Second},
+	}
+	client := &dns.Client{Transport: transport}
+
+	sendQuery := func(qtype uint16) {
+		ip, err := queryBootstrapRecord(queryCtx, client, host, bootstrapAddr, qtype)
+		select {
+		case ch <- result{ip: ip, err: err}:
+		default:
+		}
+	}
+
+	go sendQuery(dns.TypeA)
+	go sendQuery(dns.TypeAAAA)
+
+	var lastErr error
+	for i := 0; i < 2; i++ {
+		select {
+		case r := <-ch:
+			if r.err == nil {
+				queryCancel()
+				return r.ip, nil
+			}
+			lastErr = r.err
+		case <-ctx.Done():
+			return "", fmt.Errorf("bootstrap DNS cancelled for %s", host)
+		}
+	}
+	if lastErr != nil {
+		return "", fmt.Errorf("bootstrap DNS failed for %s via %s: %w", host, bootstrapAddr, lastErr)
+	}
+	return "", fmt.Errorf("bootstrap DNS resolution failed for %s", host)
 }
 
 // resolveViaBootstrap queries all bootstrapAddrs in parallel and returns the

@@ -1878,3 +1878,174 @@ func TestHandleQuery_EmptyQuestion_FORMERR(t *testing.T) {
 			dns.RcodeToString[resp.Rcode])
 	}
 }
+
+// --- RFC 8484: DoH Content-Type tolerance tests ---
+
+// TestReadDOHWireQuery_POST_ContentType_WithParams verifies that a valid
+// Content-Type with MIME parameters (e.g. charset) is accepted per RFC 8484.
+func TestReadDOHWireQuery_POST_ContentType_WithParams(t *testing.T) {
+	body := []byte{0, 1, 2, 3, 4, 5}
+	r := httptest.NewRequest(http.MethodPost, "/dns-query", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/dns-message; charset=utf-8")
+
+	wire, status, msg := readDOHWireQuery(r)
+	if status != http.StatusOK {
+		t.Errorf("Content-Type with params: expected 200, got %d (%s)", status, msg)
+	}
+	if !bytes.Equal(wire, body) {
+		t.Errorf("Content-Type with params: body mismatch")
+	}
+}
+
+// TestReadDOHWireQuery_POST_ContentType_CaseInsensitive verifies that the
+// media type comparison is case-insensitive per MIME type standards.
+func TestReadDOHWireQuery_POST_ContentType_CaseInsensitive(t *testing.T) {
+	body := []byte{0, 1, 2, 3, 4, 5}
+	r := httptest.NewRequest(http.MethodPost, "/dns-query", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "Application/DNS-Message")
+
+	wire, status, msg := readDOHWireQuery(r)
+	if status != http.StatusOK {
+		t.Errorf("case-variant Content-Type: expected 200, got %d (%s)", status, msg)
+	}
+	if !bytes.Equal(wire, body) {
+		t.Errorf("case-variant Content-Type: body mismatch")
+	}
+}
+
+// TestReadDOHWireQuery_POST_ContentType_WrongTypeWithParams verifies that a
+// wrong base type with extra parameters is still rejected.
+func TestReadDOHWireQuery_POST_ContentType_WrongTypeWithParams(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/dns-query", bytes.NewReader([]byte{1, 2, 3}))
+	r.Header.Set("Content-Type", "application/json; charset=utf-8")
+
+	_, status, _ := readDOHWireQuery(r)
+	if status != http.StatusUnsupportedMediaType {
+		t.Errorf("wrong Content-Type with params: expected 415, got %d", status)
+	}
+}
+
+// TestReadDOHWireQuery_POST_ContentType_Empty verifies that a missing
+// Content-Type header is rejected.
+func TestReadDOHWireQuery_POST_ContentType_Empty(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/dns-query", bytes.NewReader([]byte{1, 2, 3}))
+	// No Content-Type header set
+
+	_, status, _ := readDOHWireQuery(r)
+	if status != http.StatusUnsupportedMediaType {
+		t.Errorf("missing Content-Type: expected 415, got %d", status)
+	}
+}
+
+// --- RFC 6891: Non-EDNS client receives no OPT in response ---
+
+// TestServePlain_NonEDNS_NoOPTInResponse verifies that a plain DNS client
+// that sends a query without an OPT record does not receive an OPT record
+// (and therefore no EDE) in the response, per RFC 6891.
+func TestServePlain_NonEDNS_NoOPTInResponse(t *testing.T) {
+	q := makeQuery("example.com", dns.TypeA)
+	handler := newTestHandler(t, []*dns.Msg{makeNormalResp(q)})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Logf("close listener: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Downstream.Plain.ListenAddresses = []string{"127.0.0.1"}
+	cfg.Downstream.Plain.Port = port
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test-non-edns")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		if err := ServePlain(ctx, handler, cfg, logger); err != nil {
+			t.Logf("ServePlain: %v", err)
+		}
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	// Send a query WITHOUT an OPT record (non-EDNS client).
+	nonEDNSQuery := makeQuery("example.com", dns.TypeA)
+	nonEDNSQuery.RecursionDesired = true
+	// Verify query has no OPT / UDPSize = 0
+	if nonEDNSQuery.UDPSize != 0 {
+		t.Logf("non-EDNS query UDPSize=%d", nonEDNSQuery.UDPSize)
+	}
+
+	c := new(dns.Client)
+	queryCtx, queryCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer queryCancel()
+	resp, _, err := c.Exchange(queryCtx, nonEDNSQuery, "udp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("UDP query: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("non-EDNS query: rcode=%s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+	// Response must NOT include OPT (UDPSize should be 0 after unpack if no OPT present).
+	if resp.UDPSize != 0 {
+		t.Errorf("non-EDNS client: response UDPSize=%d, want 0 (no OPT per RFC 6891)", resp.UDPSize)
+	}
+}
+
+// TestServePlain_EDNS_HasOPTInResponse verifies that an EDNS-capable client
+// receives an OPT record in the response.
+func TestServePlain_EDNS_HasOPTInResponse(t *testing.T) {
+	q := makeQuery("example.com", dns.TypeA)
+	handler := newTestHandler(t, []*dns.Msg{makeNormalResp(q)})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Logf("close listener: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Downstream.Plain.ListenAddresses = []string{"127.0.0.1"}
+	cfg.Downstream.Plain.Port = port
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test-edns")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		if err := ServePlain(ctx, handler, cfg, logger); err != nil {
+			t.Logf("ServePlain: %v", err)
+		}
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	// Send a query WITH an OPT record (EDNS-capable client).
+	ednsQuery := makeQuery("example.com", dns.TypeA)
+	ednsQuery.RecursionDesired = true
+	opt := new(dns.OPT)
+	opt.Hdr.Name = "."
+	opt.SetUDPSize(1232)
+	ednsQuery.Pseudo = append(ednsQuery.Pseudo, opt)
+
+	c := new(dns.Client)
+	queryCtx, queryCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer queryCancel()
+	resp, _, err := c.Exchange(queryCtx, ednsQuery, "udp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("EDNS UDP query: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	if resp.UDPSize == 0 {
+		t.Error("EDNS client: response should include OPT record (UDPSize != 0)")
+	}
+}

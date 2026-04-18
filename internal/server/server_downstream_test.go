@@ -319,6 +319,18 @@ func sendDoHGet(t *testing.T, baseURL string, q *dns.Msg, hc *http.Client) *dns.
 
 // ---- listener start helpers --------------------------------------------------
 
+// makeQueryWithOPT creates a DNS query that includes an EDNS0 OPT record,
+// which is required for the response to carry EDNS0 options such as EDE
+// (RFC 8914). Use this in tests that verify EDE presence in responses.
+func makeQueryWithOPT(name string, qtype uint16) *dns.Msg {
+	q := dnsutil.SetQuestion(new(dns.Msg), dnsutil.Fqdn(name), qtype)
+	opt := &dns.OPT{}
+	opt.Hdr.Name = "."
+	opt.SetUDPSize(1232) // advertise EDNS0 support per RFC 9715
+	q.Pseudo = append(q.Pseudo, opt)
+	return q
+}
+
 // startPlainListenerOnPort starts ServePlain on 127.0.0.1:<port> in a
 // background goroutine, waits until the TCP socket accepts connections, and
 // registers a cleanup function that cancels the server context.
@@ -497,7 +509,7 @@ func TestServePlain_BlockedQuery(t *testing.T) {
 	resp := sendUDPDNSQuery(
 		t,
 		fmt.Sprintf("127.0.0.1:%d", port),
-		makeQuery("blocked.example.com", dns.TypeA),
+		makeQueryWithOPT("blocked.example.com", dns.TypeA),
 	)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("blocked UDP: rcode=%s, want NOERROR (null mode)", dns.RcodeToString[resp.Rcode])
@@ -578,7 +590,7 @@ func TestServeDoT_BlockedQuery(t *testing.T) {
 
 	resp := sendDoTQuery(
 		t, fmt.Sprintf("127.0.0.1:%d", port),
-		makeQuery("blocked.example.com", dns.TypeA), cert.pool,
+		makeQueryWithOPT("blocked.example.com", dns.TypeA), cert.pool,
 	)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("DoT blocked: rcode=%s, want NOERROR (null mode)", dns.RcodeToString[resp.Rcode])
@@ -674,7 +686,7 @@ func TestServeDoH_BlockedQuery(t *testing.T) {
 	baseURL := startDoHListenerOnPort(t, handler, port, true, nil)
 
 	hc := &http.Client{Timeout: 5 * time.Second}
-	resp := sendDoHPost(t, baseURL, makeQuery("blocked.example.com", dns.TypeA), hc)
+	resp := sendDoHPost(t, baseURL, makeQueryWithOPT("blocked.example.com", dns.TypeA), hc)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("DoH blocked: rcode=%s, want NOERROR (null mode)", dns.RcodeToString[resp.Rcode])
 	}
@@ -821,7 +833,7 @@ func TestServeDoH_HTTPS_BlockedQuery(t *testing.T) {
 			},
 		},
 	}
-	resp := sendDoHPost(t, baseURL, makeQuery("blocked.example.com", dns.TypeA), hc)
+	resp := sendDoHPost(t, baseURL, makeQueryWithOPT("blocked.example.com", dns.TypeA), hc)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("HTTPS DoH blocked: rcode=%s, want NOERROR (null mode)", dns.RcodeToString[resp.Rcode])
 	}
@@ -850,7 +862,7 @@ func TestServePlain_BlockedAAAA(t *testing.T) {
 	resp := sendUDPDNSQuery(
 		t,
 		fmt.Sprintf("127.0.0.1:%d", port),
-		makeQuery("blocked6.example.com", dns.TypeAAAA),
+		makeQueryWithOPT("blocked6.example.com", dns.TypeAAAA),
 	)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("blocked AAAA UDP: rcode=%s, want NOERROR (null mode)", dns.RcodeToString[resp.Rcode])
@@ -871,7 +883,7 @@ func TestServePlain_BlockedEDE_TCP(t *testing.T) {
 	resp := sendTCPDNSQuery(
 		t,
 		fmt.Sprintf("127.0.0.1:%d", port),
-		makeQuery("blocked.example.com", dns.TypeA),
+		makeQueryWithOPT("blocked.example.com", dns.TypeA),
 	)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("blocked TCP: rcode=%s, want NOERROR (null mode)", dns.RcodeToString[resp.Rcode])
@@ -893,13 +905,13 @@ func TestServePlain_BlockedCached(t *testing.T) {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
 	// First query: upstream is hit -- result is cached.
-	r1 := sendUDPDNSQuery(t, addr, makeQuery("cached-blocked.example.com", dns.TypeA))
+	r1 := sendUDPDNSQuery(t, addr, makeQueryWithOPT("cached-blocked.example.com", dns.TypeA))
 	if r1.Rcode != dns.RcodeSuccess {
 		t.Fatalf("first blocked query: rcode=%s, want NOERROR (null mode)", dns.RcodeToString[r1.Rcode])
 	}
 
 	// Second query: served from cache.
-	r2 := sendUDPDNSQuery(t, addr, makeQuery("cached-blocked.example.com", dns.TypeA))
+	r2 := sendUDPDNSQuery(t, addr, makeQueryWithOPT("cached-blocked.example.com", dns.TypeA))
 	if r2.Rcode != dns.RcodeSuccess {
 		t.Fatalf("cached blocked query: rcode=%s, want NOERROR (null mode)", dns.RcodeToString[r2.Rcode])
 	}

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"strconv"
@@ -149,7 +150,11 @@ func startDOHListenerGoroutine(srv *http.Server, addr, tcpNet string, cfg *confi
 func readDOHWireQuery(r *http.Request) ([]byte, int, string) {
 	switch r.Method {
 	case http.MethodPost:
-		if r.Header.Get("Content-Type") != "application/dns-message" {
+		// RFC 8484 s6: tolerate valid MIME parameters (e.g. charset=utf-8)
+		// and case differences per RFC 2045; only the base type must match.
+		ct := r.Header.Get("Content-Type")
+		mediaType, _, err := mime.ParseMediaType(ct)
+		if err != nil || mediaType != "application/dns-message" {
 			return nil, http.StatusUnsupportedMediaType, "Unsupported Media Type. POST must use Content-Type: application/dns-message."
 		}
 		body, err := io.ReadAll(io.LimitReader(r.Body, 65535))
@@ -288,7 +293,9 @@ func dohHandler(w http.ResponseWriter, r *http.Request, handler *Handler, logger
 	resp.ID = clientID
 
 	// RFC 7828: TCP keepalive for DoH (always TCP-based)
-	handler.edns.PrepareClientResponse(resp, true)
+	// RFC 6891: DoH queries arrive over HTTP; treat as EDNS-capable when
+	// the wire query contained an OPT record (or always for JSON-API path).
+	handler.edns.PrepareClientResponse(resp, true, edns.ClientHasEDNS(query))
 
 	// RFC 3225: echo back the client's DO bit in the response EDNS OPT.
 	resp.Security = edns.ClientRequestsDNSSEC(query)

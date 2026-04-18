@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/svcb"
 
 	"github.com/secu-tools/dnsieve/internal/config"
 )
@@ -153,18 +154,41 @@ func (m *Middleware) ProcessUpstreamResponse(resp *dns.Msg, upstreamAddr string)
 
 // PrepareClientResponse adds proxy-specific EDNS0 options to a response
 // being sent to a client (e.g., TCP keepalive, buffer size).
-func (m *Middleware) PrepareClientResponse(resp *dns.Msg, isTCP bool) {
+// clientHasEDNS must be true when the originating query contained an OPT
+// record; per RFC 6891, an OPT RR must not be added to the response if the
+// client did not send one. When false, any EDNS0 options already present on
+// resp (such as EDE from MakeBlockedResponse) are cleared before sending.
+func (m *Middleware) PrepareClientResponse(resp *dns.Msg, isTCP bool, clientHasEDNS bool) {
 	if resp == nil {
 		return
 	}
 
-	// RFC 9715: set buffer size
+	if !clientHasEDNS {
+		// RFC 6891: do not include OPT in the response to a non-EDNS query.
+		// Clear UDPSize so the library does not emit an OPT record, and remove
+		// any EDNS0 options already attached (e.g. EDE from blocked responses).
+		resp.UDPSize = 0
+		resp.Security = false
+		resp.Pseudo = nil
+		return
+	}
+
+	// RFC 9715: advertise the proxy's UDP payload size.
 	resp.UDPSize = MaxUDPPayload
 
-	// RFC 7828: TCP keepalive for client
+	// RFC 7828: TCP keepalive for client connections.
 	if isTCP {
 		m.addKeepaliveOption(resp, false)
 	}
+}
+
+// ClientHasEDNS reports whether the client query contained an OPT record.
+// After a full Unpack(), UDPSize is non-zero whenever the query carried OPT.
+func ClientHasEDNS(query *dns.Msg) bool {
+	if query == nil {
+		return false
+	}
+	return query.UDPSize > 0
 }
 
 // --- DO Bit Helpers ---
@@ -503,31 +527,44 @@ func HandleDDR(query *dns.Msg, cfg *config.Config) *dns.Msg {
 
 	// Advertise DoT if enabled
 	if cfg.Downstream.DoT.Enabled {
-		svcb := &dns.SVCB{
+		rec := &dns.SVCB{
 			Hdr: dns.Header{
 				Name:  "_dns.resolver.arpa.",
 				Class: dns.ClassINET,
 				TTL:   300,
 			},
 		}
-		svcb.Priority = 1
-		svcb.Target = "."
-		// ALPN = dot
-		resp.Answer = append(resp.Answer, svcb)
+		rec.Priority = 1
+		rec.Target = "."
+		// RFC 9461/9462: include ALPN and port so DDR clients can connect.
+		// "dot" is the ALPN identifier for DNS-over-TLS (RFC 7858).
+		rec.Value = []svcb.Pair{
+			&svcb.ALPN{Alpn: []string{"dot"}},
+			&svcb.PORT{Port: uint16(cfg.Downstream.DoT.Port)},
+		}
+		resp.Answer = append(resp.Answer, rec)
 	}
 
 	// Advertise DoH if enabled
 	if cfg.Downstream.DoH.Enabled {
-		svcb := &dns.SVCB{
+		rec := &dns.SVCB{
 			Hdr: dns.Header{
 				Name:  "_dns.resolver.arpa.",
 				Class: dns.ClassINET,
 				TTL:   300,
 			},
 		}
-		svcb.Priority = 2
-		svcb.Target = "."
-		resp.Answer = append(resp.Answer, svcb)
+		rec.Priority = 2
+		rec.Target = "."
+		// RFC 9461/9462: include ALPN, port, and dohpath so DDR clients can
+		// perform zero-config upgrade to DNS-over-HTTPS.
+		// "h2" is HTTP/2 (RFC 7540), the mandatory transport for RFC 8484.
+		rec.Value = []svcb.Pair{
+			&svcb.ALPN{Alpn: []string{"h2"}},
+			&svcb.PORT{Port: uint16(cfg.Downstream.DoH.Port)},
+			&svcb.DOHPATH{Template: "/dns-query{?dns}"},
+		}
+		resp.Answer = append(resp.Answer, rec)
 	}
 
 	if len(resp.Answer) == 0 {

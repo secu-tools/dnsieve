@@ -1013,3 +1013,211 @@ func TestMakeBlockedResponse_InvalidMode(t *testing.T) {
 			dns.RcodeToString[resp.Rcode])
 	}
 }
+
+// --- RFC 2308: Negative caching SOA in blocked responses ---
+
+// TestMakeBlockedResponse_NXDOMAIN_HasSOA verifies that NXDOMAIN blocked
+// responses include a synthesized SOA in the Authority section per RFC 2308.
+func TestMakeBlockedResponse_NXDOMAIN_HasSOA(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	resp := MakeBlockedResponse(query, BlockingModeNXDomain, "upstream")
+
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("NXDOMAIN mode: rcode=%s, want NXDOMAIN", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Ns) == 0 {
+		t.Fatal("RFC 2308: NXDOMAIN blocked response must include SOA in Authority section")
+	}
+	soa, ok := resp.Ns[0].(*dns.SOA)
+	if !ok {
+		t.Fatalf("Authority record should be SOA, got %T", resp.Ns[0])
+	}
+	if soa.Ns == "" {
+		t.Error("synthesized SOA must have a non-empty MNAME")
+	}
+	if soa.Minttl == 0 {
+		t.Error("synthesized SOA MINIMUM must be non-zero for negative caching TTL")
+	}
+	if soa.Header().TTL != blockedSOATTL {
+		t.Errorf("SOA TTL = %d, want %d", soa.Header().TTL, blockedSOATTL)
+	}
+	if soa.Header().Name != "blocked.example.com." {
+		t.Errorf("SOA owner = %s, want blocked.example.com.", soa.Header().Name)
+	}
+}
+
+// TestMakeBlockedResponse_NODATA_HasSOA verifies that NODATA blocked
+// responses include a synthesized SOA in the Authority section per RFC 2308.
+func TestMakeBlockedResponse_NODATA_HasSOA(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	resp := MakeBlockedResponse(query, BlockingModeNODATA, "upstream")
+
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("NODATA mode: rcode=%s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) != 0 {
+		t.Error("NODATA mode: answer section must be empty")
+	}
+	if len(resp.Ns) == 0 {
+		t.Fatal("RFC 2308: NODATA blocked response must include SOA in Authority section")
+	}
+	if _, ok := resp.Ns[0].(*dns.SOA); !ok {
+		t.Fatalf("NODATA Authority record should be SOA, got %T", resp.Ns[0])
+	}
+}
+
+// TestMakeBlockedResponse_Null_NoSOA verifies that null-mode blocked
+// responses do NOT include a spurious SOA (they have a synthesized answer).
+func TestMakeBlockedResponse_Null_NoSOA(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	resp := MakeBlockedResponse(query, BlockingModeNull, "upstream")
+
+	if len(resp.Ns) != 0 {
+		t.Error("null-mode blocked response should not include Authority section SOA")
+	}
+}
+
+// TestMakeBlockedResponse_Refused_NoSOA verifies that refused-mode blocked
+// responses do NOT include a spurious SOA.
+func TestMakeBlockedResponse_Refused_NoSOA(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	resp := MakeBlockedResponse(query, BlockingModeRefused, "upstream")
+
+	if len(resp.Ns) != 0 {
+		t.Error("refused-mode blocked response should not include Authority section SOA")
+	}
+}
+
+// TestMakeBlockedResponse_NXDOMAIN_NoQuestion_NoSOA verifies that if the
+// query has no question section, no SOA is added (safe fallback).
+func TestMakeBlockedResponse_NXDOMAIN_NoQuestion_NoSOA(t *testing.T) {
+	query := new(dns.Msg)
+	resp := MakeBlockedResponse(query, BlockingModeNXDomain, "upstream")
+
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("rcode=%s, want NXDOMAIN", dns.RcodeToString[resp.Rcode])
+	}
+	// No SOA should be synthesized when there is no question
+	if len(resp.Ns) != 0 {
+		t.Error("no SOA should be synthesized when query has no question section")
+	}
+}
+
+// TestMakeBlockedResponse_NXDOMAIN_SOA_WireRoundTrip verifies that the
+// synthesized SOA in an NXDOMAIN blocked response survives Pack/Unpack.
+// Per RFC 2308, the SOA must be present and readable by downstream resolvers
+// that rely on the MINIMUM field for negative caching TTL.
+func TestMakeBlockedResponse_NXDOMAIN_SOA_WireRoundTrip(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	resp := MakeBlockedResponse(query, BlockingModeNXDomain, "")
+
+	if err := resp.Pack(); err != nil {
+		t.Fatalf("Pack: %v", err)
+	}
+	wire := make([]byte, len(resp.Data))
+	copy(wire, resp.Data)
+
+	got := new(dns.Msg)
+	got.Data = wire
+	if err := got.Unpack(); err != nil {
+		t.Fatalf("Unpack: %v", err)
+	}
+
+	if len(got.Ns) == 0 {
+		t.Fatal("SOA should be present in Authority section after roundtrip")
+	}
+	soa, ok := got.Ns[0].(*dns.SOA)
+	if !ok {
+		t.Fatalf("first Authority RR type=%T, want *dns.SOA", got.Ns[0])
+	}
+	if soa.Minttl != blockedSOATTL {
+		t.Errorf("SOA Minttl=%d, want %d (blockedSOATTL)", soa.Minttl, blockedSOATTL)
+	}
+}
+
+// TestMakeBlockedResponse_NODATA_SOA_WireRoundTrip verifies that the SOA in
+// a NODATA (NOERROR empty) blocked response also survives Pack/Unpack.
+func TestMakeBlockedResponse_NODATA_SOA_WireRoundTrip(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	resp := MakeBlockedResponse(query, BlockingModeNODATA, "")
+
+	if err := resp.Pack(); err != nil {
+		t.Fatalf("Pack: %v", err)
+	}
+	wire := make([]byte, len(resp.Data))
+	copy(wire, resp.Data)
+
+	got := new(dns.Msg)
+	got.Data = wire
+	if err := got.Unpack(); err != nil {
+		t.Fatalf("Unpack: %v", err)
+	}
+
+	if len(got.Ns) == 0 {
+		t.Fatal("SOA should be present in Authority section after roundtrip")
+	}
+	if _, ok := got.Ns[0].(*dns.SOA); !ok {
+		t.Fatalf("first Authority RR type=%T, want *dns.SOA", got.Ns[0])
+	}
+}
+
+// TestMakeBlockedResponse_NXDOMAIN_SOA_MinimumTTL verifies that the
+// synthesized SOA has its Minttl field set to blockedSOATTL so that
+// RFC 2308-compliant downstream caches negative-cache for the correct TTL.
+func TestMakeBlockedResponse_NXDOMAIN_SOA_MinimumTTL(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	resp := MakeBlockedResponse(query, BlockingModeNXDomain, "")
+
+	if len(resp.Ns) == 0 {
+		t.Fatal("expected SOA in Authority section")
+	}
+	soa, ok := resp.Ns[0].(*dns.SOA)
+	if !ok {
+		t.Fatalf("Authority[0] type=%T, want *dns.SOA", resp.Ns[0])
+	}
+	if soa.Hdr.TTL != blockedSOATTL {
+		t.Errorf("SOA Hdr.TTL=%d, want %d", soa.Hdr.TTL, blockedSOATTL)
+	}
+	if soa.Minttl != blockedSOATTL {
+		t.Errorf("SOA Minttl=%d, want %d", soa.Minttl, blockedSOATTL)
+	}
+}
+
+// TestMakeBlockedResponse_NXDOMAIN_SOA_OwnerMatchesQuery verifies that the
+// synthesized SOA owner name matches the queried domain name.
+func TestMakeBlockedResponse_NXDOMAIN_SOA_OwnerMatchesQuery(t *testing.T) {
+	query := makeQuery("evil.example.com", dns.TypeA)
+	resp := MakeBlockedResponse(query, BlockingModeNXDomain, "")
+
+	if len(resp.Ns) == 0 {
+		t.Fatal("expected SOA in Authority section")
+	}
+	soa, ok := resp.Ns[0].(*dns.SOA)
+	if !ok {
+		t.Fatalf("Authority[0] type=%T, want *dns.SOA", resp.Ns[0])
+	}
+	if soa.Hdr.Name != "evil.example.com." {
+		t.Errorf("SOA owner=%q, want %q", soa.Hdr.Name, "evil.example.com.")
+	}
+}
+
+// TestMakeBlockedResponse_NXDOMAIN_SOA_SyntheticNS verifies that the
+// synthesized SOA uses the expected synthetic MNAME and MBOX values.
+func TestMakeBlockedResponse_NXDOMAIN_SOA_SyntheticNS(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	resp := MakeBlockedResponse(query, BlockingModeNXDomain, "")
+
+	if len(resp.Ns) == 0 {
+		t.Fatal("expected SOA in Authority section")
+	}
+	soa, ok := resp.Ns[0].(*dns.SOA)
+	if !ok {
+		t.Fatalf("Authority[0] type=%T, want *dns.SOA", resp.Ns[0])
+	}
+	if soa.Ns != "ns.dnsieve.invalid." {
+		t.Errorf("SOA MNAME=%q, want ns.dnsieve.invalid.", soa.Ns)
+	}
+	if soa.Mbox != "hostmaster.dnsieve.invalid." {
+		t.Errorf("SOA MBOX=%q, want hostmaster.dnsieve.invalid.", soa.Mbox)
+	}
+}

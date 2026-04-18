@@ -4,10 +4,13 @@ package edns
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
 
 	"codeberg.org/miekg/dns"
 	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
+	"codeberg.org/miekg/dns/svcb"
 
 	"github.com/secu-tools/dnsieve/internal/config"
 )
@@ -447,7 +450,7 @@ func TestTCPKeepalive_ClientResponse(t *testing.T) {
 	m := NewMiddleware(cfg)
 
 	resp := new(dns.Msg)
-	m.PrepareClientResponse(resp, true)
+	m.PrepareClientResponse(resp, true, true)
 
 	ka := findPseudoType[*dns.TCPKEEPALIVE](resp)
 	if ka == nil {
@@ -1116,4 +1119,297 @@ func TestProcessResponseCookieOnly_NilSafe(t *testing.T) {
 	cfg.Privacy.Cookies.Mode = "reoriginate"
 	m := NewMiddleware(cfg)
 	m.ProcessResponseCookieOnly(nil, "upstream1") // must not panic
+}
+
+// --- RFC 6891: EDNS OPT presence rules ---
+
+// TestPrepareClientResponse_NonEDNS_NoOPT verifies that PrepareClientResponse
+// does not emit an OPT record when the client query had no OPT (RFC 6891).
+func TestPrepareClientResponse_NonEDNS_NoOPT(t *testing.T) {
+	cfg := defaultTestConfig()
+	m := NewMiddleware(cfg)
+
+	resp := new(dns.Msg)
+	// Simulate a blocked response that pre-populated UDPSize and Pseudo.
+	resp.UDPSize = MaxUDPPayload
+	resp.Pseudo = append(resp.Pseudo, &dns.EDE{InfoCode: 15, ExtraText: "Blocked"})
+
+	m.PrepareClientResponse(resp, false, false) // clientHasEDNS = false
+
+	if resp.UDPSize != 0 {
+		t.Errorf("non-EDNS client: UDPSize should be 0, got %d", resp.UDPSize)
+	}
+	if len(resp.Pseudo) != 0 {
+		t.Errorf("non-EDNS client: Pseudo should be empty, got %d options", len(resp.Pseudo))
+	}
+}
+
+// TestPrepareClientResponse_EDNS_HasOPT verifies that PrepareClientResponse
+// sets the UDP payload size when the client query included an OPT record.
+func TestPrepareClientResponse_EDNS_HasOPT(t *testing.T) {
+	cfg := defaultTestConfig()
+	m := NewMiddleware(cfg)
+
+	resp := new(dns.Msg)
+	m.PrepareClientResponse(resp, false, true) // clientHasEDNS = true
+
+	if resp.UDPSize != MaxUDPPayload {
+		t.Errorf("EDNS client: UDPSize = %d, want %d", resp.UDPSize, MaxUDPPayload)
+	}
+}
+
+// TestPrepareClientResponse_NonEDNS_NoKeepalive verifies that TCP keepalive
+// is not added for non-EDNS clients (TCP keepalive is an EDNS0 option).
+func TestPrepareClientResponse_NonEDNS_NoKeepalive(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.TCPKeepalive.ClientTimeoutSec = 60
+	m := NewMiddleware(cfg)
+
+	resp := new(dns.Msg)
+	m.PrepareClientResponse(resp, true, false) // TCP but not EDNS
+
+	if findPseudoType[*dns.TCPKEEPALIVE](resp) != nil {
+		t.Error("non-EDNS client: TCP keepalive must not be included in response")
+	}
+}
+
+// TestClientHasEDNS_WithOPT verifies that a query with OPT is detected.
+func TestClientHasEDNS_WithOPT(t *testing.T) {
+	q := makeQueryWithDO("example.com.", dns.TypeA) // includes OPT
+	// Pack and unpack to simulate wire round-trip (UDPSize gets set on unpack)
+	if err := q.Pack(); err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	unpacked := new(dns.Msg)
+	unpacked.Data = q.Data
+	if err := unpacked.Unpack(); err != nil {
+		t.Fatalf("unpack: %v", err)
+	}
+	if !ClientHasEDNS(unpacked) {
+		t.Error("query with OPT should be detected as EDNS-capable after wire round-trip")
+	}
+}
+
+// TestClientHasEDNS_WithoutOPT verifies that a query without OPT is not detected.
+func TestClientHasEDNS_WithoutOPT(t *testing.T) {
+	q := makeQuery("example.com.", dns.TypeA) // no OPT
+	if ClientHasEDNS(q) {
+		t.Error("query without OPT should not be detected as EDNS-capable")
+	}
+}
+
+// TestClientHasEDNS_Nil verifies that nil is handled safely.
+func TestClientHasEDNS_Nil(t *testing.T) {
+	if ClientHasEDNS(nil) {
+		t.Error("nil query should not be detected as EDNS-capable")
+	}
+}
+
+// --- RFC 9461/9462: DDR SVCB service parameters ---
+
+// TestDDR_DoT_SVCB_HasALPN verifies that a DDR response for DoT contains
+// the ALPN parameter set to "dot" per RFC 7858.
+func TestDDR_DoT_SVCB_HasALPN(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.DDR.Enabled = true
+	cfg.Downstream.DoT.Enabled = true
+	cfg.Downstream.DoT.Port = 853
+
+	q := dnsutil.SetQuestion(new(dns.Msg), "_dns.resolver.arpa.", dns.TypeSVCB)
+	resp := HandleDDR(q, cfg)
+	if resp == nil || len(resp.Answer) == 0 {
+		t.Fatal("DDR with DoT should return at least one SVCB answer")
+	}
+
+	var dotRec *dns.SVCB
+	for _, rr := range resp.Answer {
+		if s, ok := rr.(*dns.SVCB); ok && s.Priority == 1 {
+			dotRec = s
+			break
+		}
+	}
+	if dotRec == nil {
+		t.Fatal("DDR DoT record (priority 1) not found")
+	}
+
+	var foundALPN, foundPort bool
+	for _, pair := range dotRec.Value {
+		switch p := pair.(type) {
+		case *svcb.ALPN:
+			if len(p.Alpn) == 1 && p.Alpn[0] == "dot" {
+				foundALPN = true
+			}
+		case *svcb.PORT:
+			if p.Port == 853 {
+				foundPort = true
+			}
+		}
+	}
+	if !foundALPN {
+		t.Error("DDR DoT SVCB must contain ALPN=dot (RFC 7858)")
+	}
+	if !foundPort {
+		t.Errorf("DDR DoT SVCB must contain port=853, got value=%v", dotRec.Value)
+	}
+}
+
+// TestDDR_DoH_SVCB_HasALPNPortAndPath verifies that a DDR response for DoH
+// contains ALPN=h2, port, and dohpath per RFC 9461/9462.
+func TestDDR_DoH_SVCB_HasALPNPortAndPath(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.DDR.Enabled = true
+	cfg.Downstream.DoT.Enabled = false
+	cfg.Downstream.DoH.Enabled = true
+	cfg.Downstream.DoH.Port = 443
+
+	q := dnsutil.SetQuestion(new(dns.Msg), "_dns.resolver.arpa.", dns.TypeSVCB)
+	resp := HandleDDR(q, cfg)
+	if resp == nil || len(resp.Answer) == 0 {
+		t.Fatal("DDR with DoH should return at least one SVCB answer")
+	}
+
+	var dohRec *dns.SVCB
+	for _, rr := range resp.Answer {
+		if s, ok := rr.(*dns.SVCB); ok && s.Priority == 2 {
+			dohRec = s
+			break
+		}
+	}
+	if dohRec == nil {
+		t.Fatal("DDR DoH record (priority 2) not found")
+	}
+
+	var foundALPN, foundPort, foundPath bool
+	for _, pair := range dohRec.Value {
+		switch p := pair.(type) {
+		case *svcb.ALPN:
+			for _, alpn := range p.Alpn {
+				if alpn == "h2" {
+					foundALPN = true
+				}
+			}
+		case *svcb.PORT:
+			if p.Port == 443 {
+				foundPort = true
+			}
+		case *svcb.DOHPATH:
+			if strings.Contains(p.Template, "/dns-query") {
+				foundPath = true
+			}
+		}
+	}
+	if !foundALPN {
+		t.Error("DDR DoH SVCB must contain ALPN=h2 (RFC 8484)")
+	}
+	if !foundPort {
+		t.Errorf("DDR DoH SVCB must contain port=443, got value=%v", dohRec.Value)
+	}
+	if !foundPath {
+		t.Error("DDR DoH SVCB must contain dohpath with /dns-query template (RFC 9461)")
+	}
+}
+
+// TestDDR_BothDoTAndDoH verifies that a DDR response includes records for
+// both DoT (priority 1) and DoH (priority 2) when both are enabled.
+func TestDDR_BothDoTAndDoH(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.DDR.Enabled = true
+	cfg.Downstream.DoT.Enabled = true
+	cfg.Downstream.DoT.Port = 853
+	cfg.Downstream.DoH.Enabled = true
+	cfg.Downstream.DoH.Port = 443
+
+	q := dnsutil.SetQuestion(new(dns.Msg), "_dns.resolver.arpa.", dns.TypeSVCB)
+	resp := HandleDDR(q, cfg)
+	if resp == nil {
+		t.Fatal("DDR should return a response")
+	}
+	if len(resp.Answer) != 2 {
+		t.Errorf("DDR with both DoT and DoH should return 2 SVCB records, got %d", len(resp.Answer))
+	}
+
+	priorities := make(map[uint16]bool)
+	for _, rr := range resp.Answer {
+		if s, ok := rr.(*dns.SVCB); ok {
+			priorities[s.Priority] = true
+		}
+	}
+	if !priorities[1] {
+		t.Error("DDR should include a SVCB record with priority 1 for DoT")
+	}
+	if !priorities[2] {
+		t.Error("DDR should include a SVCB record with priority 2 for DoH")
+	}
+}
+
+// TestDDR_CaseInsensitive verifies that DDR queries with mixed-case owner
+// names are handled correctly per RFC 4343 (case-insensitive DNS name
+// comparison). The query "_DNS.RESOLVER.ARPA." should produce the same
+// response as "_dns.resolver.arpa.".
+func TestDDR_CaseInsensitive(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.DDR.Enabled = true
+	cfg.Downstream.DoT.Enabled = true
+	cfg.Downstream.DoT.Port = 853
+
+	// Mixed-case DDR query name -- RFC 4343 s2 requires case-insensitive match.
+	q := dnsutil.SetQuestion(new(dns.Msg), "_DNS.RESOLVER.ARPA.", dns.TypeSVCB)
+	resp := HandleDDR(q, cfg)
+
+	if resp == nil {
+		t.Fatal("HandleDDR should respond to mixed-case _DNS.RESOLVER.ARPA. query")
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("rcode=%s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) == 0 {
+		t.Error("expected at least one SVCB record in DDR response")
+	}
+}
+
+// TestNeedsTruncation_NonEDNS_UsesDefault512 verifies that non-EDNS clients
+// (clientUDPSize == 0) use the RFC 6891 default of 512 bytes for the
+// truncation threshold, not an unlimited size.
+func TestNeedsTruncation_NonEDNS_UsesDefault512(t *testing.T) {
+	// Build a response that exceeds 512 bytes but is under 1232.
+	q := makeQuery("example.com.", dns.TypeTXT)
+	resp := new(dns.Msg)
+	resp.Response = true
+	resp.ID = q.ID
+	resp.Question = q.Question
+	// Add several TXT records totalling > 512 bytes.
+	for i := 0; i < 8; i++ {
+		txt := &dns.TXT{
+			Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300},
+			TXT: rdata.TXT{Txt: []string{strings.Repeat("x", 64)}},
+		}
+		resp.Answer = append(resp.Answer, txt)
+	}
+
+	// clientUDPSize == 0 -> non-EDNS -> 512-byte limit.
+	if !NeedsTruncation(resp, false, 0) {
+		t.Error("response > 512 bytes should require truncation for non-EDNS client (clientUDPSize=0)")
+	}
+
+	// clientUDPSize == 1232 -> EDNS -> 1232-byte limit; same response should fit.
+	if NeedsTruncation(resp, false, 1232) {
+		t.Error("response < 1232 bytes should NOT require truncation for EDNS client (clientUDPSize=1232)")
+	}
+}
+
+// TestNeedsTruncation_TCP_AlwaysFalse verifies TCP never triggers truncation
+// regardless of response size, per RFC 5966.
+func TestNeedsTruncation_TCP_AlwaysFalse(t *testing.T) {
+	resp := new(dns.Msg)
+	resp.Response = true
+	for i := 0; i < 20; i++ {
+		txt := &dns.TXT{
+			Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300},
+			TXT: rdata.TXT{Txt: []string{strings.Repeat("y", 64)}},
+		}
+		resp.Answer = append(resp.Answer, txt)
+	}
+	if NeedsTruncation(resp, true, 0) {
+		t.Error("TCP responses must never be truncated (RFC 5966)")
+	}
 }
