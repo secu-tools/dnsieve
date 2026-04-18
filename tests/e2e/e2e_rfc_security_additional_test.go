@@ -362,14 +362,16 @@ func TestE2E_RFC9460_HTTPSRecordTransport(t *testing.T) {
 func TestE2E_RFC4592_WildcardStyleQuery(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	name := fmt.Sprintf("dnsieve-%d.1.2.3.4.nip.io", time.Now().UnixNano())
 	resp := queryUDP(t, port, name, dns.TypeA)
 
 	switch resp.Rcode {
-	case dns.RcodeSuccess, dns.RcodeNameError:
+	case dns.RcodeSuccess, dns.RcodeNameError, dns.RcodeServerFailure:
+		// SERVFAIL is acceptable: nip.io may be unreachable or slow even when
+		// example.com/google.com are reachable (different authoritative path).
 	default:
 		t.Errorf("RFC 4592 e2e: unexpected rcode=%s", dns.RcodeToString[resp.Rcode])
 	}

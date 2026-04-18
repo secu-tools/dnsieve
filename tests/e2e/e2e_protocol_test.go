@@ -79,7 +79,7 @@ func TestE2E_PlainDNS_TCP(t *testing.T) {
 func TestE2E_PlainDNS_TCP_LargeResponse(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	resp := queryTCP(t, port, "google.com", dns.TypeTXT)
@@ -406,9 +406,14 @@ func TestE2E_DoT_BasicQuery(t *testing.T) {
 func TestE2E_DoT_AAAA(t *testing.T) {
 	cert := generateSelfSignedCert(t)
 	dotPort := findFreePort(t)
+	plainPort := findFreePort(t)
 
 	cfg := dotOnlyConfig(dotPort, cert)
-	cancel := startServer(t, cfg)
+	// Enable plain listener so startServerReachable can probe upstream health.
+	cfg.Downstream.Plain.Enabled = true
+	cfg.Downstream.Plain.ListenAddresses = []string{"127.0.0.1"}
+	cfg.Downstream.Plain.Port = plainPort
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	resp := queryDoT(t, dotPort, "example.com", dns.TypeAAAA, insecureDoTTLS())
@@ -422,9 +427,14 @@ func TestE2E_DoT_AAAA(t *testing.T) {
 func TestE2E_DoT_MultipleQueries(t *testing.T) {
 	cert := generateSelfSignedCert(t)
 	dotPort := findFreePort(t)
+	plainPort := findFreePort(t)
 
 	cfg := dotOnlyConfig(dotPort, cert)
-	cancel := startServer(t, cfg)
+	// Enable plain listener so startServerReachable can probe upstream health.
+	cfg.Downstream.Plain.Enabled = true
+	cfg.Downstream.Plain.ListenAddresses = []string{"127.0.0.1"}
+	cfg.Downstream.Plain.Port = plainPort
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	domains := []string{"example.com", "google.com", "cloudflare.com"}

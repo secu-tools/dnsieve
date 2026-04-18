@@ -493,6 +493,16 @@ func (c *Config) validateUpstreams() (warnings []string, errors []string) {
 		warnings = append(warnings, fmt.Sprintf("%d upstream servers configured, more than 3 may slow down startup and DNS resolution", len(c.Upstream)))
 	}
 
+	switch c.UpstreamSettings.BootstrapIPFamily {
+	case "", "auto", "ipv4", "ipv6":
+		// valid
+	default:
+		errors = append(errors, fmt.Sprintf(
+			"upstream_settings.bootstrap_ip_family: invalid value %q (must be \"auto\", \"ipv4\", or \"ipv6\")",
+			c.UpstreamSettings.BootstrapIPFamily,
+		))
+	}
+
 	return warnings, errors
 }
 

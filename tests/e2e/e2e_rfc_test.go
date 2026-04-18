@@ -97,7 +97,7 @@ func TestE2E_DDR_WrongType(t *testing.T) {
 func TestE2E_RFC9715_BufferSizeAdvertised(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	resp := queryUDPWithOPT(t, port, "example.com", dns.TypeA, 1232)

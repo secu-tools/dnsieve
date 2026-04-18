@@ -230,13 +230,17 @@ const maxQueryAttempts = 3
 // upstream resolver is reachable before returning. It probes using three
 // bootstrap IP-family strategies in order: "auto" (RFC 6555 race), "ipv4"
 // (A records only), then "ipv6" (AAAA records only). The server is restarted
-// with each strategy until a probe query returns NOERROR. If every strategy
-// returns SERVFAIL the test is failed immediately -- not skipped -- because a
-// SERVFAIL at this stage indicates a real network outage, not a test defect.
+// with each strategy until a probe query returns NOERROR. Each strategy is
+// probed up to probeAttemptsPerFamily times with backoff to tolerate transient
+// upstream delays. If every strategy exhausts all probe attempts the test is
+// failed immediately -- not skipped -- because persistent SERVFAIL indicates a
+// real network outage, not a test defect.
 //
 // Using this function instead of startServer ensures that tests depending on
 // live upstream responses behave deterministically on IPv4-only CI runners
 // (attempt 2 forces IPv4 bootstrap) without random skipping.
+const probeAttemptsPerFamily = 3
+
 func startServerReachable(t *testing.T, cfg *config.Config) context.CancelFunc {
 	t.Helper()
 	port := cfg.Downstream.Plain.Port
@@ -251,22 +255,33 @@ func startServerReachable(t *testing.T, cfg *config.Config) context.CancelFunc {
 
 		cancel := startServer(t, &cfgCopy)
 
-		// Probe upstream health with a short-circuit query.
-		c := dns.NewClient()
-		c.Transport.ReadTimeout = 5 * time.Second
+		// Probe upstream health, retrying to tolerate transient upstream delays.
 		q := dnsutil.SetQuestion(new(dns.Msg), dnsutil.Fqdn("example.com"), dns.TypeA)
 		q.RecursionDesired = true
-		ctx, ctxCancel := context.WithTimeout(context.Background(), 6*time.Second)
-		resp, _, err := c.Exchange(ctx, q, "udp", addr)
-		ctxCancel()
+		reachable := false
+		for probe := 1; probe <= probeAttemptsPerFamily; probe++ {
+			c := dns.NewClient()
+			c.Transport.ReadTimeout = 5 * time.Second
+			ctx, ctxCancel := context.WithTimeout(context.Background(), 6*time.Second)
+			resp, _, err := c.Exchange(ctx, q, "udp", addr)
+			ctxCancel()
+			if err == nil && resp != nil && resp.Rcode != dns.RcodeServerFailure {
+				t.Logf("upstream reachable (bootstrap_ip_family=%q, probe %d/%d)", family, probe, probeAttemptsPerFamily)
+				reachable = true
+				break
+			}
+			t.Logf("bootstrap_ip_family=%q probe %d/%d: upstream not yet reachable", family, probe, probeAttemptsPerFamily)
+			if probe < probeAttemptsPerFamily {
+				time.Sleep(time.Duration(probe) * time.Second)
+			}
+		}
 
-		if err == nil && resp != nil && resp.Rcode != dns.RcodeServerFailure {
-			t.Logf("upstream reachable (bootstrap_ip_family=%q)", family)
+		if reachable {
 			return cancel
 		}
 
 		cancel()
-		t.Logf("bootstrap_ip_family=%q: upstream unreachable, trying next strategy", family)
+		t.Logf("bootstrap_ip_family=%q: upstream unreachable after %d probes, trying next strategy", family, probeAttemptsPerFamily)
 	}
 
 	t.Fatal("upstream unreachable with all bootstrap IP family strategies (auto, ipv4, ipv6); " +

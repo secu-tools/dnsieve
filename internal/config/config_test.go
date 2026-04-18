@@ -383,6 +383,26 @@ func TestValidate_LogLevel_Invalid(t *testing.T) {
 	}
 }
 
+func TestValidate_BootstrapIPFamily_Invalid(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.UpstreamSettings.BootstrapIPFamily = "both"
+	_, errs := cfg.Validate()
+	if !hasError(errs, "bootstrap_ip_family") {
+		t.Errorf("expected bootstrap_ip_family error for 'both', got: %v", errs)
+	}
+}
+
+func TestValidate_BootstrapIPFamily_Valid(t *testing.T) {
+	for _, val := range []string{"", "auto", "ipv4", "ipv6"} {
+		cfg := DefaultConfig()
+		cfg.UpstreamSettings.BootstrapIPFamily = val
+		_, errs := cfg.Validate()
+		if hasError(errs, "bootstrap_ip_family") {
+			t.Errorf("bootstrap_ip_family=%q should be valid, got errors: %v", val, errs)
+		}
+	}
+}
+
 func TestValidate_LogLevel_Valid(t *testing.T) {
 	for _, level := range []string{"debug", "info", "warn", "error"} {
 		cfg := DefaultConfig()

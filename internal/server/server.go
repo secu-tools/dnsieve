@@ -149,11 +149,16 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 
 	// Step 1: Whitelist check -- bypass all blocking upstreams
 	if resp := h.handleWhitelistedQuery(ctx, query, qname, qtype); resp != nil {
+		// RFC 5001: inject proxy NSID for substitute mode even on whitelist hits.
+		h.edns.HandleNSIDSubstitute(query, resp)
 		return resp
 	}
 
 	// Step 2: Cache lookup
 	if resp := h.handleCacheHit(query, qname, qtype); resp != nil {
+		// RFC 5001: inject proxy NSID for substitute mode even on cache hits.
+		// NSID is per-client-request and must not be baked into the cached entry.
+		h.edns.HandleNSIDSubstitute(query, resp)
 		return resp
 	}
 
