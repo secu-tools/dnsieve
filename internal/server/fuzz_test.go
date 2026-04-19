@@ -3,7 +3,6 @@
 package server
 
 import (
-	"context"
 	"net/netip"
 	"testing"
 	"time"
@@ -52,6 +51,9 @@ func FuzzHandleQuery(f *testing.F) {
 	f.Add([]byte{0xff, 0xff, 0xff, 0xff})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
+		if t.Context().Err() != nil {
+			return
+		}
 		msg := new(dns.Msg)
 		msg.Data = data
 		if err := msg.Unpack(); err != nil {
@@ -83,8 +85,7 @@ func FuzzHandleQuery(f *testing.F) {
 		handler := NewHandler(resolver, nil, c, logger, cfg)
 
 		// Should not panic
-		ctx := context.Background()
-		resp := handler.HandleQuery(ctx, msg)
+		resp := handler.HandleQuery(t.Context(), msg)
 
 		if resp == nil {
 			t.Error("HandleQuery should always return a response")
@@ -101,6 +102,9 @@ func FuzzHandleQueryDomainNames(f *testing.F) {
 	f.Add("very-long-subdomain-label-that-might-cause-issues.example.com.")
 
 	f.Fuzz(func(t *testing.T, domain string) {
+		if t.Context().Err() != nil {
+			return
+		}
 		if len(domain) == 0 || len(domain) > 253 {
 			return
 		}
@@ -129,7 +133,7 @@ func FuzzHandleQueryDomainNames(f *testing.F) {
 		resolver := upstream.NewResolverFromClients(clients, 2*time.Second, 50*time.Millisecond, logger)
 		handler := NewHandler(resolver, nil, c, logger, cfg)
 
-		resp := handler.HandleQuery(context.Background(), query)
+		resp := handler.HandleQuery(t.Context(), query)
 		if resp == nil {
 			t.Error("HandleQuery should always return a response")
 		}
@@ -146,6 +150,9 @@ func FuzzHandleQueryWithCacheRefresh(f *testing.F) {
 	f.Add(".", uint8(50))
 
 	f.Fuzz(func(t *testing.T, domain string, renewPercent uint8) {
+		if t.Context().Err() != nil {
+			return
+		}
 		if len(domain) == 0 || len(domain) > 253 {
 			return
 		}
@@ -186,7 +193,7 @@ func FuzzHandleQueryWithCacheRefresh(f *testing.F) {
 		handler := NewHandler(resolver, nil, c, logger, cfg)
 
 		// First query populates cache
-		resp := handler.HandleQuery(context.Background(), query)
+		resp := handler.HandleQuery(t.Context(), query)
 		if resp == nil {
 			t.Error("HandleQuery should always return a response")
 		}
@@ -194,7 +201,7 @@ func FuzzHandleQueryWithCacheRefresh(f *testing.F) {
 		// Second query may hit cache and potentially trigger refresh
 		q2 := new(dns.Msg)
 		dnsutil.SetQuestion(q2, dnsutil.Fqdn(domain), dns.TypeA)
-		resp2 := handler.HandleQuery(context.Background(), q2)
+		resp2 := handler.HandleQuery(t.Context(), q2)
 		if resp2 == nil {
 			t.Error("second HandleQuery should always return a response")
 		}
@@ -223,6 +230,9 @@ func FuzzHandleQueryIPv6(f *testing.F) {
 	f.Add(q3.Data)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
+		if t.Context().Err() != nil {
+			return
+		}
 		msg := new(dns.Msg)
 		msg.Data = data
 		if err := msg.Unpack(); err != nil {
@@ -259,7 +269,7 @@ func FuzzHandleQueryIPv6(f *testing.F) {
 		resolver := upstream.NewResolverFromClients(clients, 2*time.Second, 50*time.Millisecond, logger)
 		handler := NewHandler(resolver, nil, c, logger, cfg)
 
-		resp := handler.HandleQuery(context.Background(), msg)
+		resp := handler.HandleQuery(t.Context(), msg)
 		if resp == nil {
 			t.Error("HandleQuery must never return nil")
 		}

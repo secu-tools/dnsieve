@@ -405,7 +405,7 @@ protocol = "doh"
 timeout_ms = 5000
 min_wait_ms = 200
 verify_certificates = true
-
+%s
 [tls]
 cert_base64 = %q
 key_base64  = %q
@@ -429,7 +429,7 @@ use_plaintext_http = true
 [cache]
 enabled = true
 max_entries = 1000
-`, cert.certB64, cert.keyB64, plainPort, dotPort, dohPort)
+`, bootstrapIPFamilyTOML(), cert.certB64, cert.keyB64, plainPort, dotPort, dohPort)
 
 	cfgPath := writeConfig(t, dir, cfg)
 	startBinary(t, cfgPath, plainPort)

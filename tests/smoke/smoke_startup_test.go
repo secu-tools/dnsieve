@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"codeberg.org/miekg/dns"
 )
 
 // TestSmoke_BinaryExists verifies the binary was built and is executable.
@@ -123,4 +125,28 @@ func TestSmoke_MissingConfigExitsNonZero(t *testing.T) {
 		t.Errorf("expected non-zero exit for missing config, but got nil error\noutput: %s", out)
 	}
 	t.Logf("missing config output: %s", strings.TrimSpace(string(out)))
+}
+
+// TestSmoke_UpstreamReachable verifies that the running binary can actually
+// resolve a domain and return a non-SERVFAIL response. This test catches the
+// failure mode where the binary starts successfully but cannot reach any
+// upstream DNS server (e.g. bootstrap DNS blocked, misconfigured upstream
+// addresses), which would cause every client query to receive SERVFAIL.
+func TestSmoke_UpstreamReachable(t *testing.T) {
+	dir := smokeTempDir(t)
+	port := findFreePort(t)
+	cfgPath := writeConfig(t, dir, minimalConfig(port))
+	startBinary(t, cfgPath, port)
+
+	resp := queryUDP(t, port, "example.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("upstream unreachable: DNS query returned %s (want NOERROR) -- "+
+			"the binary started but cannot reach any upstream DNS server; "+
+			"check network connectivity and bootstrap_dns config",
+			dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) == 0 {
+		t.Fatal("upstream unreachable: NOERROR but no answer records -- upstream resolved but returned empty response")
+	}
+	t.Logf("upstream reachable: example.com A -> %d answer(s)", len(resp.Answer))
 }

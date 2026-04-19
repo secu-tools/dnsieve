@@ -36,6 +36,9 @@ func FuzzPrepareUpstreamQuery(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
+		if t.Context().Err() != nil {
+			return
+		}
 		msg := new(dns.Msg)
 		msg.Data = data
 		if err := msg.Unpack(); err != nil {
@@ -64,6 +67,9 @@ func FuzzProcessUpstreamResponse(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
+		if t.Context().Err() != nil {
+			return
+		}
 		msg := new(dns.Msg)
 		msg.Data = data
 		if err := msg.Unpack(); err != nil {
@@ -83,6 +89,9 @@ func FuzzSynthesizeDNAME(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
+		if t.Context().Err() != nil {
+			return
+		}
 		msg := new(dns.Msg)
 		msg.Data = data
 		if err := msg.Unpack(); err != nil {

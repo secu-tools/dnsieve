@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -294,6 +295,28 @@ func TestMakeBootstrapDialer_HostnameLookup(t *testing.T) {
 		return
 	}
 	conn.Close()
+}
+
+// TestMakeBootstrapDialer_FallbackOnBootstrapFailure verifies that when
+// bootstrap DNS is unreachable, the dialer falls back to the system resolver
+// (i.e. returns an error from the system resolver, not from bootstrap itself).
+func TestMakeBootstrapDialer_FallbackOnBootstrapFailure(t *testing.T) {
+	// Bootstrap at port 1 is unreachable; dialer must NOT return a bootstrap
+	// error — it falls back to the system resolver, which may return "no such
+	// host" for a non-existent domain (acceptable) but must not return a
+	// "bootstrap" error message.
+	dialer := makeBootstrapDialer([]string{"127.0.0.1:1"}, "auto")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := dialer(ctx, "tcp", "nonexistent.invalid:443")
+	if err == nil {
+		t.Fatal("expected error for non-existent host, got nil")
+	}
+	if strings.Contains(err.Error(), "bootstrap") {
+		t.Errorf("expected system-resolver error (not bootstrap error) after fallback, got: %v", err)
+	}
 }
 
 // --- Integration: NewDoHClient with bootstrap ---

@@ -118,6 +118,9 @@ port = 99999
 `)
 
 	f.Fuzz(func(t *testing.T, data string) {
+		if t.Context().Err() != nil {
+			return
+		}
 		cfg := DefaultConfig()
 		err := toml.Unmarshal([]byte(data), cfg)
 		if err != nil {

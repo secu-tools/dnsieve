@@ -263,30 +263,43 @@ func resolveHost(host, bootstrapDNS string) ([]string, error) {
 		return net.LookupHost(host)
 	}
 
-	// Use bootstrap DNS server
-	c := new(dns.Client)
+	// Parse the comma-separated bootstrap DNS list and try each server in
+	// parallel, returning the first successful A-record response.
+	addrs := upstream.ParseBootstrapDNSAddrs(bootstrapDNS)
+	if len(addrs) == 0 {
+		return net.LookupHost(host)
+	}
 
+	c := new(dns.Client)
 	m := new(dns.Msg)
 	dnsutil.SetQuestion(m, dnsutil.Fqdn(host), dns.TypeA)
 	m.RecursionDesired = true
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, _, err := c.Exchange(ctx, m, "udp", bootstrapDNS)
-	if err != nil {
-		return nil, err
-	}
 
-	var addrs []string
-	for _, rr := range resp.Answer {
-		if a, ok := rr.(*dns.A); ok {
-			addrs = append(addrs, a.Addr.String())
+	var lastErr error
+	for _, addr := range addrs {
+		resp, _, err := c.Exchange(ctx, m, "udp", addr)
+		if err != nil {
+			lastErr = err
+			continue
 		}
+		var result []string
+		for _, rr := range resp.Answer {
+			if a, ok := rr.(*dns.A); ok {
+				result = append(result, a.Addr.String())
+			}
+		}
+		if len(result) > 0 {
+			return result, nil
+		}
+		lastErr = fmt.Errorf("no A records returned from %s", addr)
 	}
-	if len(addrs) == 0 {
-		return nil, fmt.Errorf("no A records returned")
+	if lastErr != nil {
+		return nil, lastErr
 	}
-	return addrs, nil
+	return nil, fmt.Errorf("no A records returned")
 }
 
 func isCertError(s string) bool {

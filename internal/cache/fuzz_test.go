@@ -25,6 +25,9 @@ func FuzzCacheRenewPercent(f *testing.F) {
 	f.Add(25, uint16(65535), false) // large TTL
 
 	f.Fuzz(func(t *testing.T, renewPercent int, ttlSecs uint16, blocked bool) {
+		if t.Context().Err() != nil {
+			return
+		}
 		// Clamp renewPercent to valid range for cache construction
 		if renewPercent < 0 {
 			renewPercent = 0
@@ -87,6 +90,9 @@ func FuzzCacheKeys(f *testing.F) {
 	f.Add("xn--n3h.example.com.", uint16(dns.TypeTXT), uint16(dns.ClassINET))
 
 	f.Fuzz(func(t *testing.T, name string, qtype, qclass uint16) {
+		if t.Context().Err() != nil {
+			return
+		}
 		if len(name) == 0 || len(name) > 253 {
 			return
 		}
@@ -122,6 +128,9 @@ func FuzzCacheConcurrentRefresh(f *testing.F) {
 	f.Add(99, "a.b.c.")
 
 	f.Fuzz(func(t *testing.T, renewPercent int, domain string) {
+		if t.Context().Err() != nil {
+			return
+		}
 		if renewPercent < 1 || renewPercent > 99 {
 			renewPercent = 25
 		}
@@ -179,6 +188,9 @@ func FuzzCacheKeyUnknownTypes(f *testing.F) {
 	f.Add(uint16(65535), uint16(65535))
 
 	f.Fuzz(func(t *testing.T, qtype, qclass uint16) {
+		if t.Context().Err() != nil {
+			return
+		}
 		msg := new(dns.Msg)
 		msg.ID = 1
 		msg.Question = []dns.RR{&dns.RFC3597{

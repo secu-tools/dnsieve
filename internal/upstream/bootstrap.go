@@ -122,13 +122,13 @@ func lookupHostViaBootstrap(ctx context.Context, host, bootstrapAddr, ipFamily s
 			}
 			lastErr = r.err
 		case <-ctx.Done():
-			return "", fmt.Errorf("bootstrap DNS cancelled for %s", host)
+			return "", fmt.Errorf("bootstrap cancelled")
 		}
 	}
 	if lastErr != nil {
-		return "", fmt.Errorf("bootstrap DNS failed for %s via %s: %w", host, bootstrapAddr, lastErr)
+		return "", fmt.Errorf("via %s: %w", bootstrapAddr, lastErr)
 	}
-	return "", fmt.Errorf("bootstrap DNS resolution failed for %s", host)
+	return "", fmt.Errorf("via %s: no A/AAAA record", bootstrapAddr)
 }
 
 // resolveViaBootstrap queries all bootstrapAddrs in parallel and returns the
@@ -170,13 +170,13 @@ func resolveViaBootstrap(ctx context.Context, host string, bootstrapAddrs []stri
 			}
 			lastErr = r.err
 		case <-ctx.Done():
-			return "", fmt.Errorf("bootstrap DNS cancelled for %s", host)
+			return "", fmt.Errorf("bootstrap cancelled")
 		}
 	}
 	if lastErr != nil {
-		return "", fmt.Errorf("all bootstrap DNS servers failed for %s: %w", host, lastErr)
+		return "", fmt.Errorf("bootstrap DNS failed for %s: %w", host, lastErr)
 	}
-	return "", fmt.Errorf("bootstrap DNS resolution failed for %s", host)
+	return "", fmt.Errorf("bootstrap DNS failed for %s: no response", host)
 }
 
 // makeBootstrapDialer returns a DialContext function that resolves hostnames
@@ -195,7 +195,9 @@ func makeBootstrapDialer(bootstrapAddrs []string, ipFamily string) func(ctx cont
 		}
 		ip, err := resolveViaBootstrap(ctx, host, bootstrapAddrs, ipFamily)
 		if err != nil {
-			return nil, fmt.Errorf("bootstrap dial %s: %w", host, err)
+			// Bootstrap DNS unreachable; fall back to system resolver so the
+			// upstream can still be reached via OS-configured DNS.
+			return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(host, port))
 		}
 		return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(ip, port))
 	}

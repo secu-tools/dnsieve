@@ -21,6 +21,9 @@ func FuzzReadDOHWireQueryPOSTLimit(f *testing.F) {
 	f.Add(bytes.Repeat([]byte{0x42}, 70000))
 
 	f.Fuzz(func(t *testing.T, body []byte) {
+		if t.Context().Err() != nil {
+			return
+		}
 		r := httptest.NewRequest(http.MethodPost, "/dns-query", bytes.NewReader(body))
 		r.Header.Set("Content-Type", "application/dns-message")
 
@@ -41,6 +44,9 @@ func FuzzBuildQueryFromJSONParamsNoPanic(f *testing.F) {
 	f.Add("", "A", "0")
 
 	f.Fuzz(func(t *testing.T, name, qtype, doFlag string) {
+		if t.Context().Err() != nil {
+			return
+		}
 		vals := url.Values{}
 		if name != "" {
 			vals.Set("name", name)
@@ -81,6 +87,9 @@ func FuzzParseQueryType(f *testing.F) {
 	f.Add("not-a-type")
 
 	f.Fuzz(func(t *testing.T, in string) {
+		if t.Context().Err() != nil {
+			return
+		}
 		_ = parseQueryType(in)
 	})
 }
@@ -95,6 +104,9 @@ func FuzzDoHPayloadParsing(f *testing.F) {
 	f.Add(bytes.Repeat([]byte{0x41}, 512))
 
 	f.Fuzz(func(t *testing.T, payload []byte) {
+		if t.Context().Err() != nil {
+			return
+		}
 		msg := new(dns.Msg)
 		msg.Data = payload
 		err := msg.Unpack()
@@ -120,6 +132,9 @@ func FuzzParseJSONQueryAdvanced(f *testing.F) {
 	f.Add("\x00\x00\x00", "\x00", "\x00")
 
 	f.Fuzz(func(t *testing.T, name, qtype, doFlag string) {
+		if t.Context().Err() != nil {
+			return
+		}
 		vals := url.Values{}
 		if name != "" {
 			vals.Set("name", name)

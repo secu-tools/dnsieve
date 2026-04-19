@@ -238,11 +238,11 @@ IPv6-specific unit tests include:
 
 ## CI Network Reliability: bootstrap_ip_family
 
-On IPv4-only CI runners (for example GitHub-hosted Ubuntu runners with no
-outbound IPv6), the default bootstrap behaviour -- racing both an A and a
-AAAA lookup -- can return an IPv6 address that is unreachable, causing every
-upstream DoH/DoT connection attempt to fail with "network is unreachable" and
-the proxy to return SERVFAIL.
+GitHub-hosted runners do not have outbound IPv6 connectivity. The default
+bootstrap behaviour -- racing both an A and a AAAA lookup -- can therefore
+return an IPv6 address that is unreachable, causing every upstream DoH/DoT
+connection attempt to fail with "network is unreachable" and the proxy to
+return SERVFAIL.
 
 The `bootstrap_ip_family` config option locks the bootstrap resolver to one
 address family:
@@ -265,16 +265,21 @@ bootstrap_ip_family = "ipv4"
 **E2E tests** that depend on live upstream responses use
 `startServerReachable` instead of `startServer`. This helper tries three
 strategies in order -- `"auto"`, `"ipv4"`, `"ipv6"` -- sending a health-check
-query (`example.com A`) after each start. The first strategy that returns a
-non-SERVFAIL response is locked in for the remainder of that test. If all
-three strategies fail the test is marked as failed, never silently skipped:
-this ensures a real network outage or proxy bug is always visible.
+query (`example.com A`) after each start. Trying `"auto"` first verifies that
+the default code path works on the current runner. The first strategy that
+returns a non-SERVFAIL response is used for the remainder of that test. If all
+three strategies fail the test fails immediately (t.Fatal): a genuine network
+outage or proxy bug is always visible, never silently skipped.
+
+**Integration tests** use the same "auto" then "ipv4" then "ipv6" probe loop
+inside `startTestServer`. A free port is acquired for each attempt; if the
+upstream probe passes the server stays on that port for the duration of the
+test.
 
 **Smoke tests** detect IPv6 connectivity once in `TestMain` by attempting a
 TCP connection to `[2620:fe::fe]:53` (Quad9 IPv6). When unreachable, all
 generated TOML configs include `bootstrap_ip_family = "ipv4"` automatically.
 
-This approach is deterministic: tests do not skip randomly, and a genuine
-upstream connectivity failure always produces a test failure rather than a
-silent skip.
+This approach is deterministic: there is no test skipping. A genuine upstream
+connectivity failure always produces a test failure.
 

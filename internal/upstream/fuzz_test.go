@@ -3,7 +3,6 @@
 package upstream
 
 import (
-	"context"
 	"net/netip"
 	"testing"
 	"time"
@@ -39,6 +38,9 @@ func FuzzWhitelistIsWhitelisted(f *testing.F) {
 	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "fuzz"}}
 
 	f.Fuzz(func(t *testing.T, domain string) {
+		if t.Context().Err() != nil {
+			return
+		}
 		// Must never panic regardless of input
 		_ = wl.IsWhitelisted(domain)
 	})
@@ -120,8 +122,10 @@ func FuzzResolveWithMockResponses(f *testing.F) {
 			logger:        logger,
 		}
 
-		// Must never panic
-		result := r.Resolve(context.Background(), query)
+		// Use t.Context() so that when the fuzz run ends (fuzztime expired) the
+		// Resolve call exits cleanly via context cancellation rather than
+		// blocking the goroutine and causing a spurious deadline-exceeded failure.
+		result := r.Resolve(t.Context(), query)
 
 		if result.BestResponse == nil {
 			t.Error("Resolve must always return a non-nil BestResponse")

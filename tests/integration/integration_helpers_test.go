@@ -36,43 +36,87 @@ func findFreePort(t *testing.T) int {
 
 // startTestServer starts a DNSieve server with the given config in-process
 // and returns the port it is listening on and a cancel function to stop it.
+// It probes upstream reachability using three bootstrap IP-family strategies
+// in order: "auto" (RFC 6555 race, exercises the default code path), "ipv4"
+// (A records only, works on IPv4-only CI runners), then "ipv6" (AAAA only).
+// The server is restarted with each strategy until a probe query returns
+// NOERROR. If all strategies fail the test fails immediately (t.Fatal).
 func startTestServer(t *testing.T, cfg *config.Config) (int, context.CancelFunc) {
 	t.Helper()
 
-	port := findFreePort(t)
 	cfg.Downstream.Plain.Enabled = true
 	cfg.Downstream.Plain.ListenAddresses = []string{"127.0.0.1"}
-	cfg.Downstream.Plain.Port = port
 	cfg.Downstream.DoT.Enabled = false
 	cfg.Downstream.DoH.Enabled = false
 
 	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "integration")
 
-	resolver, err := upstream.NewResolver(cfg, logger)
-	if err != nil {
-		t.Fatalf("create resolver: %v", err)
+	for _, family := range []string{"auto", "ipv4", "ipv6"} {
+		port := findFreePort(t)
+
+		cfgCopy := *cfg
+		cfgCopy.UpstreamSettings = cfg.UpstreamSettings
+		cfgCopy.Downstream.Plain.Port = port
+		cfgCopy.UpstreamSettings.BootstrapIPFamily = family
+
+		resolver, err := upstream.NewResolver(&cfgCopy, logger)
+		if err != nil {
+			t.Logf("bootstrap_ip_family=%q: resolver error: %v", family, err)
+			continue
+		}
+
+		c := cache.New(
+			cfgCopy.Cache.MaxEntries,
+			cfgCopy.Cache.BlockedTTL,
+			cfgCopy.Cache.MinTTL,
+			cfgCopy.Cache.RenewPercent,
+		)
+
+		handler := server.NewHandler(resolver, nil, c, logger, &cfgCopy)
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		go func() {
+			if serveErr := server.ServePlain(ctx, handler, &cfgCopy, logger); serveErr != nil {
+				t.Logf("server stopped: %v", serveErr)
+			}
+		}()
+
+		waitForServer(t, port)
+
+		// Probe upstream reachability. ReadTimeout (7 s) must remain greater
+		// than the proxy's upstream TimeoutMS (5 s) to avoid a tie-race.
+		probeQ := dnsutil.SetQuestion(new(dns.Msg), dnsutil.Fqdn("example.com"), dns.TypeA)
+		probeQ.RecursionDesired = true
+		addr := fmt.Sprintf("127.0.0.1:%d", port)
+		reachable := false
+		for probe := 1; probe <= 3; probe++ {
+			c2 := dns.NewClient()
+			c2.Transport.ReadTimeout = 7 * time.Second
+			ctx2, cancel2 := context.WithTimeout(context.Background(), 8*time.Second)
+			resp, _, probeErr := c2.Exchange(ctx2, probeQ, "udp", addr)
+			cancel2()
+			if probeErr == nil && resp != nil && resp.Rcode != dns.RcodeServerFailure {
+				t.Logf("upstream reachable (bootstrap_ip_family=%q, probe %d/3)", family, probe)
+				reachable = true
+				break
+			}
+			t.Logf("bootstrap_ip_family=%q probe %d/3: upstream not yet reachable", family, probe)
+			if probe < 3 {
+				time.Sleep(time.Duration(probe) * time.Second)
+			}
+		}
+
+		if reachable {
+			return port, cancel
+		}
+
+		cancel()
+		t.Logf("bootstrap_ip_family=%q: upstream unreachable after 3 probes, trying next strategy", family)
 	}
 
-	c := cache.New(
-		cfg.Cache.MaxEntries,
-		cfg.Cache.BlockedTTL,
-		cfg.Cache.MinTTL,
-		cfg.Cache.RenewPercent,
-	)
-
-	handler := server.NewHandler(resolver, nil, c, logger, cfg)
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	go func() {
-		if err := server.ServePlain(ctx, handler, cfg, logger); err != nil {
-			t.Logf("server stopped: %v", err)
-		}
-	}()
-
-	waitForServer(t, port)
-
-	return port, cancel
+	t.Fatal("upstream unreachable with all bootstrap IP family strategies (auto, ipv4, ipv6)")
+	return 0, nil
 }
 
 // waitForServer probes the given TCP port until it accepts connections or

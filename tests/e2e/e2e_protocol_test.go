@@ -472,7 +472,7 @@ func TestE2E_AllProtocols(t *testing.T) {
 	cfg.TLS.KeyBase64 = cert.keyB64
 	cfg.UpstreamSettings.TimeoutMS = 5000
 
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	t.Run("UDP", func(t *testing.T) {

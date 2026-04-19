@@ -78,6 +78,9 @@ func FuzzInspectWireResponse(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
+		if t.Context().Err() != nil {
+			return
+		}
 		// This should never panic regardless of input
 		msg, result := InspectWireResponse(data)
 

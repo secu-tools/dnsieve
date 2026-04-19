@@ -203,6 +203,11 @@ func waitForPort(t *testing.T, network, addr string) {
 }
 
 // plainConfig returns a minimal plain-DNS-only config for tests.
+// bootstrap_ip_family is set to "ipv4" so that tests that use startServer
+// directly behave deterministically on IPv4-only CI runners: the bootstrap
+// DNS will only return A records for the upstream DoH hostnames, preventing
+// the non-deterministic IPv6-first behaviour of "auto" from causing spurious
+// SERVFAIL responses when IPv6 connectivity is absent.
 func plainConfig(port int) *config.Config {
 	cfg := config.DefaultConfig()
 	cfg.Downstream.Plain.Enabled = true
@@ -212,6 +217,7 @@ func plainConfig(port int) *config.Config {
 	cfg.Downstream.DoH.Enabled = false
 	cfg.UpstreamSettings.TimeoutMS = 5000
 	cfg.UpstreamSettings.MinWaitMS = 200
+	cfg.UpstreamSettings.BootstrapIPFamily = "ipv4"
 	return cfg
 }
 
@@ -228,17 +234,25 @@ const maxQueryAttempts = 3
 
 // startServerReachable starts a DNSieve proxy and confirms that at least one
 // upstream resolver is reachable before returning. It probes using three
-// bootstrap IP-family strategies in order: "auto" (RFC 6555 race), "ipv4"
-// (A records only), then "ipv6" (AAAA records only). The server is restarted
-// with each strategy until a probe query returns NOERROR. Each strategy is
-// probed up to probeAttemptsPerFamily times with backoff to tolerate transient
-// upstream delays. If every strategy exhausts all probe attempts the test is
-// failed immediately -- not skipped -- because persistent SERVFAIL indicates a
-// real network outage, not a test defect.
+// bootstrap IP-family strategies in order: "auto" (RFC 6555 race, exercises
+// the default config path), "ipv4" (A records only, works on IPv4-only CI
+// runners), then "ipv6" (AAAA records only, for IPv6-only environments).
+// The server is restarted with each strategy until a probe query returns
+// NOERROR. Each strategy is probed up to probeAttemptsPerFamily times with
+// backoff to tolerate transient upstream delays. If every strategy exhausts
+// all probe attempts the test fails immediately (t.Fatal): exhausting all
+// three families indicates a genuine total network outage on the runner.
 //
-// Using this function instead of startServer ensures that tests depending on
-// live upstream responses behave deterministically on IPv4-only CI runners
-// (attempt 2 forces IPv4 bootstrap) without random skipping.
+// Trying "auto" first verifies that the bootstrap_ip_family="auto" code path
+// works correctly on the current runner. On GitHub-hosted runners IPv6
+// outbound connectivity is not available, so "auto" will non-deterministically
+// receive IPv6 addresses that cannot connect; "ipv4" is then tried as the
+// first fallback and succeeds on those runners.
+//
+// The probe ReadTimeout (7 s) must remain strictly greater than the proxy's
+// upstream TimeoutMS (5000 ms) to avoid a timing race where the proxy has
+// already received a successful upstream response but the probe client's
+// deadline fires at the same instant.
 const probeAttemptsPerFamily = 3
 
 func startServerReachable(t *testing.T, cfg *config.Config) context.CancelFunc {
@@ -256,13 +270,16 @@ func startServerReachable(t *testing.T, cfg *config.Config) context.CancelFunc {
 		cancel := startServer(t, &cfgCopy)
 
 		// Probe upstream health, retrying to tolerate transient upstream delays.
+		// ReadTimeout (7 s) > proxy TimeoutMS (5 s) to prevent a tie-race where
+		// the proxy returns a valid response at ~5 s but the probe deadline fires
+		// simultaneously.
 		q := dnsutil.SetQuestion(new(dns.Msg), dnsutil.Fqdn("example.com"), dns.TypeA)
 		q.RecursionDesired = true
 		reachable := false
 		for probe := 1; probe <= probeAttemptsPerFamily; probe++ {
 			c := dns.NewClient()
-			c.Transport.ReadTimeout = 5 * time.Second
-			ctx, ctxCancel := context.WithTimeout(context.Background(), 6*time.Second)
+			c.Transport.ReadTimeout = 7 * time.Second
+			ctx, ctxCancel := context.WithTimeout(context.Background(), 8*time.Second)
 			resp, _, err := c.Exchange(ctx, q, "udp", addr)
 			ctxCancel()
 			if err == nil && resp != nil && resp.Rcode != dns.RcodeServerFailure {
@@ -281,11 +298,26 @@ func startServerReachable(t *testing.T, cfg *config.Config) context.CancelFunc {
 		}
 
 		cancel()
+		// Wait for the previous server to fully release the port before starting
+		// the next strategy. Without this, the next startServer call races with
+		// the old server goroutine closing its listener: waitForPort may connect
+		// to the still-dying server and return successfully while the new server's
+		// net.Listen call fails silently (port still occupied). The new server
+		// goroutine then exits, leaving nothing on the port when the test queries.
+		portReleaseDeadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(portReleaseDeadline) {
+			conn, dialErr := net.DialTimeout("tcp", addr, 50*time.Millisecond)
+			if dialErr != nil {
+				break // port is no longer in use by the previous server
+			}
+			conn.Close()
+			time.Sleep(10 * time.Millisecond)
+		}
 		t.Logf("bootstrap_ip_family=%q: upstream unreachable after %d probes, trying next strategy", family, probeAttemptsPerFamily)
 	}
 
 	t.Fatal("upstream unreachable with all bootstrap IP family strategies (auto, ipv4, ipv6); " +
-		"no network connectivity -- cannot run this test")
+		"no network connectivity on this runner")
 	return nil
 }
 
@@ -790,6 +822,10 @@ func parsePrefix(subnet string) (prefixInfo, error) {
 }
 
 // dotOnlyConfig returns a config with only DoT enabled.
+// bootstrap_ip_family is set to "ipv4" for reliability: DoT-only configs
+// have no plain-DNS listener for the probe loop in startServerReachable, so
+// "auto" could non-deterministically receive IPv6 addresses and fail on
+// IPv4-only CI runners.
 func dotOnlyConfig(port int, cert *testCert) *config.Config {
 	cfg := config.DefaultConfig()
 	cfg.Downstream.Plain.Enabled = false
@@ -800,6 +836,7 @@ func dotOnlyConfig(port int, cert *testCert) *config.Config {
 	cfg.TLS.CertBase64 = cert.certB64
 	cfg.TLS.KeyBase64 = cert.keyB64
 	cfg.UpstreamSettings.TimeoutMS = 5000
+	cfg.UpstreamSettings.BootstrapIPFamily = "ipv4"
 	return cfg
 }
 
