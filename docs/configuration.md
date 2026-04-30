@@ -153,10 +153,9 @@ on the upstream connection. Leave as `"auto"` on dual-stack hosts.
 
 ### Upstream Re-resolution (`upstream_ttl`)
 
-By default DNSieve (like AdGuard Home, dnscrypt-proxy, and CoreDNS) resolves
-each upstream hostname **once at startup** and reuses that IP for the lifetime
-of the process. This is fine for providers such as Cloudflare (`1.1.1.1`) and
-Quad9 (`9.9.9.9`) whose IPs rarely or never change.
+By default DNSieve resolves each upstream hostname **once at startup** and
+reuses that IP for the lifetime of the process. This is fine for providers
+whose IPs rarely or never change.
 
 For environments where upstream IPs may change (custom internal resolvers,
 split-horizon DNS, etc.) `upstream_ttl` controls when and how the

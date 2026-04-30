@@ -625,6 +625,21 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Compute Docker tags
+        id: tags
+        run: |
+          if [ "${{ needs.resolve-version.outputs.is_prerelease }}" = "true" ]; then
+            CHANNEL_TAG="ghcr.io/secu-tools/dnsieve:beta"
+          else
+            CHANNEL_TAG="ghcr.io/secu-tools/dnsieve:latest"
+          fi
+          {
+            echo "tags<<EOF"
+            echo "${CHANNEL_TAG}"
+            echo "ghcr.io/secu-tools/dnsieve:${{ needs.resolve-version.outputs.full_version }}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -634,9 +649,7 @@ jobs:
           platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/386,linux/ppc64le,linux/s390x,linux/riscv64
           build-args: |
             VERSION=${{ needs.resolve-version.outputs.full_version }}
-          tags: |
-            ghcr.io/secu-tools/dnsieve:latest
-            ghcr.io/secu-tools/dnsieve:${{ needs.resolve-version.outputs.full_version }}
+          tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -710,20 +723,25 @@ jobs:
         shell: pwsh
         env:
           FULL_VERSION: ${{ needs.resolve-version.outputs.full_version }}
+          IS_PRERELEASE: ${{ needs.resolve-version.outputs.is_prerelease }}
         run: |
           $versionTag = "ghcr.io/secu-tools/dnsieve:$env:FULL_VERSION-windows-ltsc2022"
-          $latestTag  = "ghcr.io/secu-tools/dnsieve:latest-windows-ltsc2022"
+          if ($env:IS_PRERELEASE -eq 'true') {
+            $channelTag = "ghcr.io/secu-tools/dnsieve:beta-windows-ltsc2022"
+          } else {
+            $channelTag = "ghcr.io/secu-tools/dnsieve:latest-windows-ltsc2022"
+          }
           docker build `
             --platform windows/amd64 `
             --build-arg TARGETARCH=amd64 `
             -f docker/Dockerfile.windows `
             -t $versionTag `
-            -t $latestTag `
+            -t $channelTag `
             .
           docker push $versionTag
-          docker push $latestTag
+          docker push $channelTag
           Write-Host "Pushed: $versionTag"
-          Write-Host "Pushed: $latestTag"
+          Write-Host "Pushed: $channelTag"
 
   # ---------------------------------------------------------------
   # 4b. Cleanup if Docker fails

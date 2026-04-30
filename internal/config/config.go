@@ -898,10 +898,9 @@ bootstrap_ip_family = "ipv4"
 # the initial startup resolution.
 #
 #   -1   -- Disabled (default). The hostname is resolved once at startup
-#            and never again. This matches the behaviour of most DNS proxy
-#            software (AdGuard Home, dnscrypt-proxy, CoreDNS, Unbound).
-#            Use this when your upstreams have stable anycast IPs such as
-#            Cloudflare (1.1.1.1) or Quad9 (9.9.9.9).
+#            and never again. This is the standard behaviour for DNS proxy
+#            software. Use this when your upstreams have stable IPs that
+#            rarely or never change.
 #
 #    0   -- TTL-based. The resolved IP is considered valid for the full TTL
 #            of the DNS record returned during resolution. When a new
