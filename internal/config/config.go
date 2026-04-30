@@ -44,6 +44,31 @@ type UpstreamSettings struct {
 	// "ipv4" queries only A records; use on IPv4-only hosts.
 	// "ipv6" queries only AAAA records; use on IPv6-only hosts.
 	BootstrapIPFamily string `toml:"bootstrap_ip_family"`
+	// UpstreamTTL controls periodic re-resolution of upstream
+	// hostnames after the initial startup resolution.
+	//
+	//  -1 (default): disabled. The hostname is resolved once at startup
+	//               and never again. This matches the behaviour of most
+	//               DNS proxy software.
+	//   0:           TTL-based. The resolved IP is reused for the full
+	//               lifetime of the DNS record TTL. When a new connection
+	//               must be established after the TTL has expired the
+	//               hostname is re-resolved via bootstrap DNS. A background
+	//               refresh is triggered proactively when only 25% of the
+	//               TTL remains so that the new address is usually ready
+	//               before the old one expires. A minimum floor of 30 s
+	//               applies to avoid hammering the bootstrap server.
+	//   1-2147483647: fixed interval in seconds. The resolved IP is
+	//               refreshed at most once per interval. The refresh
+	//               only happens when a new connection is being established
+	//               (no existing connections are closed). A background
+	//               refresh is started at 75% of the interval so the new
+	//               address is ready before the interval expires.
+	//
+	// Re-resolution uses the same bootstrap_dns and bootstrap_ip_family
+	// settings as the initial startup resolution. No config file reload
+	// is performed.
+	UpstreamTTL int `toml:"upstream_ttl"`
 }
 
 // TLSConfig holds shared TLS certificate settings used by both DoT and DoH
@@ -228,6 +253,7 @@ func DefaultConfig() *Config {
 			VerifyCertificates: true,
 			BootstrapDNS:       "9.9.9.9:53,149.112.112.112:53",
 			BootstrapIPFamily:  "auto",
+			UpstreamTTL:        -1,
 		},
 		Downstream: Downstream{
 			Plain: DownstreamPlain{
@@ -500,6 +526,17 @@ func (c *Config) validateUpstreams() (warnings []string, errors []string) {
 		errors = append(errors, fmt.Sprintf(
 			"upstream_settings.bootstrap_ip_family: invalid value %q (must be \"auto\", \"ipv4\", or \"ipv6\")",
 			c.UpstreamSettings.BootstrapIPFamily,
+		))
+	}
+
+	const maxUpstreamTTL = 1<<31 - 1 // math.MaxInt32, prevents Duration overflow
+	ri := c.UpstreamSettings.UpstreamTTL
+	if ri < -1 {
+		errors = append(errors, "upstream_settings.upstream_ttl must be -1 (disabled), 0 (TTL-based), or 1-2147483647 (seconds interval)")
+	} else if ri > maxUpstreamTTL {
+		errors = append(errors, fmt.Sprintf(
+			"upstream_settings.upstream_ttl=%d exceeds maximum %d (approximately 68 years)",
+			ri, maxUpstreamTTL,
 		))
 	}
 
@@ -855,7 +892,37 @@ bootstrap_dns = "9.9.9.9:53,149.112.112.112:53"
 # This setting only affects how upstream hostnames are resolved. The
 # encrypted DNS traffic itself flows over whatever address is returned.
 # Leave as "auto" on dual-stack hosts.
-# bootstrap_ip_family = "auto"
+bootstrap_ip_family = "ipv4"
+
+# Controls whether and how often upstream hostnames are re-resolved after
+# the initial startup resolution.
+#
+#   -1   -- Disabled (default). The hostname is resolved once at startup
+#            and never again. This matches the behaviour of most DNS proxy
+#            software (AdGuard Home, dnscrypt-proxy, CoreDNS, Unbound).
+#            Use this when your upstreams have stable anycast IPs such as
+#            Cloudflare (1.1.1.1) or Quad9 (9.9.9.9).
+#
+#    0   -- TTL-based. The resolved IP is considered valid for the full TTL
+#            of the DNS record returned during resolution. When a new
+#            connection must be opened after the TTL expires, the hostname
+#            is re-resolved via bootstrap DNS. A background refresh is
+#            triggered at 10% remaining TTL so the new address is usually
+#            ready before the old one expires, avoiding any slowdown on
+#            connection setup. A floor of 30 seconds is enforced so that
+#            very short TTLs do not cause excessive bootstrap queries.
+#            No open connections are closed forcibly.
+#
+#   N>0  -- Fixed interval in seconds (1 to 2147483647). The IP is
+#            considered valid for N seconds. Re-resolution happens only
+#            when a new connection needs to be established after the
+#            interval has elapsed. A background refresh begins at 75% of
+#            the interval (25% remaining) to keep the address fresh. No
+#            open connections are closed. Minimum sensible value: 60.
+#
+# All modes reuse the same bootstrap_dns and bootstrap_ip_family settings
+# that were active at startup. The config file is never re-read.
+upstream_ttl = -1
 
 
 # =============================================================================

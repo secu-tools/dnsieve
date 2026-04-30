@@ -8,17 +8,11 @@
 [![Dependency Graph](https://github.com/secu-tools/dnsieve/actions/workflows/dependabot/update-graph/badge.svg)](https://github.com/secu-tools/dnsieve/actions/workflows/dependabot/update-graph)
 [![Go Report Card](https://goreportcard.com/badge/github.com/secu-tools/dnsieve)](https://goreportcard.com/report/github.com/secu-tools/dnsieve)
 
+## Introduction
+
 DNS filtering proxy that queries multiple upstream DNS servers concurrently
 and enforces block-consensus: if **any** upstream signals a domain is
 blocked, the blocked response is returned to the client.
-
-> **Development Status**
->
-> DNSieve is still under active development. Not all features have been fully tested and edge cases may exist. This project was built for personal use -- use it at your own discretion.
->
-> If you encounter any issues, please open a report in the [Issues](../../issues) section. Include a screenshot and steps to reproduce when possible -- it helps a lot. I may or may not have time to address every report, but all feedback is appreciated.
-
-## Introduction
 
 DNSieve carries no local block lists of its own. Instead of downloading and
 maintaining lists of known-bad domains (as Pi-hole or AdGuard Home do),
@@ -34,6 +28,20 @@ without managing separate subscriptions. The trade-off is that querying all
 upstreams concurrently introduces a small amount of latency compared to a
 single-server setup; for best results, use fast upstream servers and keep the
 count to 2-3.
+
+> **Development Status**
+>
+> DNSieve is still under active development. Not all features have been fully tested and edge cases may exist. This project was built for personal use -- use it at your own discretion.
+>
+> If you encounter any issues, please open a report in the [Issues](../../issues) section. Include full app version and commit sha, steps to reproduce and a screenshot when possible -- it helps a lot. I may or may not have time to address every report, but all feedback is appreciated.
+
+## AI Assisted
+
+This project is AI assisted. The core idea and original code started back in 2020 as a personal project, written in a messy "it works on my machine" style. AI helped finish planned features, clean up and restructure the code, make it more efficient, and catch bugs that weren't even on the radar.
+
+## App Privacy
+
+The app communicates only with the IPs and domains you explicitly configure in the config file. If bootstrap servers are unavailable or not configured, it falls back to your computer's default DNS servers to resolve upstream domains. That's it. No telemetry, no callbacks, no surprises. Feel free to read through the code to verify.
 
 ## How It Works
 

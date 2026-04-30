@@ -42,6 +42,7 @@ The smoke suite is split across focused files:
 | `smoke_startup_test.go` | Binary exists, --version flag, config generation, startup/shutdown, missing config exits non-zero |
 | `smoke_dns_test.go` | Plain DNS UDP A/AAAA, NXDOMAIN, cache hit latency, multiple query types |
 | `smoke_protocols_test.go` | DoH POST, DoH content type, DoT basic query, all-protocols combined |
+| `smoke_service_test.go` | Service install with default config; service install with custom label and config dir |
 | `smoke_helpers_test.go` | Shared helpers: port finder, wait, UDP query, config writer |
 | `smoke_main_test.go` | TestMain: builds binary once into a temp dir (cleaned up on exit) |
 

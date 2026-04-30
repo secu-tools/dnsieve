@@ -49,7 +49,9 @@ func NewWhitelistResolverFromClient(c Client, cfg *config.WhitelistConfig) *Whit
 // NewWhitelistResolver creates a WhitelistResolver from config.
 // When cfg.Enabled is false this returns nil without error; callers
 // should check for nil before using the resolver.
-func NewWhitelistResolver(cfg *config.WhitelistConfig, verifyCert bool) (*WhitelistResolver, error) {
+// bootstrapIPs, ipFamily, and resolveMode are forwarded to the underlying
+// client so that re-resolution behaves identically to main upstreams.
+func NewWhitelistResolver(cfg *config.WhitelistConfig, verifyCert bool, bootstrapIPs []string, ipFamily string, resolveMode int) (*WhitelistResolver, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
@@ -67,7 +69,7 @@ func NewWhitelistResolver(cfg *config.WhitelistConfig, verifyCert bool) (*Whitel
 		Address:  addr,
 		Protocol: proto,
 	}
-	c, err := newClient(srv, verifyCert, nil, "auto")
+	c, err := newClient(srv, verifyCert, bootstrapIPs, ipFamily, resolveMode)
 	if err != nil {
 		return nil, err
 	}

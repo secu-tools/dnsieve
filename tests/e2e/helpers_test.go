@@ -134,7 +134,12 @@ func startServer(t *testing.T, cfg *config.Config) context.CancelFunc {
 
 	var wlResolver *upstream.WhitelistResolver
 	if cfg.Whitelist.Enabled {
-		wlResolver, err = upstream.NewWhitelistResolver(&cfg.Whitelist, cfg.UpstreamSettings.VerifyCertificates)
+		wlBootstrapIPs := upstream.ParseBootstrapDNSAddrs(cfg.UpstreamSettings.BootstrapDNS)
+		wlIPFamily := cfg.UpstreamSettings.BootstrapIPFamily
+		if wlIPFamily == "" {
+			wlIPFamily = "auto"
+		}
+		wlResolver, err = upstream.NewWhitelistResolver(&cfg.Whitelist, cfg.UpstreamSettings.VerifyCertificates, wlBootstrapIPs, wlIPFamily, cfg.UpstreamSettings.UpstreamTTL)
 		if err != nil {
 			t.Fatalf("create whitelist resolver: %v", err)
 		}

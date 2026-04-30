@@ -151,6 +151,43 @@ This setting affects only the bootstrap hostname resolution step (resolving
 flows over whichever address was resolved -- there is no separate restriction
 on the upstream connection. Leave as `"auto"` on dual-stack hosts.
 
+### Upstream Re-resolution (`upstream_ttl`)
+
+By default DNSieve (like AdGuard Home, dnscrypt-proxy, and CoreDNS) resolves
+each upstream hostname **once at startup** and reuses that IP for the lifetime
+of the process. This is fine for providers such as Cloudflare (`1.1.1.1`) and
+Quad9 (`9.9.9.9`) whose IPs rarely or never change.
+
+For environments where upstream IPs may change (custom internal resolvers,
+split-horizon DNS, etc.) `upstream_ttl` controls when and how the
+hostname is re-resolved.
+
+| Value | Behaviour |
+|-------|-----------|
+| `-1` | **Disabled (default).** Resolve once at startup. Matches most DNS proxies. |
+| `0` | **TTL-based.** Reuse the IP for the full TTL of the DNS record. After expiry, re-resolve when the next new connection is established. A background refresh is started at 10% remaining TTL so the new address is usually ready before the old one expires. A 30-second floor prevents excessive bootstrap queries on very short TTLs. |
+| `1-2147483647` | **Fixed interval (seconds).** Reuse the IP for this many seconds. Re-resolve at the next new connection after the interval expires. A background refresh starts at 90% of the interval (10% remaining). |
+
+In all modes:
+- Re-resolution uses the same `bootstrap_dns` and `bootstrap_ip_family`
+  settings as the initial startup resolution. The config file is never
+  re-read.
+- **Existing connections are never closed forcibly.** The new IP is picked
+  up when a new TCP/TLS connection is established (DoT creates a new
+  connection per query; DoH reuses a pooled HTTP/2 connection).
+- If the bootstrap DNS is unreachable during a refresh, the current
+  (possibly stale) address continues to be used. A retry is scheduled
+  after 30 seconds.
+- Plain-DNS (`"udp"`) upstreams configured with a numeric IP are
+  unaffected by this setting.
+
+```toml
+[upstream_settings]
+upstream_ttl = -1   # default: disabled (one-time startup resolution)
+# upstream_ttl = 0  # TTL-based re-resolution
+# upstream_ttl = 300  # re-resolve every 5 minutes
+```
+
 ## TLS Certificate (Shared)
 
 A single TLS certificate is shared by both DoT and DoH downstream listeners.

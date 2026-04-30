@@ -84,7 +84,7 @@ func TestRFC5891_IDNA_ACELabel_CaseInsensitive(t *testing.T) {
 		"Xn--n3h.Example.Com.",
 	}
 
-	rcodes := make([]int, 0, len(variants))
+	rcodes := make([]uint16, 0, len(variants))
 	for _, name := range variants {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		query := makeQuery(name, dns.TypeA)
@@ -93,7 +93,7 @@ func TestRFC5891_IDNA_ACELabel_CaseInsensitive(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RFC 5891 case: query for %q failed: %v", name, err)
 		}
-		rcodes = append(rcodes, int(resp.Rcode))
+		rcodes = append(rcodes, resp.Rcode)
 		t.Logf("RFC 5891 case %q: rcode=%s", name, dns.RcodeToString[resp.Rcode])
 	}
 

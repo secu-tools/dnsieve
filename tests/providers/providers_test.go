@@ -82,9 +82,9 @@ func newClient(t *testing.T, p provider) upstream.Client {
 	)
 	switch p.protocol {
 	case "doh":
-		c, err = upstream.NewDoHClient(p.address, true, "auto")
+		c, err = upstream.NewDoHClient(p.address, true, "auto", upstream.ResolveDisabled)
 	case "dot":
-		c, err = upstream.NewDoTClient(p.address, true)
+		c, err = upstream.NewDoTClient(p.address, true, "ipv4", upstream.ResolveDisabled)
 	case "udp":
 		c, err = upstream.NewPlainClient(p.address)
 	default:
@@ -197,7 +197,7 @@ func verifyZeroIPBlock(t *testing.T, client upstream.Client, providerName, domai
 // TestProviders_Quad9_NXDOMAIN_NoAuthority verifies that Quad9 returns
 // NXDOMAIN without authority section for blocked domains.
 func TestProviders_Quad9_NXDOMAIN_NoAuthority(t *testing.T) {
-	client, err := upstream.NewDoHClient("https://dns.quad9.net/dns-query", true, "auto")
+	client, err := upstream.NewDoHClient("https://dns.quad9.net/dns-query", true, "auto", upstream.ResolveDisabled)
 	if err != nil {
 		t.Fatalf("create Quad9 client: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestProviders_Quad9_NXDOMAIN_NoAuthority(t *testing.T) {
 // TestProviders_GenuineNXDOMAIN_HasAuthority verifies that genuine NXDOMAIN
 // responses contain an authority section (SOA record).
 func TestProviders_GenuineNXDOMAIN_HasAuthority(t *testing.T) {
-	client, err := upstream.NewDoHClient("https://dns.quad9.net/dns-query", true, "auto")
+	client, err := upstream.NewDoHClient("https://dns.quad9.net/dns-query", true, "auto", upstream.ResolveDisabled)
 	if err != nil {
 		t.Fatalf("create client: %v", err)
 	}

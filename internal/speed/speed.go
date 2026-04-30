@@ -219,9 +219,9 @@ func computeStats(r *ServerResult) {
 func createClient(srv config.UpstreamServer, verifyCert bool, bootstrapIPs []string, ipFamily string) (upstream.Client, error) {
 	switch srv.Protocol {
 	case "doh":
-		return upstream.NewDoHClient(srv.Address, verifyCert, ipFamily, bootstrapIPs...)
+		return upstream.NewDoHClient(srv.Address, verifyCert, ipFamily, upstream.ResolveDisabled, bootstrapIPs...)
 	case "dot":
-		return upstream.NewDoTClient(srv.Address, verifyCert, ipFamily, bootstrapIPs...)
+		return upstream.NewDoTClient(srv.Address, verifyCert, ipFamily, upstream.ResolveDisabled, bootstrapIPs...)
 	case "udp":
 		return upstream.NewPlainClient(srv.Address)
 	default:

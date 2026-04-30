@@ -84,7 +84,7 @@ func installDarwin(cfg ServiceConfig) error {
 }
 
 func uninstallDarwin(cfg ServiceConfig) error {
-	services := findDNSieveServicesDarwin()
+	services := findDNSieveServicesDarwin("/Library/LaunchDaemons")
 	if len(services) == 0 {
 		fmt.Println("No DNSieve services found.")
 		return nil
@@ -137,8 +137,7 @@ type darwinService struct {
 	plistPath string
 }
 
-func findDNSieveServicesDarwin() []darwinService {
-	dir := "/Library/LaunchDaemons"
+func findDNSieveServicesDarwin(dir string) []darwinService {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil

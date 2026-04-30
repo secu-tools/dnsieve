@@ -50,6 +50,28 @@ sudo systemctl disable systemd-resolved
 
 ---
 
+### Linux systemd service fails to start when using a home-directory path
+
+If you installed the service with `--cfgfile` or `--logdir` pointing to a path
+under `/home/`, `/root/`, or `/run/user/`, the unit file must have
+`ProtectHome=no`. DNSieve sets this automatically during `--install` when it
+detects a home-directory path. If you moved the files after installation, edit
+the unit file manually:
+
+```bash
+sudo systemctl edit --full dnsieve
+# Change:  ProtectHome=yes
+# To:      ProtectHome=no
+sudo systemctl daemon-reload
+sudo systemctl restart dnsieve
+```
+
+To avoid this entirely, store config and logs in standard system directories:
+- Config: `/etc/dnsieve/config.toml`
+- Logs:   `/var/log/dnsieve/`
+
+---
+
 ### Permission denied binding to port 53
 
 Ports below 1024 require elevated privileges.

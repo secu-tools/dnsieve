@@ -21,6 +21,10 @@ import (
 type DoHClient struct {
 	url        string
 	httpClient *http.Client
+	// resolver is non-nil when TTL- or interval-based re-resolution is
+	// configured. The transport's DialContext uses it to obtain the current
+	// resolved IP whenever a new TCP connection is needed.
+	resolver *hostResolver
 }
 
 // NewDoHClient creates a DoH client for the given server URL.
@@ -28,8 +32,13 @@ type DoHClient struct {
 // the DoH server hostname instead of the system resolver.
 // ipFamily controls bootstrap address-family selection: "ipv4", "ipv6", or
 // "auto" (default) to race both as per RFC 6555.
-func NewDoHClient(url string, verifyCert bool, ipFamily string, bootstrapIPs ...string) (*DoHClient, error) {
-	if url == "" {
+// resolveMode controls re-resolution after startup: resolveDisabled (-1)
+// preserves the current behaviour (bootstrap DNS called on each new TCP
+// connection via the transport's DialContext), resolveByTTL (0) and positive
+// values use a hostResolver that caches the IP and refreshes it based on the
+// DNS record TTL or a fixed interval. See resolve.go for details.
+func NewDoHClient(rawURL string, verifyCert bool, ipFamily string, resolveMode int, bootstrapIPs ...string) (*DoHClient, error) {
+	if rawURL == "" {
 		return nil, fmt.Errorf("empty DoH URL")
 	}
 
@@ -58,17 +67,60 @@ func NewDoHClient(url string, verifyCert bool, ipFamily string, bootstrapIPs ...
 		TLSHandshakeTimeout:   5 * time.Second,
 		ResponseHeaderTimeout: 5 * time.Second,
 	}
-	if len(bootstrapIPs) > 0 {
-		transport.DialContext = makeBootstrapDialer(bootstrapIPs, ipFamily)
-	}
 
-	return &DoHClient{
-		url: url,
+	client := &DoHClient{
+		url: rawURL,
 		httpClient: &http.Client{
 			Transport: transport,
 			Timeout:   10 * time.Second,
 		},
-	}, nil
+	}
+
+	if len(bootstrapIPs) > 0 {
+		if resolveMode != resolveDisabled {
+			// Re-resolution enabled: extract host:port from the URL and create
+			// a hostResolver. The transport's DialContext will call hr.Addr()
+			// whenever a new TCP connection is needed.
+			host, port, _ := extractURLHostPort(rawURL)
+			if host != "" {
+				hr, _ := newHostResolver(host, port, bootstrapIPs, ipFamily, resolveMode)
+				if hr != nil {
+					client.resolver = hr
+					transport.DialContext = makeDialerFromResolver(hr)
+				} else {
+					// Numeric IP or no-bootstrap: fall back to plain bootstrap dialer.
+					transport.DialContext = makeBootstrapDialer(bootstrapIPs, ipFamily)
+				}
+			}
+		} else {
+			// resolveDisabled: re-resolve via bootstrap on each new TCP connection
+			// (current behaviour preserved).
+			transport.DialContext = makeBootstrapDialer(bootstrapIPs, ipFamily)
+		}
+	}
+
+	return client, nil
+}
+
+// extractURLHostPort extracts the hostname and port from a URL string.
+// When no explicit port is present the scheme default is used (443 for https,
+// 80 for http). Returns empty strings on parse failure.
+func extractURLHostPort(rawURL string) (host, port, scheme string) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", "", ""
+	}
+	host = u.Hostname()
+	port = u.Port()
+	scheme = u.Scheme
+	if port == "" {
+		if scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return host, port, scheme
 }
 
 // Query sends a DNS query via DoH POST and returns the response.

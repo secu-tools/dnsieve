@@ -34,9 +34,10 @@ func installWindows(cfg ServiceConfig) error {
 
 	args := cfg.ServerArgs()
 	binPath := `"` + exe + `"`
-	if len(args) > 0 {
-		binPath += " " + strings.Join(args, " ")
-	}
+	// Embed --svcname so the binary knows its SCM service name when started
+	// by the Windows Service Control Manager (needed for svc.Run).
+	svcArgs := append([]string{"--svcname", name}, args...)
+	binPath += " " + strings.Join(svcArgs, " ")
 
 	// Create the service
 	out, err := exec.Command("sc.exe", "create", name,

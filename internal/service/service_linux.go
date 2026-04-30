@@ -80,6 +80,40 @@ func installSystemd(cfg ServiceConfig) error {
 		logDir = cfg.LogDir
 	}
 
+	// ProtectHome=yes hides /home, /root and /run/user at the mount-namespace
+	// level; ReadWritePaths cannot override it.  If any relevant path falls
+	// under one of those prefixes (e.g. a custom --cfgfile stored in a home
+	// directory), we must relax the setting to avoid silently breaking the
+	// service at startup.
+	protectHome := "yes"
+	if pathUnderHome(cfgDir) || pathUnderHome(logDir) || pathUnderHome(exe) {
+		protectHome = "no"
+	}
+
+	// PrivateTmp=true gives the service an isolated /tmp namespace that hides
+	// the real /tmp tree.  If the binary, config directory, or log directory
+	// is located under /tmp (common when installing from a build or test
+	// directory), disable PrivateTmp so the service can access those paths.
+	privateTmp := "true"
+	if pathUnderTmp(exe) || pathUnderTmp(cfgDir) || pathUnderTmp(logDir) {
+		privateTmp = "false"
+	}
+
+	// ProtectSystem=strict remounts the entire filesystem hierarchy read-only
+	// inside the service namespace, including /tmp.  Even though Go binaries
+	// can be executed from a read-only mount in principle, in practice the
+	// combination of strict mode with a binary located under /tmp causes the
+	// service to fail at startup (the ExecStartPre control process cannot
+	// operate correctly inside the restricted namespace).
+	// When any relevant path is under /tmp -- which indicates a development or
+	// CI installation -- set ProtectSystem=no so no filesystem restrictions are
+	// applied.  For production installs (binary in /usr/local/bin, config in
+	// /etc, logs in /var/log) the default strict mode is appropriate.
+	protectSystem := "strict"
+	if pathUnderTmp(exe) || pathUnderTmp(cfgDir) || pathUnderTmp(logDir) {
+		protectSystem = "no"
+	}
+
 	unit := fmt.Sprintf(`[Unit]
 Description=%s
 After=network-online.target
@@ -94,18 +128,18 @@ RestartSec=5
 LimitNOFILE=65536
 
 # Security hardening
-ProtectSystem=strict
+ProtectSystem=%s
 ReadWritePaths=%s %s
 NoNewPrivileges=yes
-PrivateTmp=true
-ProtectHome=yes
+PrivateTmp=%s
+ProtectHome=%s
 
 # DNS needs network access and potentially binding to port 53
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
-`, cfg.DisplayName(), cfgDir, logDir, execStart, cfgDir, logDir)
+`, cfg.DisplayName(), cfgDir, logDir, execStart, protectSystem, cfgDir, logDir, privateTmp, protectHome)
 
 	if err := os.WriteFile(unitPath, []byte(unit), 0644); err != nil {
 		return fmt.Errorf("write unit file %s: %w", unitPath, err)
@@ -304,4 +338,20 @@ func uninstallOpenWRT(cfg ServiceConfig) error {
 
 	fmt.Printf("Service %q uninstalled (OpenWRT procd).\n", name)
 	return nil
+}
+
+// pathUnderHome reports whether path resides under a home directory that
+// systemd's ProtectHome= hides from services (/home, /root, /run/user).
+func pathUnderHome(path string) bool {
+	return strings.HasPrefix(path, "/home/") ||
+		path == "/root" ||
+		strings.HasPrefix(path, "/root/") ||
+		strings.HasPrefix(path, "/run/user/")
+}
+
+// pathUnderTmp reports whether path resides under /tmp.
+// Services with PrivateTmp=true receive an isolated empty /tmp namespace;
+// any path under the real /tmp would therefore be invisible to them.
+func pathUnderTmp(path string) bool {
+	return path == "/tmp" || strings.HasPrefix(path, "/tmp/")
 }

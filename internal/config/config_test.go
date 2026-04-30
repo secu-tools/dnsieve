@@ -700,6 +700,142 @@ func TestValidate_CookiesMode_ValidModes(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// upstream_ttl tests
+// ---------------------------------------------------------------------------
+
+func TestDefaultConfig_UpstreamTTL_IsMinusOne(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.UpstreamSettings.UpstreamTTL != -1 {
+		t.Errorf("default upstream_ttl=%d, want -1 (disabled)",
+			cfg.UpstreamSettings.UpstreamTTL)
+	}
+}
+
+func TestLoad_UpstreamTTL_Disabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.toml")
+	content := `
+[[upstream]]
+address = "https://dns.example.com/dns-query"
+protocol = "doh"
+
+[upstream_settings]
+upstream_ttl = -1
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, _, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.UpstreamSettings.UpstreamTTL != -1 {
+		t.Errorf("got %d, want -1", cfg.UpstreamSettings.UpstreamTTL)
+	}
+}
+
+func TestLoad_UpstreamTTL_TTLBased(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.toml")
+	content := `
+[[upstream]]
+address = "https://dns.example.com/dns-query"
+protocol = "doh"
+
+[upstream_settings]
+upstream_ttl = 0
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, _, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.UpstreamSettings.UpstreamTTL != 0 {
+		t.Errorf("got %d, want 0 (TTL-based)", cfg.UpstreamSettings.UpstreamTTL)
+	}
+}
+
+func TestLoad_UpstreamTTL_FixedInterval(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.toml")
+	content := `
+[[upstream]]
+address = "https://dns.example.com/dns-query"
+protocol = "doh"
+
+[upstream_settings]
+upstream_ttl = 300
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, _, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.UpstreamSettings.UpstreamTTL != 300 {
+		t.Errorf("got %d, want 300", cfg.UpstreamSettings.UpstreamTTL)
+	}
+}
+
+func TestLoad_UpstreamTTL_AbsentUsesDefault(t *testing.T) {
+	// When the field is absent from the config file, the DefaultConfig value
+	// of -1 (disabled) must be preserved.
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.toml")
+	content := `
+[[upstream]]
+address = "https://dns.example.com/dns-query"
+protocol = "doh"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, _, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.UpstreamSettings.UpstreamTTL != -1 {
+		t.Errorf("absent field: got %d, want -1 (default disabled)",
+			cfg.UpstreamSettings.UpstreamTTL)
+	}
+}
+
+func TestValidate_UpstreamTTL_Valid(t *testing.T) {
+	tests := []int{-1, 0, 1, 60, 300, 3600, 86400, 1<<31 - 1}
+	for _, v := range tests {
+		cfg := DefaultConfig()
+		cfg.UpstreamSettings.UpstreamTTL = v
+		_, errs := cfg.Validate()
+		if hasError(errs, "upstream_ttl") {
+			t.Errorf("value %d should be valid, got errors: %v", v, errs)
+		}
+	}
+}
+
+func TestValidate_UpstreamTTL_BelowMinus1_IsError(t *testing.T) {
+	for _, v := range []int{-2, -100, -1000} {
+		cfg := DefaultConfig()
+		cfg.UpstreamSettings.UpstreamTTL = v
+		_, errs := cfg.Validate()
+		if !hasError(errs, "upstream_ttl") {
+			t.Errorf("value %d should produce an error but did not", v)
+		}
+	}
+}
+
+func TestValidate_UpstreamTTL_ExceedsMax_IsError(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.UpstreamSettings.UpstreamTTL = 1 << 31 // math.MaxInt32 + 1
+	_, errs := cfg.Validate()
+	if !hasError(errs, "upstream_ttl") {
+		t.Errorf("value exceeding max should produce an error but did not")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

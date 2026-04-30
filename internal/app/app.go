@@ -109,7 +109,17 @@ func Run() {
 	installSvc := flag.Bool("install", false, "Install as system service")
 	uninstallSvc := flag.Bool("uninstall", false, "Uninstall system service")
 	speedTest := flag.String("speed", "", "Test upstream DNS speed (optional: comma-separated domains)")
+	// svcname is an internal flag embedded in the binary path by the Windows
+	// service installer.  It is not shown in --help output but must be
+	// defined here so flag.Parse() does not reject it.
+	svcName := flag.String("svcname", "", "")
 	flag.Parse()
+
+	// When started by the Windows Service Control Manager, hand off to the
+	// SCM handler immediately before any interactive output.
+	if maybeRunAsWindowsService(*svcName, *cfgFile, *logDir) {
+		return
+	}
 
 	if *showVersion {
 		fmt.Println(versionString())

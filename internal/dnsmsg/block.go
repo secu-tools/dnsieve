@@ -113,7 +113,7 @@ func InspectResponse(msg *dns.Msg) InspectResult {
 		return result
 	}
 
-	// BADCOOKIE (RFC 7873 §5.4): treat as a retryable server error.
+	// BADCOOKIE (RFC 7873 Section 5.4): treat as a retryable server error.
 	// Must not be cached or selected as a valid upstream response.
 	if msg.Rcode == dns.RcodeBadCookie {
 		result.ServFail = true

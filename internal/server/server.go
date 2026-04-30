@@ -272,6 +272,29 @@ func startListeners(ctx context.Context, handler *Handler, cfg *config.Config, l
 // Run starts all configured downstream listeners and blocks until
 // a shutdown signal is received.
 func Run(cfg *config.Config, logger *logging.Logger) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		select {
+		case sig := <-sigCh:
+			logger.Infof("Received signal %v, shutting down...", sig)
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	return RunContext(ctx, cfg, logger)
+}
+
+// RunContext starts all configured downstream listeners and blocks until
+// ctx is cancelled or a fatal listener error occurs.
+// Callers that need to drive shutdown from outside the process (e.g. the
+// Windows Service Control Manager) should use this variant and cancel ctx
+// when a stop request is received.
+func RunContext(ctx context.Context, cfg *config.Config, logger *logging.Logger) error {
 	// Create upstream resolver
 	resolver, err := upstream.NewResolver(cfg, logger)
 	if err != nil {
@@ -279,7 +302,12 @@ func Run(cfg *config.Config, logger *logging.Logger) error {
 	}
 
 	// Create whitelist resolver (nil when disabled)
-	wlResolver, err := upstream.NewWhitelistResolver(&cfg.Whitelist, cfg.UpstreamSettings.VerifyCertificates)
+	wlBootstrapIPs := upstream.ParseBootstrapDNSAddrs(cfg.UpstreamSettings.BootstrapDNS)
+	wlIPFamily := cfg.UpstreamSettings.BootstrapIPFamily
+	if wlIPFamily == "" {
+		wlIPFamily = "auto"
+	}
+	wlResolver, err := upstream.NewWhitelistResolver(&cfg.Whitelist, cfg.UpstreamSettings.VerifyCertificates, wlBootstrapIPs, wlIPFamily, cfg.UpstreamSettings.UpstreamTTL)
 	if err != nil {
 		return fmt.Errorf("create whitelist resolver: %w", err)
 	}
@@ -338,7 +366,7 @@ func Run(cfg *config.Config, logger *logging.Logger) error {
 		})
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	var wg sync.WaitGroup
@@ -350,14 +378,8 @@ func Run(cfg *config.Config, logger *logging.Logger) error {
 
 	logger.Infof("DNSieve server started. Waiting for queries...")
 
-	// Wait for shutdown signal
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
 	select {
-	case sig := <-sigCh:
-		logger.Infof("Received signal %v, shutting down...", sig)
-		cancel()
+	case <-ctx.Done():
 	case err := <-errCh:
 		cancel()
 		wg.Wait()

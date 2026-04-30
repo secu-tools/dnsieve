@@ -18,6 +18,10 @@ import (
 type DoTClient struct {
 	address   string
 	tlsConfig *tls.Config
+	// resolver is non-nil when TTL- or interval-based re-resolution is
+	// configured. Addr() is called before each new connection to obtain the
+	// current resolved IP, which may have been refreshed in the background.
+	resolver *hostResolver
 }
 
 // NewDoTClient creates a DoT client for the given server address (host:port).
@@ -25,7 +29,11 @@ type DoTClient struct {
 // the DoT server hostname instead of the system resolver.
 // ipFamily controls bootstrap address-family selection: "ipv4", "ipv6", or
 // "auto" (default) to race both as per RFC 6555.
-func NewDoTClient(address string, verifyCert bool, ipFamily string, bootstrapIPs ...string) (*DoTClient, error) {
+// resolveMode controls re-resolution after startup: resolveDisabled (-1)
+// disables it (one-time resolution, default), resolveByTTL (0) re-resolves
+// based on the DNS record TTL, and any positive value re-resolves every that
+// many seconds. See resolve.go for details.
+func NewDoTClient(address string, verifyCert bool, ipFamily string, resolveMode int, bootstrapIPs ...string) (*DoTClient, error) {
 	if address == "" {
 		return nil, fmt.Errorf("empty DoT address")
 	}
@@ -46,46 +54,65 @@ func NewDoTClient(address string, verifyCert bool, ipFamily string, bootstrapIPs
 		}
 	}
 
-	// Pre-resolve the hostname via bootstrap DNS at creation time.
-	// The resolved IP replaces the hostname in the dial address while the
-	// original hostname is kept as the TLS ServerName for SNI.
-	if len(bootstrapIPs) > 0 && net.ParseIP(host) == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if ip, err := resolveViaBootstrap(ctx, host, bootstrapIPs, ipFamily); err == nil {
-			address = net.JoinHostPort(ip, port)
-		}
-		// On resolution failure, fall through and use the original address
-		// (system resolver will be tried when dialling).
+	tlsCfg := &tls.Config{
+		ServerName:         host,
+		InsecureSkipVerify: !verifyCert, //nolint:gosec
+		MinVersion:         tls.VersionTLS12,
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+		},
+		CurvePreferences: []tls.CurveID{
+			tls.X25519,
+			tls.CurveP256,
+			tls.CurveP384,
+		},
 	}
 
-	return &DoTClient{
-		address: address,
-		tlsConfig: &tls.Config{
-			ServerName:         host,
-			InsecureSkipVerify: !verifyCert, //nolint:gosec
-			MinVersion:         tls.VersionTLS12,
-			CipherSuites: []uint16{
-				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-			},
-			CurvePreferences: []tls.CurveID{
-				tls.X25519,
-				tls.CurveP256,
-				tls.CurveP384,
-			},
-		},
-	}, nil
+	client := &DoTClient{address: address, tlsConfig: tlsCfg}
+
+	if len(bootstrapIPs) > 0 && net.ParseIP(host) == nil {
+		if resolveMode == resolveDisabled {
+			// One-time resolution at construction (current behaviour).
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if ip, _, err := resolveViaBootstrap(ctx, host, bootstrapIPs, ipFamily); err == nil {
+				client.address = net.JoinHostPort(ip, port)
+			}
+			// On resolution failure keep the original address; OS resolver
+			// will be tried when dialling.
+		} else {
+			// Re-resolution enabled: create a hostResolver.
+			hr, _ := newHostResolver(host, port, bootstrapIPs, ipFamily, resolveMode)
+			if hr != nil {
+				client.address = hr.Addr()
+				client.resolver = hr
+			}
+		}
+	}
+
+	return client, nil
 }
 
 // Query sends a DNS query via DoT and returns the response.
 // Per RFC 7858: DNS messages are sent over TLS on a TCP connection
 // using the standard DNS TCP wire format (2-byte length prefix).
+//
+// When a hostResolver is configured the current resolved address is obtained
+// before each connection attempt. A background refresh may have updated the
+// address since the previous call; if the address has expired a synchronous
+// re-resolution is performed first.
 func (c *DoTClient) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	// Obtain the dial address: use the resolver if re-resolution is enabled.
+	addr := c.address
+	if c.resolver != nil {
+		addr = c.resolver.Addr()
+	}
+
 	transport := &dns.Transport{
 		TLSConfig: c.tlsConfig,
 	}
@@ -108,7 +135,7 @@ func (c *DoTClient) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 	// TCP dialer and applies TLS on top, so the network must be "tcp".
 	// "tcp-tls" is not a recognised Go network type and causes "unknown network
 	// tcp-tls" at dial time.
-	resp, _, err := dnsClient.Exchange(ctx, msg, "tcp", c.address)
+	resp, _, err := dnsClient.Exchange(ctx, msg, "tcp", addr)
 	if err != nil {
 		return nil, shortNetError(err)
 	}

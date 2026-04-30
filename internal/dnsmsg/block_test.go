@@ -824,7 +824,7 @@ func TestInspectResponse_HasDNSSEC_NoRRSIG_OnlySOA(t *testing.T) {
 		Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 900},
 		SOA: rdata.SOA{Ns: "ns1.example.com.", Mbox: "admin.example.com."},
 	})
-	// SOA without RRSIG — unsigned NXDOMAIN
+	// SOA without RRSIG -- unsigned NXDOMAIN
 
 	result := InspectResponse(resp)
 	if result.HasDNSSEC {

@@ -150,3 +150,52 @@ func TestSmoke_UpstreamReachable(t *testing.T) {
 	}
 	t.Logf("upstream reachable: example.com A -> %d answer(s)", len(resp.Answer))
 }
+
+// TestSmoke_TwoInstancesDifferentConfigDirs starts two separate instances of
+// the binary concurrently, each with its own configuration directory and port.
+// This exercises the common multi-instance deployment scenario (e.g. one
+// instance per network interface, or two differently-filtered resolvers) and
+// confirms the instances do not interfere with each other.
+func TestSmoke_TwoInstancesDifferentConfigDirs(t *testing.T) {
+	base := smokeTempDir(t)
+
+	dirA := filepath.Join(base, "instanceA")
+	dirB := filepath.Join(base, "instanceB")
+	for _, d := range []string{dirA, dirB} {
+		if err := os.MkdirAll(d, 0700); err != nil {
+			t.Fatalf("create instance dir %s: %v", d, err)
+		}
+	}
+
+	portA := findFreePort(t)
+	portB := findFreePort(t)
+
+	cfgA := writeConfig(t, dirA, minimalConfig(portA))
+	cfgB := writeConfig(t, dirB, minimalConfig(portB))
+
+	// Start both instances; startBinary registers t.Cleanup to kill each one.
+	startBinary(t, cfgA, portA)
+	startBinary(t, cfgB, portB)
+
+	t.Logf("instance A listening on 127.0.0.1:%d (config: %s)", portA, dirA)
+	t.Logf("instance B listening on 127.0.0.1:%d (config: %s)", portB, dirB)
+
+	// Both instances must resolve DNS independently.
+	respA := queryUDP(t, portA, "example.com", dns.TypeA)
+	if respA.Rcode != dns.RcodeSuccess {
+		t.Errorf("instance A: DNS query returned %s, want NOERROR", dns.RcodeToString[respA.Rcode])
+	} else if len(respA.Answer) == 0 {
+		t.Error("instance A: NOERROR but no answer records")
+	} else {
+		t.Logf("instance A: example.com A -> %d answer(s)", len(respA.Answer))
+	}
+
+	respB := queryUDP(t, portB, "example.com", dns.TypeA)
+	if respB.Rcode != dns.RcodeSuccess {
+		t.Errorf("instance B: DNS query returned %s, want NOERROR", dns.RcodeToString[respB.Rcode])
+	} else if len(respB.Answer) == 0 {
+		t.Error("instance B: NOERROR but no answer records")
+	} else {
+		t.Logf("instance B: example.com A -> %d answer(s)", len(respB.Answer))
+	}
+}

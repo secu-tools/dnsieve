@@ -60,10 +60,11 @@ func NewResolver(cfg *config.Config, logger *logging.Logger) (*Resolver, error) 
 	if ipFamily == "" {
 		ipFamily = "auto"
 	}
+	resolveMode := cfg.UpstreamSettings.UpstreamTTL
 	clients := make([]Client, 0, len(cfg.Upstream))
 	for _, u := range cfg.Upstream {
 		verifyCert := u.ShouldVerifyCert(cfg.UpstreamSettings.VerifyCertificates)
-		c, err := newClient(u, verifyCert, bootstrapIPs, ipFamily)
+		c, err := newClient(u, verifyCert, bootstrapIPs, ipFamily, resolveMode)
 		if err != nil {
 			return nil, fmt.Errorf("upstream %s: %w", u.Address, err)
 		}
@@ -105,12 +106,12 @@ func isClientTCP(c Client) bool {
 }
 
 // newClient creates the appropriate upstream client for a server config.
-func newClient(srv config.UpstreamServer, verifyCert bool, bootstrapIPs []string, ipFamily string) (Client, error) {
+func newClient(srv config.UpstreamServer, verifyCert bool, bootstrapIPs []string, ipFamily string, resolveMode int) (Client, error) {
 	switch srv.Protocol {
 	case "doh":
-		return NewDoHClient(srv.Address, verifyCert, ipFamily, bootstrapIPs...)
+		return NewDoHClient(srv.Address, verifyCert, ipFamily, resolveMode, bootstrapIPs...)
 	case "dot":
-		return NewDoTClient(srv.Address, verifyCert, ipFamily, bootstrapIPs...)
+		return NewDoTClient(srv.Address, verifyCert, ipFamily, resolveMode, bootstrapIPs...)
 	case "udp":
 		return NewPlainClient(srv.Address)
 	default:

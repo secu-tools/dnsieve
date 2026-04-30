@@ -763,7 +763,7 @@ func TestCacheKey_DOBitSegregation(t *testing.T) {
 func TestCacheKey_UnknownTypesAreDistinct(t *testing.T) {
 	c := New(100, 3600, 5, 0)
 
-	// Use two different unknown type numbers — must construct manually
+	// Use two different unknown type numbers -- must construct manually
 	// since dnsutil.SetQuestion returns nil for unknown types.
 	q1 := new(dns.Msg)
 	q1.ID = dns.ID()

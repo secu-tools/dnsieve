@@ -58,7 +58,7 @@ func TestDoHClient_SuccessfulQuery(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto")
+	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto", resolveDisabled)
 	if err != nil {
 		t.Fatalf("NewDoHClient: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestDoHClient_EOFRetrySucceeds(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto")
+	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto", resolveDisabled)
 	if err != nil {
 		t.Fatalf("NewDoHClient: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestDoHClient_EOFRetryFails(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto")
+	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto", resolveDisabled)
 	if err != nil {
 		t.Fatalf("NewDoHClient: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestDoHClient_NonOKStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto")
+	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto", resolveDisabled)
 	if err != nil {
 		t.Fatalf("NewDoHClient: %v", err)
 	}
@@ -319,7 +319,7 @@ func makeDoHHTTPResponse(msg *dns.Msg) (*http.Response, error) {
 // TestNewDoHClient_VerifyCertTrue verifies that verifyCert=true sets
 // InsecureSkipVerify=false on the underlying TLS configuration.
 func TestNewDoHClient_VerifyCertTrue(t *testing.T) {
-	c, err := NewDoHClient("https://dns.example.com/dns-query", true, "auto")
+	c, err := NewDoHClient("https://dns.example.com/dns-query", true, "auto", resolveDisabled)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestNewDoHClient_VerifyCertTrue(t *testing.T) {
 // TestNewDoHClient_VerifyCertFalse verifies that verifyCert=false sets
 // InsecureSkipVerify=true on the underlying TLS configuration.
 func TestNewDoHClient_VerifyCertFalse(t *testing.T) {
-	c, err := NewDoHClient("https://dns.example.com/dns-query", false, "auto")
+	c, err := NewDoHClient("https://dns.example.com/dns-query", false, "auto", resolveDisabled)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestNewDoHClient_VerifyCertFalse(t *testing.T) {
 // TestDoHClient_String verifies the String() output contains the URL and
 // the protocol identifier.
 func TestDoHClient_String(t *testing.T) {
-	c, err := NewDoHClient("https://dns.quad9.net/dns-query", false, "auto")
+	c, err := NewDoHClient("https://dns.quad9.net/dns-query", false, "auto", resolveDisabled)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -383,7 +383,7 @@ func TestDoHClient_AAAAQuery(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto")
+	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto", resolveDisabled)
 	if err != nil {
 		t.Fatalf("NewDoHClient: %v", err)
 	}
@@ -417,7 +417,7 @@ func TestDoHClient_NXDomainResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto")
+	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto", resolveDisabled)
 	if err != nil {
 		t.Fatalf("NewDoHClient: %v", err)
 	}
@@ -440,7 +440,7 @@ func TestDoHClient_ContextAlreadyExpired(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto")
+	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto", resolveDisabled)
 	if err != nil {
 		t.Fatalf("NewDoHClient: %v", err)
 	}
@@ -459,7 +459,7 @@ func TestDoHClient_ContextAlreadyExpired(t *testing.T) {
 // TestDoHClient_UnreachableServer verifies that a connection to an unreachable
 // address returns an error.
 func TestDoHClient_UnreachableServer(t *testing.T) {
-	client, err := NewDoHClient("https://127.0.0.1:1/dns-query", false, "auto")
+	client, err := NewDoHClient("https://127.0.0.1:1/dns-query", false, "auto", resolveDisabled)
 	if err != nil {
 		t.Fatalf("NewDoHClient: %v", err)
 	}
@@ -486,7 +486,7 @@ func TestDoHClient_MultipleSequentialQueries(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto")
+	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto", resolveDisabled)
 	if err != nil {
 		t.Fatalf("NewDoHClient: %v", err)
 	}
@@ -569,7 +569,7 @@ func TestDoHClient_ResponseIDRestored(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto")
+	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto", resolveDisabled)
 	if err != nil {
 		t.Fatalf("NewDoHClient: %v", err)
 	}
@@ -600,7 +600,7 @@ func TestDoHClient_HTTPHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto")
+	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto", resolveDisabled)
 	if err != nil {
 		t.Fatalf("NewDoHClient: %v", err)
 	}
@@ -631,7 +631,7 @@ func TestDoHClient_MalformedResponseBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto")
+	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto", resolveDisabled)
 	if err != nil {
 		t.Fatalf("NewDoHClient: %v", err)
 	}
@@ -656,7 +656,7 @@ func TestDoHClient_ConcurrentQueries(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto")
+	client, err := NewDoHClient(srv.URL+"/dns-query", false, "auto", resolveDisabled)
 	if err != nil {
 		t.Fatalf("NewDoHClient: %v", err)
 	}
