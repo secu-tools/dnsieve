@@ -150,11 +150,6 @@ func LogDir() string {
 	return dir
 }
 
-// IsCustomLogDir reports whether a custom log directory was set via SetLogDir.
-func IsCustomLogDir() bool {
-	return customLogDir != ""
-}
-
 // New creates a new Logger that writes to the specified log file with rotation.
 // It also writes to stdout so console output is preserved.
 func New(filename string, cfg Config, module ...string) (*Logger, error) {

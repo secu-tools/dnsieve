@@ -12,6 +12,7 @@ import (
 	"golang.org/x/net/idna"
 
 	"github.com/secu-tools/dnsieve/internal/config"
+	"github.com/secu-tools/dnsieve/internal/logging"
 )
 
 // toACEDomain converts a domain label sequence that may contain Unicode
@@ -51,7 +52,9 @@ func NewWhitelistResolverFromClient(c Client, cfg *config.WhitelistConfig) *Whit
 // should check for nil before using the resolver.
 // bootstrapIPs, ipFamily, and resolveMode are forwarded to the underlying
 // client so that re-resolution behaves identically to main upstreams.
-func NewWhitelistResolver(cfg *config.WhitelistConfig, verifyCert bool, bootstrapIPs []string, ipFamily string, resolveMode int) (*WhitelistResolver, error) {
+// renewPercent and logger are forwarded to the hostResolver for background
+// refresh logging (pass 0, nil to use defaults / silence logging).
+func NewWhitelistResolver(cfg *config.WhitelistConfig, verifyCert bool, bootstrapIPs []string, ipFamily string, resolveMode int, renewPercent int, logger *logging.Logger) (*WhitelistResolver, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
@@ -69,7 +72,7 @@ func NewWhitelistResolver(cfg *config.WhitelistConfig, verifyCert bool, bootstra
 		Address:  addr,
 		Protocol: proto,
 	}
-	c, err := newClient(srv, verifyCert, bootstrapIPs, ipFamily, resolveMode)
+	c, err := newClient(srv, verifyCert, bootstrapIPs, ipFamily, resolveMode, renewPercent, logger)
 	if err != nil {
 		return nil, err
 	}

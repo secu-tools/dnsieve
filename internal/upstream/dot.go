@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"codeberg.org/miekg/dns"
+
+	"github.com/secu-tools/dnsieve/internal/logging"
 )
 
 // DoTClient implements DNS-over-TLS (RFC 7858 / RFC 8310).
@@ -33,7 +35,10 @@ type DoTClient struct {
 // disables it (one-time resolution, default), resolveByTTL (0) re-resolves
 // based on the DNS record TTL, and any positive value re-resolves every that
 // many seconds. See resolve.go for details.
-func NewDoTClient(address string, verifyCert bool, ipFamily string, resolveMode int, bootstrapIPs ...string) (*DoTClient, error) {
+// renewPercent is the percentage of the TTL/interval remaining that triggers
+// a background re-resolution (from cache.renew_percent); 0 disables it.
+// logger receives debug messages when the upstream IP is re-resolved (nil = silent).
+func NewDoTClient(address string, verifyCert bool, ipFamily string, resolveMode int, renewPercent int, logger *logging.Logger, bootstrapIPs ...string) (*DoTClient, error) {
 	if address == "" {
 		return nil, fmt.Errorf("empty DoT address")
 	}
@@ -87,7 +92,7 @@ func NewDoTClient(address string, verifyCert bool, ipFamily string, resolveMode 
 			// will be tried when dialling.
 		} else {
 			// Re-resolution enabled: create a hostResolver.
-			hr, _ := newHostResolver(host, port, bootstrapIPs, ipFamily, resolveMode)
+			hr, _ := newHostResolver(host, port, bootstrapIPs, ipFamily, resolveMode, renewPercent, logger)
 			if hr != nil {
 				client.address = hr.Addr()
 				client.resolver = hr

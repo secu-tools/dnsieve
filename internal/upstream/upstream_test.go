@@ -1,3 +1,4 @@
+// Copyright (c) 2020-2026 Jack L. (Cpt-JackL) (https://jack-l.com)
 // SPDX-License-Identifier: MIT
 package upstream
 
@@ -620,14 +621,14 @@ func TestWhitelistResolver_Disabled(t *testing.T) {
 }
 
 func TestNewDoHClient_EmptyURL(t *testing.T) {
-	_, err := NewDoHClient("", true, "auto", resolveDisabled)
+	_, err := NewDoHClient("", true, "auto", resolveDisabled, 10, nil)
 	if err == nil {
 		t.Error("expected error for empty DoH URL")
 	}
 }
 
 func TestNewDoTClient_EmptyAddress(t *testing.T) {
-	_, err := NewDoTClient("", true, "auto", resolveDisabled)
+	_, err := NewDoTClient("", true, "auto", resolveDisabled, 10, nil)
 	if err == nil {
 		t.Error("expected error for empty DoT address")
 	}
@@ -711,7 +712,7 @@ func TestNewPlainClient_IPv6WithPort(t *testing.T) {
 }
 
 func TestNewDoTClient_BareHostname(t *testing.T) {
-	c, err := NewDoTClient("dns.quad9.net", true, "auto", resolveDisabled)
+	c, err := NewDoTClient("dns.quad9.net", true, "auto", resolveDisabled, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -724,7 +725,7 @@ func TestNewDoTClient_BareHostname(t *testing.T) {
 }
 
 func TestNewDoTClient_BareIPv6(t *testing.T) {
-	c, err := NewDoTClient("2620:fe::fe", true, "auto", resolveDisabled)
+	c, err := NewDoTClient("2620:fe::fe", true, "auto", resolveDisabled, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -737,7 +738,7 @@ func TestNewDoTClient_BareIPv6(t *testing.T) {
 }
 
 func TestNewDoTClient_IPv6WithPort(t *testing.T) {
-	c, err := NewDoTClient("[2620:fe::fe]:853", true, "auto", resolveDisabled)
+	c, err := NewDoTClient("[2620:fe::fe]:853", true, "auto", resolveDisabled, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -750,7 +751,7 @@ func TestNewDoTClient_IPv6WithPort(t *testing.T) {
 }
 
 func TestNewDoTClient_IPv4WithPort(t *testing.T) {
-	c, err := NewDoTClient("9.9.9.9:853", true, "auto", resolveDisabled)
+	c, err := NewDoTClient("9.9.9.9:853", true, "auto", resolveDisabled, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -760,7 +761,7 @@ func TestNewDoTClient_IPv4WithPort(t *testing.T) {
 }
 
 func TestNewDoHClient_ValidURL(t *testing.T) {
-	c, err := NewDoHClient("https://dns.quad9.net/dns-query", true, "auto", resolveDisabled)
+	c, err := NewDoHClient("https://dns.quad9.net/dns-query", true, "auto", resolveDisabled, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -770,7 +771,7 @@ func TestNewDoHClient_ValidURL(t *testing.T) {
 }
 
 func TestNewDoHClient_EmptyURL_Second(t *testing.T) {
-	_, err := NewDoHClient("", true, "auto", resolveDisabled)
+	_, err := NewDoHClient("", true, "auto", resolveDisabled, 10, nil)
 	if err == nil {
 		t.Error("expected error for empty DoH URL")
 	}

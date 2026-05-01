@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"codeberg.org/miekg/dns"
+
+	"github.com/secu-tools/dnsieve/internal/logging"
 )
 
 // DoHClient implements DNS-over-HTTPS (RFC 8484) using HTTP/2 POST
@@ -37,7 +39,10 @@ type DoHClient struct {
 // connection via the transport's DialContext), resolveByTTL (0) and positive
 // values use a hostResolver that caches the IP and refreshes it based on the
 // DNS record TTL or a fixed interval. See resolve.go for details.
-func NewDoHClient(rawURL string, verifyCert bool, ipFamily string, resolveMode int, bootstrapIPs ...string) (*DoHClient, error) {
+// renewPercent is the percentage of the TTL/interval remaining that triggers
+// a background re-resolution (from cache.renew_percent); 0 disables it.
+// logger receives debug messages when the upstream IP is re-resolved (nil = silent).
+func NewDoHClient(rawURL string, verifyCert bool, ipFamily string, resolveMode int, renewPercent int, logger *logging.Logger, bootstrapIPs ...string) (*DoHClient, error) {
 	if rawURL == "" {
 		return nil, fmt.Errorf("empty DoH URL")
 	}
@@ -83,7 +88,7 @@ func NewDoHClient(rawURL string, verifyCert bool, ipFamily string, resolveMode i
 			// whenever a new TCP connection is needed.
 			host, port, _ := extractURLHostPort(rawURL)
 			if host != "" {
-				hr, _ := newHostResolver(host, port, bootstrapIPs, ipFamily, resolveMode)
+				hr, _ := newHostResolver(host, port, bootstrapIPs, ipFamily, resolveMode, renewPercent, logger)
 				if hr != nil {
 					client.resolver = hr
 					transport.DialContext = makeDialerFromResolver(hr)

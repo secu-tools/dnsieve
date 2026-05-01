@@ -307,7 +307,7 @@ func RunContext(ctx context.Context, cfg *config.Config, logger *logging.Logger)
 	if wlIPFamily == "" {
 		wlIPFamily = "auto"
 	}
-	wlResolver, err := upstream.NewWhitelistResolver(&cfg.Whitelist, cfg.UpstreamSettings.VerifyCertificates, wlBootstrapIPs, wlIPFamily, cfg.UpstreamSettings.UpstreamTTL)
+	wlResolver, err := upstream.NewWhitelistResolver(&cfg.Whitelist, cfg.UpstreamSettings.VerifyCertificates, wlBootstrapIPs, wlIPFamily, cfg.UpstreamSettings.UpstreamTTL, cfg.Cache.RenewPercent, logger)
 	if err != nil {
 		return fmt.Errorf("create whitelist resolver: %w", err)
 	}

@@ -164,8 +164,12 @@ hostname is re-resolved.
 | Value | Behaviour |
 |-------|-----------|
 | `-1` | **Disabled (default).** Resolve once at startup. Matches most DNS proxies. |
-| `0` | **TTL-based.** Reuse the IP for the full TTL of the DNS record. After expiry, re-resolve when the next new connection is established. A background refresh is started at 10% remaining TTL so the new address is usually ready before the old one expires. A 30-second floor prevents excessive bootstrap queries on very short TTLs. |
-| `1-2147483647` | **Fixed interval (seconds).** Reuse the IP for this many seconds. Re-resolve at the next new connection after the interval expires. A background refresh starts at 90% of the interval (10% remaining). |
+| `0` | **TTL-based.** Reuse the IP for the full TTL of the DNS record. After expiry, re-resolve when the next new connection is established. A background refresh is started when `renew_percent` of the TTL remains so the new address is usually ready before the old one expires. A 30-second floor prevents excessive bootstrap queries on very short TTLs. |
+| `1-2147483647` | **Fixed interval (seconds).** Reuse the IP for this many seconds. Re-resolve at the next new connection after the interval expires. A background refresh starts when `renew_percent` of the interval remains. |
+
+The background refresh threshold is set by `cache.renew_percent` (default 10%).
+Set `renew_percent = 0` to disable background re-resolution for `upstream_ttl` as well.
+A debug log message is emitted each time the upstream IP is re-resolved.
 
 In all modes:
 - Re-resolution uses the same `bootstrap_dns` and `bootstrap_ip_family`
@@ -331,10 +335,13 @@ result immediately and re-queries all upstream servers in the background:
 [cache]
 renew_percent = 10   # default: refresh when 10% of TTL remains
 # renew_percent = 25  # more aggressive: refresh when 25% of TTL remains
-# renew_percent = 0   # disable background refresh
 ```
 
-Valid range: 0 (disabled) to 99.
+Valid range: 0 to 99. A value of 0 disables background refresh.
+
+This setting also controls when the upstream hostname resolver triggers a
+background re-resolution for `upstream_ttl` modes 0 and N>0 (see
+[Upstream Re-resolution](#upstream-re-resolution-upstream_ttl) above).
 
 ### Sizing max_entries
 

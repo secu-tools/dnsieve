@@ -22,7 +22,7 @@ import (
 // --- newHostResolver construction ---
 
 func TestNewHostResolver_DisabledMode_ReturnsNil(t *testing.T) {
-	hr, err := newHostResolver("dns.example.com", "853", []string{"127.0.0.1:53"}, "auto", resolveDisabled)
+	hr, err := newHostResolver("dns.example.com", "853", []string{"127.0.0.1:53"}, "auto", resolveDisabled, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -32,7 +32,7 @@ func TestNewHostResolver_DisabledMode_ReturnsNil(t *testing.T) {
 }
 
 func TestNewHostResolver_NumericIP_ReturnsNil(t *testing.T) {
-	hr, err := newHostResolver("9.9.9.9", "853", []string{"127.0.0.1:53"}, "auto", resolveByTTL)
+	hr, err := newHostResolver("9.9.9.9", "853", []string{"127.0.0.1:53"}, "auto", resolveByTTL, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestNewHostResolver_NumericIP_ReturnsNil(t *testing.T) {
 }
 
 func TestNewHostResolver_NoBootstrapIPs_ReturnsNil(t *testing.T) {
-	hr, err := newHostResolver("dns.example.com", "853", nil, "auto", resolveByTTL)
+	hr, err := newHostResolver("dns.example.com", "853", nil, "auto", resolveByTTL, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestNewHostResolver_NoBootstrapIPs_ReturnsNil(t *testing.T) {
 }
 
 func TestNewHostResolver_IPv6Numeric_ReturnsNil(t *testing.T) {
-	hr, err := newHostResolver("2620:fe::fe", "853", []string{"9.9.9.9:53"}, "auto", resolveByTTL)
+	hr, err := newHostResolver("2620:fe::fe", "853", []string{"9.9.9.9:53"}, "auto", resolveByTTL, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestNewHostResolver_TTLMode_ResolvesOnConstruction(t *testing.T) {
 	// Start a mock bootstrap server returning a known IP.
 	bootstrapAddr := startMockBootstrapServer(t, "1.2.3.4", false)
 
-	hr, err := newHostResolver("dns.example.com", "853", []string{bootstrapAddr}, "auto", resolveByTTL)
+	hr, err := newHostResolver("dns.example.com", "853", []string{bootstrapAddr}, "auto", resolveByTTL, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestNewHostResolver_TTLMode_ResolvesOnConstruction(t *testing.T) {
 func TestNewHostResolver_IntervalMode_ResolvesOnConstruction(t *testing.T) {
 	bootstrapAddr := startMockBootstrapServer(t, "5.6.7.8", false)
 
-	hr, err := newHostResolver("dns.example.com", "443", []string{bootstrapAddr}, "auto", 60)
+	hr, err := newHostResolver("dns.example.com", "443", []string{bootstrapAddr}, "auto", 60, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestNewHostResolver_IntervalMode_ResolvesOnConstruction(t *testing.T) {
 
 func TestNewHostResolver_BootstrapFail_FallsBackToHostname(t *testing.T) {
 	// Bootstrap at port 1 is unreachable.
-	hr, err := newHostResolver("dns.example.com", "853", []string{"127.0.0.1:1"}, "auto", resolveByTTL)
+	hr, err := newHostResolver("dns.example.com", "853", []string{"127.0.0.1:1"}, "auto", resolveByTTL, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestNewHostResolver_BootstrapFail_FallsBackToHostname(t *testing.T) {
 func TestHostResolver_Addr_ReturnsCachedBeforeExpiry(t *testing.T) {
 	bootstrapAddr := startMockBootstrapServer(t, "10.0.0.1", false)
 
-	hr, err := newHostResolver("host.example.com", "53", []string{bootstrapAddr}, "auto", 3600)
+	hr, err := newHostResolver("host.example.com", "53", []string{bootstrapAddr}, "auto", 3600, 10, nil)
 	if err != nil || hr == nil {
 		t.Fatalf("newHostResolver: err=%v hr=%v", err, hr)
 	}
@@ -138,7 +138,9 @@ func TestHostResolver_Addr_SyncRefreshOnExpiry(t *testing.T) {
 	var queryCount atomic.Int32
 	serverAddr := startCountingBootstrapServer(t, []string{"10.1.1.1", "10.1.1.2"}, &queryCount)
 
-	hr, err := newHostResolver("host.example.com", "53", []string{serverAddr}, "auto", resolveByTTL)
+	// Use ipv4 to avoid the AAAA race in lookupHostViaBootstrap which makes
+	// queryCount nondeterministic when both A and AAAA are sent in parallel.
+	hr, err := newHostResolver("host.example.com", "53", []string{serverAddr}, "ipv4", resolveByTTL, 10, nil)
 	if err != nil || hr == nil {
 		t.Fatalf("newHostResolver: err=%v hr=%v", err, hr)
 	}
@@ -162,12 +164,14 @@ func TestHostResolver_Addr_SyncRefreshOnExpiry(t *testing.T) {
 // --- Background refresh ---
 
 func TestHostResolver_Addr_BackgroundRefreshTriggered(t *testing.T) {
-	// The first Addr() call after reaching the 10% TTL threshold should
-	// trigger a background refresh without blocking.
+	// The first Addr() call after reaching the renew_percent TTL threshold
+	// should trigger a background refresh without blocking.
 	var queryCount atomic.Int32
 	serverAddr := startCountingBootstrapServer(t, []string{"10.2.2.1", "10.2.2.2"}, &queryCount)
 
-	hr, err := newHostResolver("host.example.com", "53", []string{serverAddr}, "auto", resolveByTTL)
+	// Use renewPercent=10 so background refresh triggers at 10% remaining.
+	// ipv4 keeps queryCount deterministic (no parallel AAAA query).
+	hr, err := newHostResolver("host.example.com", "53", []string{serverAddr}, "ipv4", resolveByTTL, 10, nil)
 	if err != nil || hr == nil {
 		t.Fatalf("newHostResolver: err=%v hr=%v", err, hr)
 	}
@@ -197,10 +201,66 @@ func TestHostResolver_Addr_BackgroundRefreshTriggered(t *testing.T) {
 
 // --- Concurrent Addr() calls ---
 
+func TestHostResolver_Addr_BackgroundRefreshNotTriggered_WhenAboveThreshold(t *testing.T) {
+	// When remaining TTL is above renew_percent threshold, no refresh should fire.
+	var queryCount atomic.Int32
+	serverAddr := startCountingBootstrapServer(t, []string{"10.5.5.1", "10.5.5.2"}, &queryCount)
+
+	hr, err := newHostResolver("host.example.com", "53", []string{serverAddr}, "ipv4", resolveByTTL, 10, nil)
+	if err != nil || hr == nil {
+		t.Fatalf("newHostResolver: err=%v hr=%v", err, hr)
+	}
+
+	// Set up state: 50% remaining (well above 10% threshold).
+	total := 2 * time.Second
+	hr.mu.Lock()
+	hr.totalDur = total
+	hr.expiresAt = time.Now().Add(total / 2)
+	hr.mu.Unlock()
+
+	initialCount := queryCount.Load()
+	_ = hr.Addr()
+
+	// No background refresh should have been triggered.
+	time.Sleep(100 * time.Millisecond)
+	if queryCount.Load() > initialCount {
+		t.Errorf("background refresh fired unexpectedly: queryCount went from %d to %d", initialCount, queryCount.Load())
+	}
+}
+
+func TestHostResolver_Addr_RenewPercent_Zero_DisablesBackgroundRefresh(t *testing.T) {
+	// renewPercent=0 should disable background refresh entirely.
+	var queryCount atomic.Int32
+	serverAddr := startCountingBootstrapServer(t, []string{"10.6.6.1", "10.6.6.2"}, &queryCount)
+
+	hr, err := newHostResolver("host.example.com", "53", []string{serverAddr}, "ipv4", resolveByTTL, 0, nil)
+	if err != nil || hr == nil {
+		t.Fatalf("newHostResolver: err=%v hr=%v", err, hr)
+	}
+
+	// Set state to ~5% remaining (would trigger refresh if renewPercent > 0).
+	// Use a large total so the absolute margin is robust to scheduler delays.
+	total := 10 * time.Second
+	hr.mu.Lock()
+	hr.totalDur = total
+	hr.expiresAt = time.Now().Add(total / 20)
+	hr.mu.Unlock()
+
+	initialCount := queryCount.Load()
+	_ = hr.Addr()
+
+	time.Sleep(100 * time.Millisecond)
+	if queryCount.Load() > initialCount {
+		t.Errorf("background refresh should be disabled when renewPercent=0; queryCount went from %d to %d", initialCount, queryCount.Load())
+	}
+}
+
+// --- Concurrent Addr() calls ---
+
 func TestHostResolver_Addr_ConcurrentCallsSafe(t *testing.T) {
 	bootstrapAddr := startMockBootstrapServer(t, "10.3.3.1", false)
 
-	hr, err := newHostResolver("host.example.com", "53", []string{bootstrapAddr}, "auto", 3600)
+	hr, err := newHostResolver("host.example.com", "53", []string{bootstrapAddr}, "auto", 3600, 10, nil)
 	if err != nil || hr == nil {
 		t.Fatalf("newHostResolver: err=%v hr=%v", err, hr)
 	}
@@ -230,7 +290,7 @@ func TestHostResolver_Addr_ConcurrentExpiredCallsSafe(t *testing.T) {
 	var queryCount atomic.Int32
 	serverAddr := startCountingBootstrapServer(t, []string{"10.4.4.1"}, &queryCount)
 
-	hr, err := newHostResolver("host.example.com", "53", []string{serverAddr}, "auto", resolveByTTL)
+	hr, err := newHostResolver("host.example.com", "53", []string{serverAddr}, "ipv4", resolveByTTL, 10, nil)
 	if err != nil || hr == nil {
 		t.Fatalf("newHostResolver: err=%v hr=%v", err, hr)
 	}
@@ -309,7 +369,7 @@ func TestBootstrapTTL_ReturnedFromRecord(t *testing.T) {
 	serverAddr := startBootstrapServerWithTTL(t, "11.22.33.44", 300)
 
 	bootstrapIPs := []string{serverAddr}
-	hr, err := newHostResolver("dns.example.com", "853", bootstrapIPs, "ipv4", resolveByTTL)
+	hr, err := newHostResolver("dns.example.com", "853", bootstrapIPs, "ipv4", resolveByTTL, 10, nil)
 	if err != nil || hr == nil {
 		t.Fatalf("newHostResolver: err=%v hr=%v", err, hr)
 	}
@@ -356,7 +416,7 @@ func TestDoTClient_WithHostResolver_UsesResolvedAddr(t *testing.T) {
 	_, port, _ := net.SplitHostPort(ln)
 	target := fmt.Sprintf("dns.example.test:%s", port)
 
-	client, err := NewDoTClient(target, false, "auto", resolveByTTL, bootstrapAddr)
+	client, err := NewDoTClient(target, false, "auto", resolveByTTL, 10, nil, bootstrapAddr)
 	if err != nil {
 		t.Fatalf("NewDoTClient: %v", err)
 	}
@@ -374,7 +434,7 @@ func TestDoTClient_WithHostResolver_UsesResolvedAddr(t *testing.T) {
 func TestDoTClient_Disabled_NoResolver(t *testing.T) {
 	bootstrapAddr := startMockBootstrapServer(t, "127.0.0.1", false)
 
-	client, err := NewDoTClient("dns.example.test:853", false, "auto", resolveDisabled, bootstrapAddr)
+	client, err := NewDoTClient("dns.example.test:853", false, "auto", resolveDisabled, 10, nil, bootstrapAddr)
 	if err != nil {
 		t.Fatalf("NewDoTClient: %v", err)
 	}
@@ -388,7 +448,7 @@ func TestDoTClient_Disabled_NoResolver(t *testing.T) {
 func TestDoHClient_WithHostResolver_HasResolver(t *testing.T) {
 	bootstrapAddr := startMockBootstrapServer(t, "10.0.0.1", false)
 
-	client, err := NewDoHClient("https://dns.example.com/dns-query", false, "auto", resolveByTTL, bootstrapAddr)
+	client, err := NewDoHClient("https://dns.example.com/dns-query", false, "auto", resolveByTTL, 10, nil, bootstrapAddr)
 	if err != nil {
 		t.Fatalf("NewDoHClient: %v", err)
 	}
@@ -400,7 +460,7 @@ func TestDoHClient_WithHostResolver_HasResolver(t *testing.T) {
 func TestDoHClient_Disabled_NoResolver(t *testing.T) {
 	bootstrapAddr := startMockBootstrapServer(t, "10.0.0.1", false)
 
-	client, err := NewDoHClient("https://dns.example.com/dns-query", false, "auto", resolveDisabled, bootstrapAddr)
+	client, err := NewDoHClient("https://dns.example.com/dns-query", false, "auto", resolveDisabled, 10, nil, bootstrapAddr)
 	if err != nil {
 		t.Fatalf("NewDoHClient: %v", err)
 	}
@@ -411,7 +471,7 @@ func TestDoHClient_Disabled_NoResolver(t *testing.T) {
 
 func TestDoHClient_NumericIPURL_NoResolver(t *testing.T) {
 	// URL with a numeric IP host: no hostResolver is needed.
-	client, err := NewDoHClient("https://9.9.9.9/dns-query", false, "auto", resolveByTTL)
+	client, err := NewDoHClient("https://9.9.9.9/dns-query", false, "auto", resolveByTTL, 10, nil)
 	if err != nil {
 		t.Fatalf("NewDoHClient: %v", err)
 	}
@@ -578,7 +638,7 @@ func startBootstrapServerWithTTL(t *testing.T, replyIP string, ttl uint32) strin
 
 func TestNewWhitelistResolver_Disabled_ReturnsNil(t *testing.T) {
 	cfg := &config.WhitelistConfig{Enabled: false}
-	wl, err := NewWhitelistResolver(cfg, false, nil, "auto", resolveDisabled)
+	wl, err := NewWhitelistResolver(cfg, false, nil, "auto", resolveDisabled, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -594,7 +654,7 @@ func TestNewWhitelistResolver_DisabledMode_NoResolver(t *testing.T) {
 		ResolverAddress:  "https://dns.example.com/dns-query",
 		ResolverProtocol: "doh",
 	}
-	wl, err := NewWhitelistResolver(cfg, false, []string{bootstrapAddr}, "auto", resolveDisabled)
+	wl, err := NewWhitelistResolver(cfg, false, []string{bootstrapAddr}, "auto", resolveDisabled, 10, nil)
 	if err != nil {
 		t.Fatalf("NewWhitelistResolver: %v", err)
 	}
@@ -617,7 +677,7 @@ func TestNewWhitelistResolver_TTLMode_HasResolver(t *testing.T) {
 		ResolverAddress:  "https://dns.example.com/dns-query",
 		ResolverProtocol: "doh",
 	}
-	wl, err := NewWhitelistResolver(cfg, false, []string{bootstrapAddr}, "auto", resolveByTTL)
+	wl, err := NewWhitelistResolver(cfg, false, []string{bootstrapAddr}, "auto", resolveByTTL, 10, nil)
 	if err != nil {
 		t.Fatalf("NewWhitelistResolver: %v", err)
 	}
@@ -640,7 +700,7 @@ func TestNewWhitelistResolver_IntervalMode_HasResolver(t *testing.T) {
 		ResolverAddress:  "https://dns.example.com/dns-query",
 		ResolverProtocol: "doh",
 	}
-	wl, err := NewWhitelistResolver(cfg, false, []string{bootstrapAddr}, "auto", 300)
+	wl, err := NewWhitelistResolver(cfg, false, []string{bootstrapAddr}, "auto", 300, 10, nil)
 	if err != nil {
 		t.Fatalf("NewWhitelistResolver: %v", err)
 	}
@@ -663,7 +723,7 @@ func TestNewWhitelistResolver_DoTProtocol_TTLMode_HasResolver(t *testing.T) {
 		ResolverAddress:  "dns.example.com:853",
 		ResolverProtocol: "dot",
 	}
-	wl, err := NewWhitelistResolver(cfg, false, []string{bootstrapAddr}, "auto", resolveByTTL)
+	wl, err := NewWhitelistResolver(cfg, false, []string{bootstrapAddr}, "auto", resolveByTTL, 10, nil)
 	if err != nil {
 		t.Fatalf("NewWhitelistResolver: %v", err)
 	}
@@ -685,7 +745,7 @@ func TestNewWhitelistResolver_NumericIPAddress_NoResolver(t *testing.T) {
 		ResolverAddress:  "https://1.1.1.1/dns-query",
 		ResolverProtocol: "doh",
 	}
-	wl, err := NewWhitelistResolver(cfg, false, nil, "auto", resolveByTTL)
+	wl, err := NewWhitelistResolver(cfg, false, nil, "auto", resolveByTTL, 10, nil)
 	if err != nil {
 		t.Fatalf("NewWhitelistResolver: %v", err)
 	}
@@ -704,7 +764,7 @@ func TestNewWhitelistResolver_NumericIPAddress_NoResolver(t *testing.T) {
 func TestNewWhitelistResolver_DefaultAddress_NoResolverForNumericIP(t *testing.T) {
 	// Default address is https://1.1.1.1/dns-query (numeric) so no hostResolver.
 	cfg := &config.WhitelistConfig{Enabled: true}
-	wl, err := NewWhitelistResolver(cfg, false, nil, "auto", resolveByTTL)
+	wl, err := NewWhitelistResolver(cfg, false, nil, "auto", resolveByTTL, 10, nil)
 	if err != nil {
 		t.Fatalf("NewWhitelistResolver: %v", err)
 	}

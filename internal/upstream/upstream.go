@@ -61,10 +61,11 @@ func NewResolver(cfg *config.Config, logger *logging.Logger) (*Resolver, error) 
 		ipFamily = "auto"
 	}
 	resolveMode := cfg.UpstreamSettings.UpstreamTTL
+	renewPercent := cfg.Cache.RenewPercent
 	clients := make([]Client, 0, len(cfg.Upstream))
 	for _, u := range cfg.Upstream {
 		verifyCert := u.ShouldVerifyCert(cfg.UpstreamSettings.VerifyCertificates)
-		c, err := newClient(u, verifyCert, bootstrapIPs, ipFamily, resolveMode)
+		c, err := newClient(u, verifyCert, bootstrapIPs, ipFamily, resolveMode, renewPercent, logger)
 		if err != nil {
 			return nil, fmt.Errorf("upstream %s: %w", u.Address, err)
 		}
@@ -106,12 +107,12 @@ func isClientTCP(c Client) bool {
 }
 
 // newClient creates the appropriate upstream client for a server config.
-func newClient(srv config.UpstreamServer, verifyCert bool, bootstrapIPs []string, ipFamily string, resolveMode int) (Client, error) {
+func newClient(srv config.UpstreamServer, verifyCert bool, bootstrapIPs []string, ipFamily string, resolveMode int, renewPercent int, logger *logging.Logger) (Client, error) {
 	switch srv.Protocol {
 	case "doh":
-		return NewDoHClient(srv.Address, verifyCert, ipFamily, resolveMode, bootstrapIPs...)
+		return NewDoHClient(srv.Address, verifyCert, ipFamily, resolveMode, renewPercent, logger, bootstrapIPs...)
 	case "dot":
-		return NewDoTClient(srv.Address, verifyCert, ipFamily, resolveMode, bootstrapIPs...)
+		return NewDoTClient(srv.Address, verifyCert, ipFamily, resolveMode, renewPercent, logger, bootstrapIPs...)
 	case "udp":
 		return NewPlainClient(srv.Address)
 	default:

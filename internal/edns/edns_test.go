@@ -1279,25 +1279,7 @@ func TestDDR_DoH_SVCB_HasALPNPortAndPath(t *testing.T) {
 		t.Fatal("DDR DoH record (priority 2) not found")
 	}
 
-	var foundALPN, foundPort, foundPath bool
-	for _, pair := range dohRec.Value {
-		switch p := pair.(type) {
-		case *svcb.ALPN:
-			for _, alpn := range p.Alpn {
-				if alpn == "h2" {
-					foundALPN = true
-				}
-			}
-		case *svcb.PORT:
-			if p.Port == 443 {
-				foundPort = true
-			}
-		case *svcb.DOHPATH:
-			if strings.Contains(p.Template, "/dns-query") {
-				foundPath = true
-			}
-		}
-	}
+	foundALPN, foundPort, foundPath := inspectDoHSVCB(dohRec, "h2", 443, "/dns-query")
 	if !foundALPN {
 		t.Error("DDR DoH SVCB must contain ALPN=h2 (RFC 8484)")
 	}
@@ -1307,6 +1289,30 @@ func TestDDR_DoH_SVCB_HasALPNPortAndPath(t *testing.T) {
 	if !foundPath {
 		t.Error("DDR DoH SVCB must contain dohpath with /dns-query template (RFC 9461)")
 	}
+}
+
+// inspectDoHSVCB scans an SVCB record for the expected ALPN, port, and
+// dohpath substring. Returns booleans indicating which were found.
+func inspectDoHSVCB(rec *dns.SVCB, wantALPN string, wantPort uint16, wantPathSubstr string) (alpn, port, path bool) {
+	for _, pair := range rec.Value {
+		switch p := pair.(type) {
+		case *svcb.ALPN:
+			for _, a := range p.Alpn {
+				if a == wantALPN {
+					alpn = true
+				}
+			}
+		case *svcb.PORT:
+			if p.Port == wantPort {
+				port = true
+			}
+		case *svcb.DOHPATH:
+			if strings.Contains(p.Template, wantPathSubstr) {
+				path = true
+			}
+		}
+	}
+	return
 }
 
 // TestDDR_BothDoTAndDoH verifies that a DDR response includes records for

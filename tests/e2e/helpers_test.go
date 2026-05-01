@@ -100,16 +100,38 @@ func generateSelfSignedCert(t *testing.T) *testCert {
 	}
 }
 
-// findFreePort returns an available TCP port on localhost.
+// findFreePort returns an available port on localhost that is bindable on
+// both TCP and UDP. On Windows some ports are in the OS-reserved/excluded
+// range for UDP even when TCP is free (e.g. Hyper-V, WSL2, Docker), so both
+// protocols are probed before the port is returned.
 func findFreePort(t *testing.T) int {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("find free port: %v", err)
+	for range 20 {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			continue
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+		ln.Close()
+
+		addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+		checkTCP, err := net.Listen("tcp", addr)
+		if err != nil {
+			continue
+		}
+		checkTCP.Close()
+
+		checkUDP, err := net.ListenPacket("udp4", addr)
+		if err != nil {
+			continue
+		}
+		checkUDP.Close()
+
+		return port
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
-	return port
+	t.Fatal("find free port: could not find an available port after 20 attempts")
+	return 0
 }
 
 // serverPorts holds the ports assigned to each listener.
@@ -139,7 +161,7 @@ func startServer(t *testing.T, cfg *config.Config) context.CancelFunc {
 		if wlIPFamily == "" {
 			wlIPFamily = "auto"
 		}
-		wlResolver, err = upstream.NewWhitelistResolver(&cfg.Whitelist, cfg.UpstreamSettings.VerifyCertificates, wlBootstrapIPs, wlIPFamily, cfg.UpstreamSettings.UpstreamTTL)
+		wlResolver, err = upstream.NewWhitelistResolver(&cfg.Whitelist, cfg.UpstreamSettings.VerifyCertificates, wlBootstrapIPs, wlIPFamily, cfg.UpstreamSettings.UpstreamTTL, cfg.Cache.RenewPercent, logger)
 		if err != nil {
 			t.Fatalf("create whitelist resolver: %v", err)
 		}

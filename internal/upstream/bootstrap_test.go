@@ -323,7 +323,7 @@ func TestMakeBootstrapDialer_FallbackOnBootstrapFailure(t *testing.T) {
 
 func TestNewDoHClient_WithBootstrap_Accepted(t *testing.T) {
 	// Ensure NewDoHClient accepts bootstrap IPs without error.
-	c, err := NewDoHClient("https://dns.quad9.net/dns-query", true, "auto", resolveDisabled, "9.9.9.9:53")
+	c, err := NewDoHClient("https://dns.quad9.net/dns-query", true, "auto", resolveDisabled, 10, nil, "9.9.9.9:53")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestNewDoHClient_WithBootstrap_Accepted(t *testing.T) {
 }
 
 func TestNewDoHClient_NoBootstrap_Accepted(t *testing.T) {
-	c, err := NewDoHClient("https://dns.quad9.net/dns-query", true, "auto", resolveDisabled)
+	c, err := NewDoHClient("https://dns.quad9.net/dns-query", true, "auto", resolveDisabled, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestNewDoHClient_NoBootstrap_Accepted(t *testing.T) {
 }
 
 func TestNewDoHClient_MultipleBootstrap_Accepted(t *testing.T) {
-	c, err := NewDoHClient("https://dns.quad9.net/dns-query", true, "auto", resolveDisabled, "9.9.9.9:53", "149.112.112.112:53")
+	c, err := NewDoHClient("https://dns.quad9.net/dns-query", true, "auto", resolveDisabled, 10, nil, "9.9.9.9:53", "149.112.112.112:53")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -358,7 +358,7 @@ func TestNewDoHClient_MultipleBootstrap_Accepted(t *testing.T) {
 // --- Integration: NewDoTClient with bootstrap ---
 
 func TestNewDoTClient_NoBootstrap_Accepted(t *testing.T) {
-	c, err := NewDoTClient("dns.quad9.net:853", true, "auto", resolveDisabled)
+	c, err := NewDoTClient("dns.quad9.net:853", true, "auto", resolveDisabled, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestNewDoTClient_NoBootstrap_Accepted(t *testing.T) {
 
 func TestNewDoTClient_WithBootstrap_NumericHost(t *testing.T) {
 	// When address is already a numeric IP, bootstrap lookup is skipped.
-	c, err := NewDoTClient("9.9.9.9:853", true, "auto", resolveDisabled, "9.9.9.9:53")
+	c, err := NewDoTClient("9.9.9.9:853", true, "auto", resolveDisabled, 10, nil, "9.9.9.9:53")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestNewDoTClient_WithBootstrap_NumericHost(t *testing.T) {
 func TestNewDoTClient_WithBootstrap_FallsBackOnFail(t *testing.T) {
 	// Bootstrap lookup fails (port 1 is unreachable); client creation should
 	// succeed and fall back to the original address.
-	c, err := NewDoTClient("dns.quad9.net:853", true, "auto", resolveDisabled, "127.0.0.1:1")
+	c, err := NewDoTClient("dns.quad9.net:853", true, "auto", resolveDisabled, 10, nil, "127.0.0.1:1")
 	if err != nil {
 		t.Fatalf("client creation should not fail if bootstrap lookup fails: %v", err)
 	}

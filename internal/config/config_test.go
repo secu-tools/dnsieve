@@ -220,6 +220,9 @@ func TestApplyDefaults_ZeroValues(t *testing.T) {
 	if cfg.Cache.MaxEntries != 10000 {
 		t.Errorf("expected max_entries 10000, got %d", cfg.Cache.MaxEntries)
 	}
+	if cfg.Cache.RenewPercent != 0 {
+		t.Errorf("expected renew_percent 0 (disabled) when starting from zero struct, got %d", cfg.Cache.RenewPercent)
+	}
 
 	if cfg.Downstream.Plain.Port != 5353 {
 		t.Errorf("expected port 5353, got %d", cfg.Downstream.Plain.Port)
@@ -241,6 +244,24 @@ func TestDefaultConfig_RenewPercent(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.Cache.RenewPercent != 10 {
 		t.Errorf("expected default renew_percent 10, got %d", cfg.Cache.RenewPercent)
+	}
+}
+
+func TestApplyDefaults_RenewPercent_ZeroPreserved(t *testing.T) {
+	cfg := &Config{}
+	cfg.Cache.RenewPercent = 0
+	applyCacheDefaults(cfg)
+	if cfg.Cache.RenewPercent != 0 {
+		t.Errorf("applyCacheDefaults: RenewPercent=0 should be preserved (disables refresh), got %d", cfg.Cache.RenewPercent)
+	}
+}
+
+func TestApplyDefaults_RenewPercent_NonZeroPreserved(t *testing.T) {
+	cfg := &Config{}
+	cfg.Cache.RenewPercent = 25
+	applyCacheDefaults(cfg)
+	if cfg.Cache.RenewPercent != 25 {
+		t.Errorf("applyCacheDefaults: RenewPercent=25 should be preserved, got %d", cfg.Cache.RenewPercent)
 	}
 }
 
@@ -315,10 +336,10 @@ func TestValidate_CacheRenewPercent_Negative(t *testing.T) {
 
 func TestValidate_CacheRenewPercent_Zero_IsDisabled(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Cache.RenewPercent = 0 // 0 = disabled, not an error
+	cfg.Cache.RenewPercent = 0 // 0 disables background refresh; must be valid
 	_, errs := cfg.Validate()
 	if hasError(errs, "renew_percent") {
-		t.Error("renew_percent=0 should be valid (disabled)")
+		t.Error("renew_percent=0 should be valid (disables background refresh)")
 	}
 }
 
@@ -327,9 +348,9 @@ func TestValidate_CacheRenewPercent_BoundaryValues(t *testing.T) {
 		value   int
 		wantErr bool
 	}{
-		{0, false},  // disabled
-		{1, false},  // minimum enabled
-		{25, false}, // default
+		{0, false},  // disables background refresh
+		{1, false},  // minimum
+		{25, false}, // mid-range
 		{50, false}, // halfway
 		{99, false}, // maximum
 		{100, true}, // too high

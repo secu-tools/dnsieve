@@ -52,29 +52,42 @@ func smokeTempDir(t *testing.T) string {
 	return dir
 }
 
-// findFreePort returns an available local TCP port for use as a DNS listener.
-// It retries up to 10 times to minimise the TOCTOU race between closing the
-// probe listener and the binary binding the port: if the chosen port is
-// grabbed by another process between the two calls the next candidate is used.
+// findFreePort returns an available local port for use as a DNS listener.
+// It verifies that BOTH TCP and UDP are bindable on the chosen port, because
+// on Windows some ports are in the OS-reserved/excluded range for UDP even
+// when TCP is free (e.g. Hyper-V, WSL2, Docker reservations).
+// It retries up to 20 times to minimise the TOCTOU race between closing the
+// probe listeners and the binary binding the port.
 func findFreePort(t *testing.T) int {
 	t.Helper()
-	for range 10 {
+	for range 20 {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			continue
 		}
 		port := ln.Addr().(*net.TCPAddr).Port
 		ln.Close()
-		// Quick check: try to re-bind briefly to confirm the port is still free.
-		check, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+
+		addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+		// Verify TCP is still free.
+		checkTCP, err := net.Listen("tcp", addr)
 		if err != nil {
-			// Port was snatched; try again.
 			continue
 		}
-		check.Close()
+		checkTCP.Close()
+
+		// Verify UDP is also bindable on the same port.
+		// On Windows, UDP and TCP exclusion ranges are tracked independently.
+		checkUDP, err := net.ListenPacket("udp4", addr)
+		if err != nil {
+			continue
+		}
+		checkUDP.Close()
+
 		return port
 	}
-	t.Fatal("find free port: could not find an available port after 10 attempts")
+	t.Fatal("find free port: could not find an available port after 20 attempts")
 	return 0
 }
 

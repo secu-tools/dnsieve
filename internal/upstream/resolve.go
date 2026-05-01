@@ -10,6 +10,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/secu-tools/dnsieve/internal/logging"
 )
 
 // ResolveDisabled is the exported sentinel value for resolveMode that disables
@@ -25,17 +27,12 @@ const resolveDisabled = -1
 // resolveByTTL is the sentinel value for resolveMode that enables TTL-based
 // re-resolution. The resolved IP is reused for the lifetime of the DNS record
 // TTL returned by the bootstrap server. A background refresh is started when
-// 10% of the TTL remains.
+// renew_percent of the TTL remains.
 const resolveByTTL = 0
 
 // minResolveInterval is the minimum floor applied to all TTL and interval
 // values to prevent hammering the bootstrap DNS server on very short TTLs.
 const minResolveInterval = 30 * time.Second
-
-// renewThresholdFrac determines when the background refresh is triggered.
-// A background refresh starts when the remaining TTL/interval falls below
-// 1/renewThresholdFrac of the total, i.e. at 10% remaining for a value of 10.
-const renewThresholdFrac = 10
 
 // hostResolver caches the resolved IP for a single upstream hostname and
 // refreshes it according to the configured mode:
@@ -44,7 +41,7 @@ const renewThresholdFrac = 10
 //   - resolveByTTL (0): respect the DNS record TTL from the bootstrap
 //     response; re-resolve after TTL expiry, with background refresh.
 //   - N > 0: re-resolve at most once every N seconds, with background
-//     refresh at 90% elapsed (10% remaining).
+//     refresh when renew_percent of the interval remains.
 //
 // Re-resolution only occurs during the connection-establishing phase
 // (when Addr is called). Existing connections are never closed.
@@ -56,6 +53,8 @@ type hostResolver struct {
 	bootstrapIPs []string
 	ipFamily     string
 	mode         int
+	renewPercent int // % of TTL/interval remaining that triggers background refresh (0 = disabled)
+	logger       *logging.Logger
 
 	mu          sync.Mutex
 	currentAddr string        // current "ip:port" or "host:port" fallback
@@ -67,6 +66,9 @@ type hostResolver struct {
 // newHostResolver creates a hostResolver for the given host and port.
 // It performs an initial synchronous resolution via bootstrap DNS using the
 // same bootstrapIPs and ipFamily settings that were used at startup.
+// renewPercent is the percentage of the TTL/interval remaining that triggers
+// a background refresh (from cache.renew_percent); 0 disables the background
+// refresh. logger is used for debug messages (nil disables logging).
 //
 // Returns nil (without error) when:
 //   - mode is resolveDisabled (-1),
@@ -76,7 +78,7 @@ type hostResolver struct {
 // When the initial bootstrap resolution fails the resolver falls back to
 // storing host:port so that the OS resolver is tried at dial time, and
 // schedules an early retry after minResolveInterval.
-func newHostResolver(host, port string, bootstrapIPs []string, ipFamily string, mode int) (*hostResolver, error) {
+func newHostResolver(host, port string, bootstrapIPs []string, ipFamily string, mode int, renewPercent int, logger *logging.Logger) (*hostResolver, error) {
 	if mode == resolveDisabled {
 		return nil, nil
 	}
@@ -96,6 +98,8 @@ func newHostResolver(host, port string, bootstrapIPs []string, ipFamily string, 
 		bootstrapIPs: bootstrapIPs,
 		ipFamily:     ipFamily,
 		mode:         mode,
+		renewPercent: renewPercent,
+		logger:       logger,
 		// Store host:port as the fallback before first resolution attempt.
 		currentAddr: net.JoinHostPort(host, port),
 	}
@@ -139,8 +143,8 @@ func (h *hostResolver) setExpiry(ttl uint32, mode int) {
 //
 // Behaviour:
 //   - If the cached address has not expired, it is returned immediately.
-//     When only 1/renewThresholdFrac (10%) of the TTL/interval remains a background
-//     refresh is started so the new address is usually ready before expiry.
+//     When renew_percent of the TTL/interval remains a background refresh is
+//     started so the new address is usually ready before expiry.
 //   - If the cached address has expired and no refresh is running, a
 //     synchronous re-resolution is performed (blocks up to 5 s). A refreshing
 //     flag prevents concurrent callers from issuing duplicate DNS queries.
@@ -161,9 +165,10 @@ func (h *hostResolver) Addr() string {
 		return h.doRefresh()
 	}
 
-	if !expired && !h.refreshing && h.totalDur > 0 {
+	if !expired && !h.refreshing && h.totalDur > 0 && h.renewPercent > 0 {
 		remaining := h.expiresAt.Sub(now)
-		if remaining < h.totalDur/renewThresholdFrac {
+		threshold := h.totalDur * time.Duration(h.renewPercent) / 100
+		if remaining < threshold {
 			h.refreshing = true
 			go h.doRefresh()
 		}
@@ -196,7 +201,11 @@ func (h *hostResolver) doRefresh() string {
 		h.totalDur = minResolveInterval
 		return h.currentAddr
 	}
-	h.currentAddr = net.JoinHostPort(ip, h.port)
+	newAddr := net.JoinHostPort(ip, h.port)
+	if h.logger != nil {
+		h.logger.Debugf("Upstream %s re-resolved: %s -> %s (TTL %ds)", h.host, h.currentAddr, newAddr, ttl)
+	}
+	h.currentAddr = newAddr
 	h.setExpiry(ttl, h.mode)
 	return h.currentAddr
 }

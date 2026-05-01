@@ -54,20 +54,20 @@ type UpstreamSettings struct {
 	//               lifetime of the DNS record TTL. When a new connection
 	//               must be established after the TTL has expired the
 	//               hostname is re-resolved via bootstrap DNS. A background
-	//               refresh is triggered proactively when only 25% of the
-	//               TTL remains so that the new address is usually ready
+	//               refresh is triggered proactively when cache.renew_percent
+	//               of the TTL remains so the new address is usually ready
 	//               before the old one expires. A minimum floor of 30 s
 	//               applies to avoid hammering the bootstrap server.
 	//   1-2147483647: fixed interval in seconds. The resolved IP is
 	//               refreshed at most once per interval. The refresh
 	//               only happens when a new connection is being established
 	//               (no existing connections are closed). A background
-	//               refresh is started at 75% of the interval so the new
-	//               address is ready before the interval expires.
+	//               refresh is started when cache.renew_percent of the
+	//               interval remains so the address is ready before expiry.
 	//
-	// Re-resolution uses the same bootstrap_dns and bootstrap_ip_family
-	// settings as the initial startup resolution. No config file reload
-	// is performed.
+	// The background refresh threshold is controlled by cache.renew_percent
+	// (default 10). Re-resolution uses the same bootstrap_dns and
+	// bootstrap_ip_family settings as the initial startup resolution.
 	UpstreamTTL int `toml:"upstream_ttl"`
 }
 
@@ -122,7 +122,9 @@ type CacheConfig struct {
 	MinTTL     int  `toml:"min_ttl"`
 	// RenewPercent is the percentage of a cached entry's remaining TTL below
 	// which a background refresh is triggered on the next client request.
-	// 0 disables background refresh. Valid range: 0-99. Default: 25.
+	// It also controls when the upstream hostname resolver triggers a
+	// background re-resolution (see upstream_settings.upstream_ttl).
+	// 0 disables background refresh. Valid range: 0-99. Default: 10.
 	RenewPercent int `toml:"renew_percent"`
 }
 
@@ -906,21 +908,23 @@ bootstrap_ip_family = "ipv4"
 #            of the DNS record returned during resolution. When a new
 #            connection must be opened after the TTL expires, the hostname
 #            is re-resolved via bootstrap DNS. A background refresh is
-#            triggered at 10% remaining TTL so the new address is usually
-#            ready before the old one expires, avoiding any slowdown on
-#            connection setup. A floor of 30 seconds is enforced so that
-#            very short TTLs do not cause excessive bootstrap queries.
-#            No open connections are closed forcibly.
+#            triggered when cache.renew_percent of the TTL remains (default
+#            10%) so the new address is usually ready before the old one
+#            expires, avoiding any slowdown on connection setup. A floor of
+#            30 seconds is enforced so that very short TTLs do not cause
+#            excessive bootstrap queries. No open connections are closed
+#            forcibly.
 #
 #   N>0  -- Fixed interval in seconds (1 to 2147483647). The IP is
 #            considered valid for N seconds. Re-resolution happens only
 #            when a new connection needs to be established after the
-#            interval has elapsed. A background refresh begins at 75% of
-#            the interval (25% remaining) to keep the address fresh. No
-#            open connections are closed. Minimum sensible value: 60.
+#            interval has elapsed. A background refresh begins when
+#            cache.renew_percent of the interval remains (default 10%) to
+#            keep the address fresh. No open connections are closed.
+#            Minimum sensible value: 60.
 #
 # All modes reuse the same bootstrap_dns and bootstrap_ip_family settings
-# that were active at startup. The config file is never re-read.
+# that were active at startup.
 upstream_ttl = -1
 
 
@@ -1008,7 +1012,10 @@ min_ttl = 60
 # upstream servers in the background. The response is only committed to cache
 # if all upstream servers respond and the result is cacheable (same block
 # consensus rules apply). If the result is not cacheable, the old entry stays
-# until it naturally expires. Set to 0 to disable. Range: 0-99. Default: 10.
+# until it naturally expires.
+# This value also controls when the upstream hostname resolver starts a
+# background re-resolution (see upstream_settings.upstream_ttl).
+# 0 disables background refresh. Range: 0-99. Default: 10.
 renew_percent = 10
 
 
