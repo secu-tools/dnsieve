@@ -19,6 +19,7 @@ import (
 	"github.com/secu-tools/dnsieve/internal/cache"
 	"github.com/secu-tools/dnsieve/internal/config"
 	"github.com/secu-tools/dnsieve/internal/dnsmsg"
+	"github.com/secu-tools/dnsieve/internal/domainlist"
 	"github.com/secu-tools/dnsieve/internal/edns"
 	"github.com/secu-tools/dnsieve/internal/logging"
 	"github.com/secu-tools/dnsieve/internal/upstream"
@@ -28,6 +29,7 @@ import (
 type Handler struct {
 	resolver          *upstream.Resolver
 	whitelistResolver *upstream.WhitelistResolver
+	blacklist         *domainlist.DomainList
 	cache             *cache.Cache
 	logger            *logging.Logger
 	cfg               *config.Config
@@ -36,10 +38,12 @@ type Handler struct {
 
 // NewHandler creates a new DNS query handler.
 // wlResolver may be nil when the whitelist is disabled.
-func NewHandler(resolver *upstream.Resolver, wlResolver *upstream.WhitelistResolver, c *cache.Cache, logger *logging.Logger, cfg *config.Config) *Handler {
+// blacklist may be nil when the blacklist is disabled.
+func NewHandler(resolver *upstream.Resolver, wlResolver *upstream.WhitelistResolver, blacklist *domainlist.DomainList, c *cache.Cache, logger *logging.Logger, cfg *config.Config) *Handler {
 	return &Handler{
 		resolver:          resolver,
 		whitelistResolver: wlResolver,
+		blacklist:         blacklist,
 		cache:             c,
 		logger:            logger,
 		cfg:               cfg,
@@ -68,6 +72,20 @@ func (h *Handler) handleWhitelistedQuery(ctx context.Context, query *dns.Msg, qn
 	if h.cfg.Cache.Enabled {
 		h.cache.Put(query, resp, false)
 	}
+	return resp
+}
+
+// handleBlacklistedQuery checks whether qname is blacklisted and, if so,
+// returns a blocked response immediately without querying upstream.
+// Returns nil when the query is not blacklisted (normal path continues).
+func (h *Handler) handleBlacklistedQuery(query *dns.Msg, qname, qtype string) *dns.Msg {
+	if h.blacklist == nil || !h.blacklist.Contains(qname) {
+		return nil
+	}
+	h.logger.Infof("%s is blocked by local blacklist", qname)
+	resp := dnsmsg.MakeBlockedResponse(query, h.cfg.Blocking.Mode, "local-blacklist")
+	h.logger.Debugf("Query %s %s -> final: rcode=%s blocked=true (blacklist)",
+		qname, qtype, dns.RcodeToString[resp.Rcode])
 	return resp
 }
 
@@ -147,7 +165,13 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 		return ddrResp
 	}
 
-	// Step 1: Whitelist check -- bypass all blocking upstreams
+	// Step 1: Blacklist check -- block immediately without upstream query
+	if resp := h.handleBlacklistedQuery(query, qname, qtype); resp != nil {
+		h.edns.HandleNSIDSubstitute(query, resp)
+		return resp
+	}
+
+	// Step 2: Whitelist check -- bypass all blocking upstreams
 	if resp := h.handleWhitelistedQuery(ctx, query, qname, qtype); resp != nil {
 		// RFC 5001: inject proxy NSID for substitute mode even on whitelist hits.
 		h.edns.HandleNSIDSubstitute(query, resp)
@@ -311,10 +335,9 @@ func RunContext(ctx context.Context, cfg *config.Config, logger *logging.Logger)
 	if err != nil {
 		return fmt.Errorf("create whitelist resolver: %w", err)
 	}
-	if wlResolver != nil {
-		logger.Infof("Whitelist enabled: %d domain(s), resolver=%s",
-			len(cfg.Whitelist.Domains), cfg.Whitelist.ResolverAddress)
-	}
+
+	// Create blacklist (nil when disabled)
+	blacklist := newBlacklist(&cfg.Blacklist, logger)
 
 	// Create cache
 	var c *cache.Cache
@@ -330,7 +353,7 @@ func RunContext(ctx context.Context, cfg *config.Config, logger *logging.Logger)
 		c = cache.New(0, 1, 1, 0)
 	}
 
-	handler := NewHandler(resolver, wlResolver, c, logger, cfg)
+	handler := NewHandler(resolver, wlResolver, blacklist, c, logger, cfg)
 
 	// Set up background cache refresh when renew_percent > 0.
 	// On each trigger: fan out to ALL upstreams using the same block-consensus
@@ -383,12 +406,73 @@ func RunContext(ctx context.Context, cfg *config.Config, logger *logging.Logger)
 	case err := <-errCh:
 		cancel()
 		wg.Wait()
+		stopListWatchers(wlResolver, blacklist)
 		return err
 	}
 
 	wg.Wait()
+	stopListWatchers(wlResolver, blacklist)
 	logger.Infof("DNSieve server stopped.")
 	return nil
+}
+
+// stopListWatchers stops background file watchers for whitelist and blacklist.
+// newBlacklist creates and loads a DomainList for the blacklist config.
+// Returns nil when blacklisting is disabled.
+func newBlacklist(cfg *config.BlacklistConfig, logger *logging.Logger) *domainlist.DomainList {
+	if !cfg.Enabled {
+		return nil
+	}
+	bl := domainlist.NewDomainList("blacklist", cfg.ListFiles)
+	dbg := func(f string, a ...interface{}) { logger.Debugf(f, a...) }
+	count, invalid, dedup, loadErr := bl.Load(dbg)
+	if loadErr != nil {
+		logger.Warnf("Blacklist: failed to load list files: %v", loadErr)
+	} else if count > 0 {
+		msg := fmt.Sprintf("Blacklist: loaded %d domains", count)
+		if dedup > 0 {
+			msg += fmt.Sprintf(" (%d dedup)", dedup)
+		}
+		if invalid > 0 {
+			msg += fmt.Sprintf(", %d invalid", invalid)
+		}
+		msg += " from list files"
+		if invalid > 0 {
+			logger.Warnf("%s", msg)
+		} else {
+			logger.Infof("%s", msg)
+		}
+		if count > domainlist.LargeListThreshold {
+			logger.Warnf("Blacklist: %d domains exceeds recommended threshold (%d); large blocklists are not officially supported", count, domainlist.LargeListThreshold)
+		}
+	} else if len(cfg.ListFiles) == 0 {
+		logger.Warnf("Blacklist: enabled but no list_files configured; blacklist has no effect")
+	} else {
+		if invalid > 0 {
+			logger.Warnf("Blacklist: enabled but no valid domains loaded from configured list_files (%d invalid lines)", invalid)
+		} else {
+			logger.Warnf("Blacklist: enabled but no domains loaded from configured list_files")
+		}
+	}
+
+	if cfg.ListTTL > 0 {
+		bl.StartWatcher(cfg.ListTTL,
+			func(f string, a ...interface{}) { logger.Infof(f, a...) },
+			func(f string, a ...interface{}) { logger.Warnf(f, a...) },
+			func(f string, a ...interface{}) { logger.Debugf(f, a...) },
+		)
+		logger.Infof("Blacklist: file watcher started (check interval: %ds)", cfg.ListTTL)
+	}
+	return bl
+}
+
+func stopListWatchers(wl *upstream.WhitelistResolver, bl *domainlist.DomainList) {
+	if wl != nil {
+		wl.Stop()
+	}
+	if bl != nil {
+		bl.Stop()
+	}
 }
 
 // refreshQueryInfo extracts the query name and type string for logging.

@@ -173,7 +173,7 @@ func TestRFC8484_CacheControl(t *testing.T) {
 
 // TestRFC8484_DoH_AAAA tests DoH with AAAA query.
 func TestRFC8484_DoH_AAAA(t *testing.T) {
-	wireQuery := packQuery(t, "google.com.", dns.TypeAAAA)
+	wireQuery := packQuery(t, "example.com.", dns.TypeAAAA)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -192,7 +192,7 @@ func TestRFC8484_DoH_AAAA(t *testing.T) {
 
 // TestRFC8484_DoH_MX tests DoH with MX query.
 func TestRFC8484_DoH_MX(t *testing.T) {
-	wireQuery := packQuery(t, "google.com.", dns.TypeMX)
+	wireQuery := packQuery(t, "example.com.", dns.TypeMX)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

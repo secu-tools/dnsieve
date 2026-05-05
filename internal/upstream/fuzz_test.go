@@ -4,6 +4,9 @@ package upstream
 
 import (
 	"net/netip"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +15,7 @@ import (
 	"codeberg.org/miekg/dns/rdata"
 
 	"github.com/secu-tools/dnsieve/internal/config"
+	"github.com/secu-tools/dnsieve/internal/domainlist"
 	"github.com/secu-tools/dnsieve/internal/logging"
 )
 
@@ -29,13 +33,14 @@ func FuzzWhitelistIsWhitelisted(f *testing.F) {
 
 	cfg := &config.WhitelistConfig{
 		Enabled: true,
-		Domains: []string{
-			"example.com",
-			"*.safe.net",
-			"*",
-		},
 	}
-	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "fuzz"}}
+	dir := f.TempDir()
+	content := strings.Join([]string{"example.com", "*.safe.net"}, "\n") + "\n"
+	listPath := filepath.Join(dir, "fuzz.list")
+	os.WriteFile(listPath, []byte(content), 0644)
+	list := domainlist.NewDomainList("fuzz", []string{listPath})
+	list.Load(nil)
+	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "fuzz"}, list: list}
 
 	f.Fuzz(func(t *testing.T, domain string) {
 		if t.Context().Err() != nil {

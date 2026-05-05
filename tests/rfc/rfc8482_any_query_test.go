@@ -44,7 +44,7 @@ func TestRFC8482_ANY_Response(t *testing.T) {
 
 // TestRFC8482_ANY_TCP tests ANY query over TCP.
 func TestRFC8482_ANY_TCP(t *testing.T) {
-	query := makeQuery("google.com.", dns.TypeANY)
+	query := makeQuery("example.com.", dns.TypeANY)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

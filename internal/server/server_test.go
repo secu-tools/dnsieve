@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/secu-tools/dnsieve/internal/cache"
 	"github.com/secu-tools/dnsieve/internal/config"
+	"github.com/secu-tools/dnsieve/internal/domainlist"
 	"github.com/secu-tools/dnsieve/internal/logging"
 	"github.com/secu-tools/dnsieve/internal/upstream"
 )
@@ -81,7 +84,23 @@ func newTestHandlerWithLogger(t *testing.T, responses []*dns.Msg, logger *loggin
 	}
 
 	resolver := upstream.NewResolverFromClients(clients, 2*time.Second, 50*time.Millisecond, logger)
-	return NewHandler(resolver, nil, c, logger, cfg)
+	return NewHandler(resolver, nil, nil, c, logger, cfg)
+}
+
+// testDomainList creates a DomainList from a list of domain entries for testing.
+func testDomainList(t *testing.T, entries []string) *domainlist.DomainList {
+	t.Helper()
+	dir := t.TempDir()
+	content := strings.Join(entries, "\n") + "\n"
+	path := filepath.Join(dir, "test.list")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write test list: %v", err)
+	}
+	dl := domainlist.NewDomainList("test", []string{path})
+	if _, _, _, err := dl.Load(nil); err != nil {
+		t.Fatalf("load test list: %v", err)
+	}
+	return dl
 }
 
 func makeQuery(name string, qtype uint16) *dns.Msg {
@@ -257,7 +276,7 @@ func TestHandleQuery_AllUpstreamsFail(t *testing.T) {
 	}
 	c := cache.New(100, 3600, 5, 0)
 	resolver := upstream.NewResolverFromClients([]upstream.Client{errClient}, 1*time.Second, 50*time.Millisecond, logger)
-	handler := NewHandler(resolver, nil, c, logger, cfg)
+	handler := NewHandler(resolver, nil, nil, c, logger, cfg)
 
 	resp := handler.HandleQuery(context.Background(), query)
 	if resp.Rcode != dns.RcodeServerFailure {
@@ -284,7 +303,7 @@ func TestHandleQuery_CacheDisabled(t *testing.T) {
 		&mockUpstreamClient{name: "mock", response: normalResp},
 	}
 	resolver := upstream.NewResolverFromClients(clients, 2*time.Second, 50*time.Millisecond, logger)
-	handler := NewHandler(resolver, nil, c, logger, cfg)
+	handler := NewHandler(resolver, nil, nil, c, logger, cfg)
 
 	resp := handler.HandleQuery(context.Background(), query)
 	if resp == nil || len(resp.Answer) == 0 {
@@ -362,8 +381,9 @@ func TestHandleQuery_WhitelistBypassing(t *testing.T) {
 	cfg.Cache.Enabled = true
 	cfg.Whitelist = config.WhitelistConfig{
 		Enabled: true,
-		Domains: []string{"safe.example.com"},
 	}
+
+	wlList := testDomainList(t, []string{"safe.example.com"})
 
 	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
 	c := cache.New(100, 3600, 5, 0)
@@ -372,9 +392,9 @@ func TestHandleQuery_WhitelistBypassing(t *testing.T) {
 	blockClient := &mockUpstreamClient{name: "blocker", response: makeBlockedResp(query)}
 	resolver := upstream.NewResolverFromClients([]upstream.Client{blockClient}, 2*time.Second, 50*time.Millisecond, logger)
 
-	wlRes := upstream.NewWhitelistResolverFromClient(wlClient, &cfg.Whitelist)
+	wlRes := upstream.NewWhitelistResolverFromClient(wlClient, &cfg.Whitelist, wlList)
 
-	handler := NewHandler(resolver, wlRes, c, logger, cfg)
+	handler := NewHandler(resolver, wlRes, nil, c, logger, cfg)
 	resp := handler.HandleQuery(context.Background(), query)
 
 	if resp == nil || len(resp.Answer) == 0 {
@@ -454,8 +474,9 @@ func TestHandleQuery_NonWhitelistedGoesNormal(t *testing.T) {
 
 	wlCfg := config.WhitelistConfig{
 		Enabled: true,
-		Domains: []string{"safe.example.com"}, // NOT normal.example.com
 	}
+
+	wlList := testDomainList(t, []string{"safe.example.com"}) // NOT normal.example.com
 
 	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
 	cfg := config.DefaultConfig()
@@ -476,9 +497,9 @@ func TestHandleQuery_NonWhitelistedGoesNormal(t *testing.T) {
 		A:   rdata.A{Addr: netip.MustParseAddr("9.9.9.9")},
 	})
 	wlClient := &mockUpstreamClient{name: "whitelist-resolver", response: wlResp}
-	wlRes := upstream.NewWhitelistResolverFromClient(wlClient, &wlCfg)
+	wlRes := upstream.NewWhitelistResolverFromClient(wlClient, &wlCfg, wlList)
 
-	handler := NewHandler(resolver, wlRes, c, logger, cfg)
+	handler := NewHandler(resolver, wlRes, nil, c, logger, cfg)
 	resp := handler.HandleQuery(context.Background(), query)
 
 	if resp == nil || len(resp.Answer) == 0 {
@@ -694,7 +715,7 @@ func TestHandleQuery_AllUpstreamsFail_QuestionPreserved(t *testing.T) {
 	errClient := &mockUpstreamClient{name: "err", err: fmt.Errorf("network error")}
 	c := cache.New(100, 3600, 5, 0)
 	resolver := upstream.NewResolverFromClients([]upstream.Client{errClient}, 1*time.Second, 50*time.Millisecond, logger)
-	handler := NewHandler(resolver, nil, c, logger, cfg)
+	handler := NewHandler(resolver, nil, nil, c, logger, cfg)
 
 	resp := handler.HandleQuery(context.Background(), query)
 
@@ -793,7 +814,7 @@ func TestDohHandler_SERVFAIL_CacheControlNoStore(t *testing.T) {
 	errClient := &mockUpstreamClient{name: "err", err: fmt.Errorf("connection refused")}
 	c := cache.New(100, 3600, 5, 0)
 	resolver := upstream.NewResolverFromClients([]upstream.Client{errClient}, 1*time.Second, 50*time.Millisecond, logger)
-	handler := NewHandler(resolver, nil, c, logger, cfg)
+	handler := NewHandler(resolver, nil, nil, c, logger, cfg)
 
 	if err := query.Pack(); err != nil {
 		t.Fatalf("pack query: %v", err)
@@ -1079,7 +1100,7 @@ func TestHandleQuery_MixedIPv4IPv6(t *testing.T) {
 
 	clientA := &mockUpstreamClient{name: "mock-a", response: respA}
 	resolverA := upstream.NewResolverFromClients([]upstream.Client{clientA}, 2*time.Second, 50*time.Millisecond, logger)
-	handlerA := NewHandler(resolverA, nil, c, logger, cfg)
+	handlerA := NewHandler(resolverA, nil, nil, c, logger, cfg)
 
 	// Resolve A query and cache it.
 	rA := handlerA.HandleQuery(context.Background(), queryA)
@@ -1093,7 +1114,7 @@ func TestHandleQuery_MixedIPv4IPv6(t *testing.T) {
 	// Cache A but not AAAA; AAAA query should go upstream.
 	clientAAAA := &mockUpstreamClient{name: "mock-aaaa", response: respAAAA}
 	resolverAAAA := upstream.NewResolverFromClients([]upstream.Client{clientAAAA}, 2*time.Second, 50*time.Millisecond, logger)
-	handlerAAAA := NewHandler(resolverAAAA, nil, c, logger, cfg)
+	handlerAAAA := NewHandler(resolverAAAA, nil, nil, c, logger, cfg)
 
 	rAAAA := handlerAAAA.HandleQuery(context.Background(), queryAAAA)
 	if rAAAA == nil || len(rAAAA.Answer) == 0 {
@@ -1146,7 +1167,7 @@ func TestHandleQuery_FinalResultLogged_SERVFAIL(t *testing.T) {
 	errClient := &mockUpstreamClient{name: "err", err: fmt.Errorf("connection refused")}
 	c := cache.New(100, 3600, 5, 0)
 	resolver := upstream.NewResolverFromClients([]upstream.Client{errClient}, 1*time.Second, 50*time.Millisecond, logger)
-	handler := NewHandler(resolver, nil, c, logger, cfg)
+	handler := NewHandler(resolver, nil, nil, c, logger, cfg)
 
 	handler.HandleQuery(context.Background(), query)
 
@@ -1224,7 +1245,7 @@ func TestHandleQuery_QR_BitAlwaysSet(t *testing.T) {
 			cfg.Cache.Enabled = false
 			c := cache.New(100, 3600, 5, 0)
 			resolver := upstream.NewResolverFromClients([]upstream.Client{tt.upstream}, 1*time.Second, 50*time.Millisecond, logger)
-			handler := NewHandler(resolver, nil, c, logger, cfg)
+			handler := NewHandler(resolver, nil, nil, c, logger, cfg)
 			q := makeQuery("qr.example.com", dns.TypeA)
 			resp := handler.HandleQuery(context.Background(), q)
 			if !resp.Response {
@@ -1767,7 +1788,8 @@ func TestHandleQuery_WhitelistResolverError_ReturnsSERVFAIL(t *testing.T) {
 	cfg.Cache.Enabled = true
 	cfg.Cache.MaxEntries = 100
 	cfg.Whitelist.Enabled = true
-	cfg.Whitelist.Domains = []string{"whitelisted.example.com"}
+
+	wlList := testDomainList(t, []string{"whitelisted.example.com"})
 
 	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
 	c := cache.New(100, 3600, 5, 0)
@@ -1784,9 +1806,9 @@ func TestHandleQuery_WhitelistResolverError_ReturnsSERVFAIL(t *testing.T) {
 		name: "wl-fail",
 		err:  fmt.Errorf("whitelist upstream unavailable"),
 	}
-	wlResolver := upstream.NewWhitelistResolverFromClient(wlClient, &cfg.Whitelist)
+	wlResolver := upstream.NewWhitelistResolverFromClient(wlClient, &cfg.Whitelist, wlList)
 
-	handler := NewHandler(resolver, wlResolver, c, logger, cfg)
+	handler := NewHandler(resolver, wlResolver, nil, c, logger, cfg)
 
 	query := makeQuery("whitelisted.example.com", dns.TypeA)
 	resp := handler.HandleQuery(context.Background(), query)

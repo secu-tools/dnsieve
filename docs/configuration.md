@@ -495,52 +495,158 @@ The whitelist is **disabled by default**.
 ```toml
 [whitelist]
 enabled = false
-domains = ["example.com", "*.internal.local"]
+list_files = ["/etc/dnsieve/whitelist.txt", "/etc/dnsieve/lists/wl-*.txt"]
+list_ttl = 300
 resolver_address = "https://1.1.1.1/dns-query"
 resolver_protocol = "doh"
 ```
+
+### List Files
+
+Domain lists are loaded from external files specified via `list_files`.
+Each entry is a file path or **glob pattern**. A glob is a filename
+pattern where `*` matches any sequence of characters, so
+`/etc/dnsieve/lists/whitelist-*.txt` matches `whitelist-work.txt`,
+`whitelist-home.txt`, and so on:
+
+```toml
+list_files = [
+  "/etc/dnsieve/whitelist.txt",          # single file
+  "/etc/dnsieve/lists/whitelist-*.txt",  # glob: matches whitelist-work.txt, whitelist-home.txt, etc.
+]
+```
+
+**Windows path example:** On Windows, paths in `list_files` require either
+forward slashes or escaped backslashes:
+
+```toml
+list_files = [
+  "C:/dnsieve/lists/blocklist.txt",
+  "C:\\dnsieve\\lists\\blocklist.txt",  # double backslash in TOML string
+]
+```
+
+**File format:** DNSieve accepts four formats in the same file. Empty lines
+and lines starting with `#` or `!` are treated as comments. Lines starting
+with `[` (Adblock format headers such as `[Adblock Plus]`) and Adblock
+exception rules starting with `@@` are silently skipped. Trailing dots are
+stripped. Entries are case-insensitive.
+
+| Format | Example line | Behaviour |
+|--------|-------------|----------|
+| **Plain domain** | `example.com` | Exact match only -- subdomains are NOT matched |
+| **Wildcard domain** | `*.example.com` | Matches `example.com` AND all subdomains |
+| **Hosts-file** | `0.0.0.0 example.com` | Exact match; IP address prefix (`0.0.0.0`, `127.0.0.1`, `::1`, `::`) is ignored |
+| **Adblock/uBlock double-pipe** | `\|\|example.com^` | Matches `example.com` AND all subdomains (same as `*.example.com`) |
+
+Adblock exception rules (`@@\|\|...`) and format headers (`[Adblock Plus]`)
+are silently skipped and are not counted as invalid lines. Adblock rules
+with a URL path (`\|\|domain.com/path^`) are counted as invalid because DNS
+filtering cannot target sub-paths.
+
+```text
+# My list (all four formats are supported in the same file)
+example.com
+*.internal.local
+0.0.0.0 ads.tracker.net
+||google-analytics.com^
+```
+
+### Hot Reload
+
+When `list_ttl` is set to a positive value (in seconds), DNSieve
+periodically checks all list files for changes and reloads them
+atomically without downtime:
+
+```toml
+list_ttl = 300  # check every 5 minutes; 0 = no auto-reload
+```
+
+Reload is atomic: DNS queries always see either the old or the new
+complete set -- never a partial load.
+
+#### How hot reload works
+
+Every `list_ttl` seconds a background goroutine wakes up and:
+
+1. **Checks for changes** by calling `os.Stat` on each file and comparing
+   modification time and size against the last-known values. It also
+   re-expands glob patterns to detect added or removed files. If nothing
+   changed, no reload occurs (a debug log entry is written).
+
+2. **Builds the new set** entirely in private memory -- the running server
+   is not touched yet. All files are read into new Go maps. No compilation
+   occurs; this is pure runtime file I/O.
+
+3. **Swaps atomically** via a single `atomic.Pointer.Store()`. DNS query
+   goroutines read the pointer with `atomic.Load()`, which is non-blocking.
+   They see the old set or the new set -- never a mix of both.
+
+4. **Releases the old set** for garbage collection. No explicit cleanup is
+   needed.
+
+#### Behaviour in edge cases
+
+| Situation | What happens |
+|-----------|-------------|
+| No file changes detected | Skip reload; debug log only |
+| A file is **modified** | Reload triggered |
+| A new file **appears** matching a glob | Reload triggered |
+| A file is **deleted** | Reload triggered; the deleted file is excluded and the remaining files are loaded normally - no error, no interruption |
+| An **unrecognised line** in a file | Line is skipped; if any lines were skipped a warning is logged with the count after each load or reload; with `log_level = "debug"` each invalid line is logged individually |
+| A file **fails to read** (permissions, I/O error) | Reload aborted; previous list kept; warning logged |
+| Reload takes a long time | DNS queries are **never blocked** -- they read the old set from the atomic pointer until the swap completes |
+| New list is very large and causes OOM | The Go runtime panics and the process crashes; there is no guard against this -- keep list sizes reasonable (see the 100,000-domain warning threshold) |
 
 ### Domain Matching
 
 Domains support two matching modes based on the entry format:
 
-```toml
-# Exact match only
-domains = ["example.com"]
-# matches: example.com
-# does NOT match: sub.example.com
+```text
+# Exact match only -- subdomains NOT matched
+example.com
 
-# Wildcard match (prefix with *)
-domains = ["*.example.com"]
-# matches: sub.example.com, deep.sub.example.com, example.com
+# Wildcard match -- matches apex and all subdomains
+*.example.com
+||example.com^             # Adblock/uBlock double-pipe: equivalent wildcard
 
 # TLD wildcard
-domains = ["*.cn"]
-# matches: all .cn domains
+*.fr
+# matches: all .fr domains
 
 # Global wildcard (disables blocking entirely -- use with caution)
-domains = ["*"]
+*
 ```
+
+**Hierarchical deduplication** is applied automatically after loading all
+files. A broader wildcard supersedes any narrower entry at any depth:
+
+```text
+# All of these reduce to just *.example.com:
+*.example.com
+example.com              # covered: *.example.com matches apex
+test.example.com         # covered: subdomain of example.com
+*.sub.example.com        # covered: narrower wildcard
+deep.sub.example.com     # covered: deep subdomain
+```
+
+This deduplication happens regardless of the order entries appear in the
+file or across multiple files. The final domain count and dedup count are
+logged at startup and on each reload.
 
 ### Internationalized Domain Names (IDN)
 
 Whitelist entries support internationalized domain names. You may write
 entries either in ACE/Punycode form (the `xn--` encoded representation used
 in DNS wire messages) or in their native Unicode form as UTF-8 text in the
-TOML file. DNSieve normalises Unicode entries to ACE form internally
+list file. DNSieve normalises Unicode entries to ACE form internally
 (RFC 5891 / IDNA 2008) before comparing them to incoming query names, so
 both representations match identically.
 
-```toml
-[whitelist]
-enabled = true
-# These two entries are equivalent and will both match the same DNS queries:
-domains = [
-  # ACE/Punycode form (xn-- prefix) -- always safe to use
-  "xn--bcher-kva.example.com",
-  # Unicode form in UTF-8 -- normalised to ACE automatically by DNSieve
-  # (the entry above and this one match the same queries)
-]
+```text
+# These two entries are equivalent:
+xn--bcher-kva.example.com
+bücher.example.com
 ```
 
 ACE-encoded domain names (labels starting with `xn--`) are ordinary ASCII
@@ -562,6 +668,41 @@ resolver_protocol = "doh"
 # resolver_address = "1.1.1.1:53"
 # resolver_protocol = "udp"
 ```
+
+## Blacklist
+
+The blacklist blocks specific domains locally without querying upstream
+servers. Blocked domains return the same response as upstream-detected blocks
+(configured via `[blocking]`). Blacklist has higher priority than the cache
+and upstream resolvers.
+
+The blacklist is **disabled by default**.
+
+> **Note:** Large-scale DNS blocking is not the primary purpose of DNSieve.
+> The blacklist is provided for cases where you need to block specific
+> domains not covered by upstream filtering.
+
+```toml
+[blacklist]
+enabled = false
+list_files = ["/etc/dnsieve/blacklist.txt"]
+list_ttl = 300
+```
+
+The `list_files` and `list_ttl` options work identically to the whitelist
+(see above). The file format, domain matching, glob patterns, hot reload,
+and IDN support are all the same.
+
+### Query Processing Order
+
+When both whitelist and blacklist are enabled, queries are processed in
+this order:
+
+1. **DDR** (Discovery of Designated Resolvers) -- handled first
+2. **Blacklist** -- if matched, return blocked response immediately
+3. **Whitelist** -- if matched, resolve through whitelist resolver
+4. **Cache** -- return cached response if available
+5. **Upstream** -- query all configured upstream servers
 
 
 ## Privacy (EDNS0 Options)
@@ -649,29 +790,99 @@ Both single-dash (`-cfgfile`) and double-dash (`--cfgfile`) are accepted.
 
 ## Validation
 
-On startup, DNSieve validates the config and reports warnings and errors:
+On startup, DNSieve validates the config and reports warnings and errors.
 
 **Errors (prevent startup):**
-- Missing upstream servers
-- No listeners enabled
-- Empty `listen_addresses` for any enabled listener
-- DoT/DoH without TLS certificate
-- Unsupported upstream protocol
-- Empty upstream address
-- Invalid `blocking.mode` (must be null, nxdomain, nodata, or refused)
-- `cache renew_percent` out of range (must be 0-99)
-- `cache max_entries`, `blocked_ttl`, or `min_ttl` negative
-- `logging log_level` not one of debug/info/warn/error
-- `logging log_max_size_mb` negative
-- Downstream listener port > 65535
 
-**Warnings (logged at startup, operation continues):**
-- Disabled certificate verification
-- Very low timeouts (< 100ms)
-- `min_wait_ms` >= `timeout_ms` (block consensus may not work)
-- More than 3 upstream servers
-- Plain DNS upstream (unencrypted)
-- DoH running over plain HTTP without TLS
-- Whitelist with `*` global wildcard
-- Negative `slow_upstream_ms` (treated as 0/disabled)
-- `blocking.mode = "refused"` (clients may fall back to another resolver)
+Upstreams:
+- No `[[upstream]]` entries configured
+- `upstream[N].address` is empty
+- `upstream[N].protocol` not one of `doh`, `dot`, `udp`
+- `upstream_settings.bootstrap_ip_family` not one of `auto`, `ipv4`, `ipv6`
+- `upstream_settings.upstream_ttl` < −1 (must be −1, 0, or a positive integer)
+- `upstream_settings.upstream_ttl` > 2,147,483,647
+
+Listeners:
+- No downstream listeners enabled (plain, dot, and doh are all `enabled = false`)
+- `downstream.plain.listen_addresses` empty when plain listener is enabled
+- `downstream.dot.listen_addresses` empty when DoT is enabled
+- `downstream.doh.listen_addresses` empty when DoH is enabled
+- `downstream.*.port` > 65535
+
+TLS:
+- DoT enabled but no TLS certificate configured (`cert_file`/`key_file` or `cert_base64`/`key_base64`)
+- DoH (HTTPS mode) enabled but no TLS certificate configured
+
+Cache:
+- `cache.renew_percent` < 0 or > 99
+- `cache.max_entries`, `cache.blocked_ttl`, or `cache.min_ttl` < 0
+
+Logging:
+- `logging.log_level` not one of `debug`, `info`, `warn`, `error`
+- `logging.log_max_size_mb` < 0
+
+Blocking:
+- `blocking.mode` not one of `null`, `nxdomain`, `nodata`, `refused`
+
+Privacy:
+- `privacy.ecs.mode` not one of `strip`, `forward`, `substitute`
+- `privacy.ecs.mode = "substitute"` but `privacy.ecs.subnet` is not set
+- `privacy.cookies.mode` not one of `strip`, `reoriginate`
+- `privacy.nsid.mode` not one of `strip`, `forward`, `substitute`
+- `tcp_keepalive.client_timeout_sec` or `tcp_keepalive.upstream_timeout_sec` < 0
+
+Whitelist:
+- `whitelist.resolver_protocol` not one of `doh`, `dot`, `udp`
+
+---
+
+**Warnings (startup proceeds, logged to stderr):**
+
+Upstreams:
+- Any upstream has `verify_certificates = false`
+- Global `upstream_settings.verify_certificates = false`
+- `upstream_settings.timeout_ms` < 100 ms
+- `upstream_settings.min_wait_ms` ≥ `timeout_ms` (block consensus may not function correctly)
+- More than 3 upstream servers configured
+- Any upstream uses `protocol = "udp"` (plain DNS, unencrypted)
+
+Listeners:
+- DoH listener running in plain HTTP mode (`use_plaintext_http = true`)
+
+Blocking:
+- `blocking.mode = "refused"` (some clients may fall back to another resolver)
+
+Logging:
+- `logging.slow_upstream_ms` is negative (treated as 0, disabled)
+
+Privacy:
+- `privacy.ecs.mode = "forward"` (sends client IP subnet to upstreams, reduces privacy)
+- `privacy.nsid.mode = "substitute"` but no `value` configured (returns empty NSID)
+
+Whitelist / Blacklist:
+- Whitelist or blacklist enabled but `list_files` is not configured
+- `whitelist.list_ttl` or `blacklist.list_ttl` is negative (treated as 0, auto-reload disabled)
+
+---
+
+**Runtime warnings (logged after startup, during domain list loading):**
+
+These occur after config validation passes, as the server loads list files into memory:
+- A glob pattern in `list_files` matches no files -- warning logged, that entry is skipped
+- A list file fails to open or read -- warning logged, that file is skipped
+- All `list_files` loaded but no valid domain entries found -- warning logged
+- A line that is not a comment, not blank, not an Adblock format header (`[Adblock Plus]`), not an exception rule (`@@||`), and not a valid plain/hosts/Adblock domain entry is counted as invalid. A warning is logged with the total invalid count after each load or reload. With `log_level = "debug"`, each invalid line is logged individually with its line number and content.
+- Total loaded domain count exceeds 100,000 -- warning logged (large lists are not officially supported)
+
+**Deduplication** is applied automatically during loading:
+- `*.foo.com` covers `foo.com` (apex) and all subdomains, so any exact entry for `foo.com`, or for any subdomain like `sub.foo.com`, is removed as redundant.
+- A narrower wildcard like `*.sub.foo.com` is removed when a broader wildcard like `*.foo.com` is present.
+- Deduplication runs hierarchically and is order-independent: it does not matter whether the broader wildcard appears before or after narrower entries in the file, or whether entries come from different files.
+- The loaded domain count and any dedup/invalid counts are reported in the startup log:
+  `Blacklist: loaded 42 domains (3 dedup), 1 invalid from list files`
+
+---
+
+**Notes - not validated at startup:**
+
+- `whitelist.resolver_address` is not checked at startup. An invalid or unreachable address does not prevent startup. Queries for whitelisted domains will return SERVFAIL; the error is logged per query.

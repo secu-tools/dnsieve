@@ -2,7 +2,7 @@
 
 **Q: How is DNSieve different from Pi-hole or AdGuard Home?**
 
-Pi-hole and AdGuard Home maintain local block lists that must be downloaded, stored, and periodically refreshed. DNSieve carries no lists of its own -- it delegates to upstream resolvers (such as Quad9 or Cloudflare for Families) that perform threat-intelligence filtering on their end. This means there is no list management overhead. The trade-off is that DNSieve's blocking scope is exactly as broad (or narrow) as your chosen upstream providers.
+Pi-hole and AdGuard Home maintain local block lists that must be downloaded, stored, and periodically refreshed. DNSieve relies primarily on upstream resolvers (such as Quad9 or Cloudflare for Families) that perform threat-intelligence filtering on their end, so there is no list management overhead by default. For cases where upstream filtering does not cover specific domains, DNSieve also supports an optional local blacklist -- it is disabled by default and entirely opt-in. The trade-off is that DNSieve's blocking scope is primarily as broad (or narrow) as your chosen upstream providers, extended only by what you explicitly add to the local blacklist.
 
 **Q: Can I use DNSieve together with Pi-hole?**
 
@@ -127,18 +127,38 @@ handles TLS termination.
 
 **Q: Can I whitelist a domain so it is never blocked?**
 
-Yes, using the `[whitelist]` config section. Enable it, list the domains (exact
-matches or wildcard patterns such as `*.example.com`), and set a non-blocking
-resolver for whitelist lookups. Whitelisted domains completely bypass the blocking
-upstreams.
+Yes, using the `[whitelist]` config section. Enable it, point `list_files` at
+one or more plain-text files containing domains (one per line), and set a
+non-blocking resolver for whitelist lookups. Whitelisted domains completely
+bypass the blocking upstreams.
 
-**Q: Does the whitelist support wildcards?**
+```toml
+[whitelist]
+enabled = true
+list_files = ["/etc/dnsieve/whitelist.txt"]
+resolver_address = "https://1.1.1.1/dns-query"
+resolver_protocol = "doh"
+```
 
-Yes:
-- `"example.com"` -- exact match only
-- `"*.example.com"` -- all subdomains (and `example.com` itself)
-- `"*.cn"` -- every `.cn` domain
-- `"*"` -- everything (effectively disables blocking)
+**Q: Can I blacklist (locally block) domains without relying on upstream filtering?**
+
+Yes, using the `[blacklist]` config section. Blacklisted domains are blocked
+locally before any cache or upstream lookup, returning the same blocked
+response as upstream-detected blocks (configured via `[blocking]`).
+
+```toml
+[blacklist]
+enabled = true
+list_files = ["/etc/dnsieve/blacklist.txt"]
+```
+
+**Q: Does the whitelist/blacklist support wildcards?**
+
+Yes -- entries in list files use the same format:
+- `example.com` -- exact match only
+- `*.example.com` -- all subdomains (and `example.com` itself)
+- `*.fr` -- every `.fr` domain
+- `*` -- everything (whitelist: effectively bypasses all blocking)
 
 **Q: How does the cache background refresh work?**
 
@@ -196,7 +216,7 @@ Run the built-in speed test:
 ```bash
 ./dnsieve --speed
 # Or test with specific domains:
-./dnsieve --speed google.com,github.com,example.org
+./dnsieve --speed example.com,example.net,example.org
 ```
 
 Results show average, min, and max latency per upstream so you can pick the

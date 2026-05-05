@@ -110,7 +110,7 @@ func TestE2E_EDNS_Cookies_Reoriginate(t *testing.T) {
 	if resp1.Rcode != dns.RcodeSuccess {
 		t.Fatalf("cookies reoriginate q1: rcode=%s", dns.RcodeToString[resp1.Rcode])
 	}
-	resp2 := queryUDP(t, port, "cloudflare.com", dns.TypeA)
+	resp2 := queryUDP(t, port, "example.net", dns.TypeA)
 	if resp2.Rcode != dns.RcodeSuccess {
 		t.Fatalf("cookies reoriginate q2: rcode=%s", dns.RcodeToString[resp2.Rcode])
 	}

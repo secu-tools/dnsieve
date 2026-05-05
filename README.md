@@ -14,20 +14,22 @@ DNS filtering proxy that queries multiple upstream DNS servers concurrently
 and enforces block-consensus: if **any** upstream signals a domain is
 blocked, the blocked response is returned to the client.
 
-DNSieve carries no local block lists of its own. Instead of downloading and
-maintaining lists of known-bad domains (as Pi-hole or AdGuard Home do),
-DNSieve acts as an intelligent proxy that fans out each DNS query to multiple
-upstream resolvers -- such as Quad9, Cloudflare for Families, or Control D --
-that already perform threat-intelligence filtering on their end. DNSieve then
-enforces the strictest outcome: if any upstream signals a domain is blocked,
-DNSieve returns a blocked response to the client. This means there are no
-lists to download, store, deduplicate, or refresh -- protection is always as
-current as the upstream providers. Combining multiple providers gives
-complementary coverage across malware, phishing, and newly registered domains
-without managing separate subscriptions. The trade-off is that querying all
-upstreams concurrently introduces a small amount of latency compared to a
-single-server setup; for best results, use fast upstream servers and keep the
-count to 2-3.
+DNSieve relies primarily on upstream filtering rather than maintaining local
+block lists. Instead of downloading and maintaining lists of known-bad domains
+(as Pi-hole or AdGuard Home do), DNSieve acts as an intelligent proxy that fans
+out each DNS query to multiple upstream resolvers -- such as Quad9, Cloudflare
+for Families, or Control D -- that already perform threat-intelligence filtering
+on their end. DNSieve then enforces the strictest outcome: if any upstream
+signals a domain is blocked, DNSieve returns a blocked response to the client.
+This means there are no lists to download, store, deduplicate, or refresh --
+protection is always as current as the upstream providers. Combining multiple
+providers gives complementary coverage across malware, phishing, and newly
+registered domains without managing separate subscriptions. For cases where you
+want to block specific domains not covered by upstream filtering, an optional
+local blacklist is also available -- it is disabled by default and entirely
+opt-in. The trade-off is that querying all upstreams concurrently introduces a
+small amount of latency compared to a single-server setup; for best results, use
+fast upstream servers and keep the count to 2-3.
 
 > **Development Status**
 >
@@ -68,7 +70,7 @@ The app communicates only with the IPs and domains you explicitly configure in t
   for both upstream and downstream
 - **LRU caching** with upstream TTL respect, background refresh for
   nearly-expired entries, and configurable minimum TTL
-- **Domain whitelist** with wildcard support (`*.example.com`)
+- **Domain whitelist and blacklist** with file-based lists, glob patterns, and wildcard support (`*.example.com`); hot-reload without restarts
 - **Bootstrap DNS** for resolving DoH/DoT hostnames without system DNS
 - **Speed testing** via `--speed` flag
 - **Service management** via `--install` / `--uninstall` for Windows,

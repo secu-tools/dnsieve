@@ -19,7 +19,7 @@ import (
 // TestRFC7871_ECS_PresentInResponse tests that ECS-capable servers include
 // SUBNET in their response when we send an ECS query.
 func TestRFC7871_ECS_PresentInResponse(t *testing.T) {
-	query := makeQuery("www.google.com.", dns.TypeA)
+	query := makeQuery("example.com.", dns.TypeA)
 	query.UDPSize = 4096
 
 	// Add ECS option with /24 prefix

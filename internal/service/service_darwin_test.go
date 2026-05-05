@@ -44,7 +44,7 @@ func TestFindDNSieveServicesDarwin_MatchingPlists(t *testing.T) {
 		}
 	}
 
-	// A directory entry whose name looks like a plist — must be skipped.
+	// A directory entry whose name looks like a plist - must be skipped.
 	if err := os.MkdirAll(filepath.Join(dir, "com.dnsieve.subdir.plist"), 0750); err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestFindDNSieveServicesDarwin_NonExistentDir(t *testing.T) {
 
 func TestFindDNSieveServicesDarwin_OnlySubdirs(t *testing.T) {
 	dir := t.TempDir()
-	// Only subdirectories — none should be returned.
+	// Only subdirectories - none should be returned.
 	if err := os.MkdirAll(filepath.Join(dir, "com.dnsieve.dnsieve.plist"), 0750); err != nil {
 		t.Fatal(err)
 	}

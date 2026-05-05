@@ -46,7 +46,7 @@ func TestRFC3597_UnknownQType_TCP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
-	query := makeQuery("cloudflare.com.", qtypeUnknownRFC3597)
+	query := makeQuery("example.com.", qtypeUnknownRFC3597)
 	resp, _, err := new(dns.Client).Exchange(ctx, query, "tcp", "8.8.8.8:53")
 	if err != nil {
 		t.Fatalf("RFC 3597 TCP unknown type query failed: %v", err)

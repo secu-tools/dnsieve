@@ -72,7 +72,7 @@ func startTestServer(t *testing.T, cfg *config.Config) (int, context.CancelFunc)
 			cfgCopy.Cache.RenewPercent,
 		)
 
-		handler := server.NewHandler(resolver, nil, c, logger, &cfgCopy)
+		handler := server.NewHandler(resolver, nil, nil, c, logger, &cfgCopy)
 
 		ctx, cancel := context.WithCancel(context.Background())
 

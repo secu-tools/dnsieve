@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/secu-tools/dnsieve/internal/config"
 	"github.com/secu-tools/dnsieve/internal/dnsmsg"
+	"github.com/secu-tools/dnsieve/internal/domainlist"
 	"github.com/secu-tools/dnsieve/internal/logging"
 )
 
@@ -496,9 +499,9 @@ func TestHasNXDomainDisagreement(t *testing.T) {
 func TestWhitelistResolver_IsWhitelisted(t *testing.T) {
 	cfg := &config.WhitelistConfig{
 		Enabled: true,
-		Domains: []string{"example.com", "safe.net"},
 	}
-	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "wl"}}
+	list := makeTestDomainList(t, []string{"example.com", "safe.net"})
+	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "wl"}, list: list}
 
 	tests := []struct {
 		qname    string
@@ -525,9 +528,9 @@ func TestWhitelistResolver_IsWhitelisted(t *testing.T) {
 func TestWhitelistResolver_IsWhitelisted_Wildcard(t *testing.T) {
 	cfg := &config.WhitelistConfig{
 		Enabled: true,
-		Domains: []string{"*.example.com"},
 	}
-	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "wl"}}
+	list := makeTestDomainList(t, []string{"*.example.com"})
+	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "wl"}, list: list}
 
 	tests := []struct {
 		qname    string
@@ -563,9 +566,9 @@ func TestWhitelistResolver_Query(t *testing.T) {
 
 	cfg := &config.WhitelistConfig{
 		Enabled: true,
-		Domains: []string{"safe.example.com"},
 	}
-	wl := NewWhitelistResolverFromClient(&mockClient{name: "wl", response: expectedResp}, cfg)
+	list := makeTestDomainList(t, []string{"safe.example.com"})
+	wl := NewWhitelistResolverFromClient(&mockClient{name: "wl", response: expectedResp}, cfg, list)
 
 	resp, err := wl.Query(context.Background(), query)
 	if err != nil {
@@ -580,9 +583,9 @@ func TestWhitelistResolver_Query_Error(t *testing.T) {
 	query := makeQuery("safe.example.com", dns.TypeA)
 	cfg := &config.WhitelistConfig{
 		Enabled: true,
-		Domains: []string{"safe.example.com"},
 	}
-	wl := NewWhitelistResolverFromClient(&mockClient{name: "wl-err", err: fmt.Errorf("connection refused")}, cfg)
+	list := makeTestDomainList(t, []string{"safe.example.com"})
+	wl := NewWhitelistResolverFromClient(&mockClient{name: "wl-err", err: fmt.Errorf("connection refused")}, cfg, list)
 
 	resp, err := wl.Query(context.Background(), query)
 	if err == nil {
@@ -591,6 +594,22 @@ func TestWhitelistResolver_Query_Error(t *testing.T) {
 	if resp != nil {
 		t.Error("expected nil response on error")
 	}
+}
+
+// makeTestDomainList creates a DomainList from entries for testing.
+func makeTestDomainList(t *testing.T, entries []string) *domainlist.DomainList {
+	t.Helper()
+	dir := t.TempDir()
+	content := strings.Join(entries, "\n") + "\n"
+	path := filepath.Join(dir, "test.list")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write test list: %v", err)
+	}
+	dl := domainlist.NewDomainList("test", []string{path})
+	if _, _, _, err := dl.Load(nil); err != nil {
+		t.Fatalf("load test list: %v", err)
+	}
+	return dl
 }
 
 func TestResolve_EmptyClients(t *testing.T) {
@@ -612,9 +631,9 @@ func TestResolve_EmptyClients(t *testing.T) {
 func TestWhitelistResolver_Disabled(t *testing.T) {
 	cfg := &config.WhitelistConfig{
 		Enabled: false,
-		Domains: []string{"example.com"},
 	}
-	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "wl"}}
+	list := makeTestDomainList(t, []string{"example.com"})
+	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "wl"}, list: list}
 	if wl.IsWhitelisted("example.com") {
 		t.Error("disabled whitelist should always return false")
 	}
@@ -1241,73 +1260,15 @@ func TestResolve_IDN_ACELabel_NXDOMAIN(t *testing.T) {
 	}
 }
 
-// TestToACEDomain_ASCII verifies that a plain ASCII domain is returned
-// unchanged by toACEDomain.
-func TestToACEDomain_ASCII(t *testing.T) {
-	input := "example.com"
-	got := toACEDomain(input)
-	if got != input {
-		t.Errorf("toACEDomain(%q) = %q, want %q (ASCII domain should be unchanged)", input, got, input)
-	}
-}
-
-// TestToACEDomain_AlreadyACE verifies that a domain that already uses xn--
-// Punycode encoding is returned unchanged.
-func TestToACEDomain_AlreadyACE(t *testing.T) {
-	input := "xn--n3h.example.com"
-	got := toACEDomain(input)
-	if got != input {
-		t.Errorf("toACEDomain(%q) = %q, want %q (already-ACE domain should be unchanged)", input, got, input)
-	}
-}
-
-// TestToACEDomain_TrailingDot verifies that a trailing FQDN dot does not
-// cause conversion to fail; the result should equal the domain without the dot.
-func TestToACEDomain_TrailingDot(t *testing.T) {
-	got := toACEDomain("example.com.")
-	if got != "example.com" {
-		t.Errorf("toACEDomain(\"example.com.\") = %q, want %q", got, "example.com")
-	}
-}
-
-// TestToACEDomain_IDNEncoding verifies that a domain label containing a
-// non-ASCII Unicode character (encoded here as a Go escape sequence so the
-// source file remains ASCII) is converted to its ACE/Punycode equivalent.
-// The label used is "b\u00fccher" (the character at U+00FC is an umlaut-u),
-// a common IDNA documentation example.  The test only requires that the
-// output starts with "xn--" and differs from the input, not the exact bytes.
-func TestToACEDomain_IDNEncoding(t *testing.T) {
-	unicodeDomain := "b\u00fccher.example.com" // umlaut-u in the first label
-	got := toACEDomain(unicodeDomain)
-	if got == unicodeDomain {
-		t.Fatalf("toACEDomain(%q): expected ACE encoding but got input unchanged", unicodeDomain)
-	}
-	if !strings.HasPrefix(got, "xn--") {
-		t.Errorf("toACEDomain(%q) = %q: first label should start with xn--", unicodeDomain, got)
-	}
-}
-
-// TestToACEDomain_Idempotent verifies that applying toACEDomain twice yields
-// the same result as applying it once (idempotency of ACE encoding).
-func TestToACEDomain_Idempotent(t *testing.T) {
-	unicodeDomain := "b\u00fccher.example.com" // umlaut-u
-	once := toACEDomain(unicodeDomain)
-	twice := toACEDomain(once)
-	if once != twice {
-		t.Errorf("toACEDomain not idempotent: first=%q second=%q", once, twice)
-	}
-}
-
 // TestWhitelistResolver_IsWhitelisted_IDN_ACEForm verifies that whitelist
 // entries already in ACE form (xn-- prefix) match correctly.
 func TestWhitelistResolver_IsWhitelisted_IDN_ACEForm(t *testing.T) {
-	// The whitelist entry and the DNS query name are both already in ACE form.
 	aceEntry := "xn--n3h.example.com"
 	cfg := &config.WhitelistConfig{
 		Enabled: true,
-		Domains: []string{aceEntry},
 	}
-	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "wl"}}
+	list := makeTestDomainList(t, []string{aceEntry})
+	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "wl"}, list: list}
 
 	tests := []struct {
 		qname    string
@@ -1330,67 +1291,45 @@ func TestWhitelistResolver_IsWhitelisted_IDN_ACEForm(t *testing.T) {
 }
 
 // TestWhitelistResolver_IsWhitelisted_IDN_UnicodeEntry verifies that a
-// whitelist entry containing a non-ASCII Unicode label (written here using
-// Go escape sequences so the source file is ASCII-clean) is normalised to ACE
+// whitelist entry containing a non-ASCII Unicode label is normalised to ACE
 // form and matches the corresponding ACE-form DNS wire query name.
 func TestWhitelistResolver_IsWhitelisted_IDN_UnicodeEntry(t *testing.T) {
-	// Unicode entry: the first label contains an umlaut-u (U+00FC).
-	unicodeEntry := "b\u00fccher.example.com"
-	// Compute the ACE form the same way IsWhitelisted does.
-	aceQuery := toACEDomain(strings.ToLower(unicodeEntry))
-	if aceQuery == unicodeEntry {
-		t.Skip("IDN conversion not available in this environment; skipping")
-	}
-
+	unicodeEntry := "bücher.example.com"
 	cfg := &config.WhitelistConfig{
 		Enabled: true,
-		Domains: []string{unicodeEntry},
 	}
-	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "wl"}}
+	list := makeTestDomainList(t, []string{unicodeEntry})
+	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "wl"}, list: list}
 
-	if !wl.IsWhitelisted(aceQuery) {
-		t.Errorf("IsWhitelisted(%q) = false; Unicode entry %q should match its ACE form %q",
-			aceQuery, unicodeEntry, aceQuery)
+	// Query using ACE form (what arrives on the wire)
+	if !wl.IsWhitelisted("xn--bcher-kva.example.com") {
+		t.Error("Unicode entry should match its ACE form query")
 	}
-	// The original Unicode form should NOT be found via a raw Unicode query
-	// (DNS wire never carries raw Unicode; the input is always ACE).
 	if wl.IsWhitelisted("other.example.com") {
-		t.Error("IsWhitelisted(\"other.example.com\") = true; should not match")
+		t.Error("should not match unrelated domain")
 	}
 }
 
 // TestWhitelistResolver_IsWhitelisted_IDN_WildcardUnicode verifies that a
-// wildcard whitelist entry with a Unicode base domain matches the ACE-form
-// DNS query names for both the base domain and its subdomains.
+// wildcard whitelist entry with a Unicode base domain matches ACE queries.
 func TestWhitelistResolver_IsWhitelisted_IDN_WildcardUnicode(t *testing.T) {
-	// Wildcard entry whose base contains an umlaut-u (U+00FC).
-	wildcardEntry := "*.b\u00fccher.example.com"
-	baseAsMeta := "b\u00fccher.example.com"
-	aceBase := toACEDomain(strings.ToLower(baseAsMeta))
-	if aceBase == baseAsMeta {
-		t.Skip("IDN conversion not available in this environment; skipping")
-	}
-
+	wildcardEntry := "*.bücher.example.com"
 	cfg := &config.WhitelistConfig{
 		Enabled: true,
-		Domains: []string{wildcardEntry},
 	}
-	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "wl"}}
+	list := makeTestDomainList(t, []string{wildcardEntry})
+	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "wl"}, list: list}
 
-	aceBaseFqdn := aceBase + "."
-	aceSubFqdn := "sub." + aceBase + "."
-
-	// The base domain itself should match (*.x also matches x per existing logic).
-	if !wl.IsWhitelisted(aceBaseFqdn) {
-		t.Errorf("IsWhitelisted(%q) = false; wildcard entry %q should match base ACE domain", aceBaseFqdn, wildcardEntry)
+	// Base domain should match
+	if !wl.IsWhitelisted("xn--bcher-kva.example.com") {
+		t.Error("wildcard entry should match base ACE domain")
 	}
-	// A subdomain should also match.
-	if !wl.IsWhitelisted(aceSubFqdn) {
-		t.Errorf("IsWhitelisted(%q) = false; wildcard entry %q should match ACE subdomain", aceSubFqdn, wildcardEntry)
+	// Subdomain should match
+	if !wl.IsWhitelisted("sub.xn--bcher-kva.example.com") {
+		t.Error("wildcard entry should match ACE subdomain")
 	}
-	// An unrelated domain must not match.
 	if wl.IsWhitelisted("other.example.com") {
-		t.Error("IsWhitelisted(\"other.example.com\") should not match IDN wildcard entry")
+		t.Error("should not match unrelated domain")
 	}
 }
 

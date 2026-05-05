@@ -23,7 +23,7 @@ func TestE2E_Whitelist_Bypass(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
 	cfg.Whitelist.Enabled = true
-	cfg.Whitelist.Domains = []string{"example.com"}
+	cfg.Whitelist.ListFiles = []string{writeE2EListFile(t, "example.com\n")}
 	cfg.Whitelist.ResolverAddress = "https://cloudflare-dns.com/dns-query"
 	cfg.Whitelist.ResolverProtocol = "doh"
 	cancel := startServer(t, cfg)
@@ -268,8 +268,7 @@ func TestE2E_IDN_Whitelist_ACEEntry(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
 	cfg.Whitelist.Enabled = true
-	// Use an ACE-form entry; the whitelist must match it exactly.
-	cfg.Whitelist.Domains = []string{"xn--n3h.example.com"}
+	cfg.Whitelist.ListFiles = []string{writeE2EListFile(t, "xn--n3h.example.com\n")}
 	cfg.Whitelist.ResolverAddress = "https://1.1.1.1/dns-query"
 	cfg.Whitelist.ResolverProtocol = "doh"
 	cancel := startServer(t, cfg)
@@ -283,18 +282,17 @@ func TestE2E_IDN_Whitelist_ACEEntry(t *testing.T) {
 }
 
 // TestE2E_IDN_Whitelist_UnicodeEntry verifies that a whitelist entry
-// containing a non-ASCII Unicode label (Go escape sequence used here to keep
-// the source file ASCII-clean, U+00FC is the umlaut-u character) is
-// normalised to its ACE/Punycode equivalent and matched against the
-// ACE-form query name that arrives over the wire.
+// containing a Unicode label ("bücher.example.com") is normalised to its
+// ACE/Punycode equivalent and matched against the ACE-form query name that
+// arrives over the wire.
 //
-// Entry:  "b\u00fccher.example.com"  (bücher with umlaut-u)
+// Entry:  "bücher.example.com"
 // Query:  "xn--bcher-kva.example.com" (the corresponding ACE form)
 func TestE2E_IDN_Whitelist_UnicodeEntry(t *testing.T) {
 	port := findFreePort(t)
 	cfg := plainConfig(port)
 	cfg.Whitelist.Enabled = true
-	cfg.Whitelist.Domains = []string{"b\u00fccher.example.com"}
+	cfg.Whitelist.ListFiles = []string{writeE2EListFile(t, "bücher.example.com\n")}
 	cfg.Whitelist.ResolverAddress = "https://1.1.1.1/dns-query"
 	cfg.Whitelist.ResolverProtocol = "doh"
 	cancel := startServer(t, cfg)

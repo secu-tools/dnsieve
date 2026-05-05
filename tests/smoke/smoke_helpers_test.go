@@ -56,38 +56,32 @@ func smokeTempDir(t *testing.T) string {
 // It verifies that BOTH TCP and UDP are bindable on the chosen port, because
 // on Windows some ports are in the OS-reserved/excluded range for UDP even
 // when TCP is free (e.g. Hyper-V, WSL2, Docker reservations).
-// It retries up to 20 times to minimise the TOCTOU race between closing the
-// probe listeners and the binary binding the port.
+//
+// The TCP listener is held open while checking UDP, so both are verified to
+// be simultaneously available. The listeners are closed before returning.
 func findFreePort(t *testing.T) int {
 	t.Helper()
-	for range 20 {
+	for range 150 {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			continue
 		}
 		port := ln.Addr().(*net.TCPAddr).Port
-		ln.Close()
-
 		addr := fmt.Sprintf("127.0.0.1:%d", port)
 
-		// Verify TCP is still free.
-		checkTCP, err := net.Listen("tcp", addr)
-		if err != nil {
-			continue
-		}
-		checkTCP.Close()
-
-		// Verify UDP is also bindable on the same port.
-		// On Windows, UDP and TCP exclusion ranges are tracked independently.
+		// Verify UDP is also bindable on the same port while TCP is still held,
+		// proving both are simultaneously available on this port.
 		checkUDP, err := net.ListenPacket("udp4", addr)
 		if err != nil {
+			ln.Close()
 			continue
 		}
 		checkUDP.Close()
+		ln.Close()
 
 		return port
 	}
-	t.Fatal("find free port: could not find an available port after 20 attempts")
+	t.Fatal("find free port: could not find an available port after 150 attempts")
 	return 0
 }
 

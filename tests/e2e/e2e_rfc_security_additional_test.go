@@ -374,7 +374,7 @@ func TestE2E_RFC4592_WildcardStyleQuery(t *testing.T) {
 	switch resp.Rcode {
 	case dns.RcodeSuccess, dns.RcodeNameError, dns.RcodeServerFailure:
 		// SERVFAIL is acceptable: nip.io may be unreachable or slow even when
-		// example.com/google.com are reachable (different authoritative path).
+	// example.com or example.net are reachable (different authoritative path).
 	default:
 		t.Errorf("RFC 4592 e2e: unexpected rcode=%s", dns.RcodeToString[resp.Rcode])
 	}

@@ -135,8 +135,9 @@ elevated privileges automatically).
 
 ### Legitimate domains are being blocked (false positives)
 
-Block decisions are made by your upstream providers -- DNSieve itself does not
-maintain block lists. False positives are a limitation of the upstream's threat
+Block decisions come from your upstream providers and, optionally, from the
+local blacklist -- DNSieve does not perform its own threat-intelligence analysis.
+False positives caused by upstream providers are a limitation of their threat
 intelligence.
 
 **Options:**

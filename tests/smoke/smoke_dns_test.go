@@ -131,8 +131,8 @@ func TestSmoke_MultipleQueryTypes(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			resp := queryUDP(t, port, "google.com", tc.qtype)
-			t.Logf("%s google.com: rcode=%s answers=%d", tc.name, dns.RcodeToString[resp.Rcode], len(resp.Answer))
+			resp := queryUDP(t, port, "example.com", tc.qtype)
+			t.Logf("%s example.com: rcode=%s answers=%d", tc.name, dns.RcodeToString[resp.Rcode], len(resp.Answer))
 		})
 	}
 }

@@ -437,7 +437,7 @@ func TestE2E_DoT_MultipleQueries(t *testing.T) {
 	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
-	domains := []string{"example.com", "google.com", "cloudflare.com"}
+	domains := []string{"example.com", "example.net", "example.org"}
 	for _, domain := range domains {
 		resp := queryDoT(t, dotPort, domain, dns.TypeA, insecureDoTTLS())
 		if resp.Rcode != dns.RcodeSuccess {

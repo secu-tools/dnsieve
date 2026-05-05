@@ -82,7 +82,7 @@ func FuzzHandleQuery(f *testing.F) {
 		}
 		resolver := upstream.NewResolverFromClients(clients, 2*time.Second, 50*time.Millisecond, logger)
 
-		handler := NewHandler(resolver, nil, c, logger, cfg)
+		handler := NewHandler(resolver, nil, nil, c, logger, cfg)
 
 		// Should not panic
 		resp := handler.HandleQuery(t.Context(), msg)
@@ -131,7 +131,7 @@ func FuzzHandleQueryDomainNames(f *testing.F) {
 			&mockUpstreamClient{name: "fuzz-mock", response: mockResp},
 		}
 		resolver := upstream.NewResolverFromClients(clients, 2*time.Second, 50*time.Millisecond, logger)
-		handler := NewHandler(resolver, nil, c, logger, cfg)
+		handler := NewHandler(resolver, nil, nil, c, logger, cfg)
 
 		resp := handler.HandleQuery(t.Context(), query)
 		if resp == nil {
@@ -190,7 +190,7 @@ func FuzzHandleQueryWithCacheRefresh(f *testing.F) {
 			&mockUpstreamClient{name: "fuzz-refresh-mock", response: mockResp},
 		}
 		resolver := upstream.NewResolverFromClients(clients, 2*time.Second, 50*time.Millisecond, logger)
-		handler := NewHandler(resolver, nil, c, logger, cfg)
+		handler := NewHandler(resolver, nil, nil, c, logger, cfg)
 
 		// First query populates cache
 		resp := handler.HandleQuery(t.Context(), query)
@@ -267,7 +267,7 @@ func FuzzHandleQueryIPv6(f *testing.F) {
 			&mockUpstreamClient{name: "fuzz-ipv6-mock", response: mockResp},
 		}
 		resolver := upstream.NewResolverFromClients(clients, 2*time.Second, 50*time.Millisecond, logger)
-		handler := NewHandler(resolver, nil, c, logger, cfg)
+		handler := NewHandler(resolver, nil, nil, c, logger, cfg)
 
 		resp := handler.HandleQuery(t.Context(), msg)
 		if resp == nil {

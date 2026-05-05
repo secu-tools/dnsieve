@@ -140,16 +140,36 @@ type LoggingConfig struct {
 
 // WhitelistConfig holds settings for the domain whitelist, which bypasses
 // all blocking upstreams and resolves using a dedicated non-blocking resolver.
-// Domains support wildcard syntax:
-//   - "*.example.com" matches all subdomains of example.com
-//   - "example.com" matches only example.com exactly
-//   - "*.cn" matches all .cn domains
-//   - "*" matches everything (effectively disables blocking)
+// Domains are loaded from external list files specified by glob patterns.
+//
+// List file format (one domain per line):
+//   - "example.com"      exact match only (subdomains NOT matched)
+//   - "*.example.com"    matches example.com AND all subdomains
+//   - Lines starting with # or ! are comments
+//   - Hosts-file format auto-detected: "0.0.0.0 domain" or "127.0.0.1 domain"
 type WhitelistConfig struct {
 	Enabled          bool     `toml:"enabled"`
-	Domains          []string `toml:"domains"`
+	ListFiles        []string `toml:"list_files"`
+	ListTTL          int      `toml:"list_ttl"`
 	ResolverAddress  string   `toml:"resolver_address"`
 	ResolverProtocol string   `toml:"resolver_protocol"`
+}
+
+// BlacklistConfig holds settings for the domain blacklist, which blocks
+// domains locally without querying upstream servers. Blocked domains return
+// the same response as upstream-detected blocks (configured via [blocking]).
+//
+// List file format is identical to whitelist (see WhitelistConfig).
+//
+// Note: blacklisting is not the primary purpose of this program. It is
+// provided for cases where you need to block specific domains that are not
+// covered by upstream filtering. Large blocklists are not officially
+// supported; consider a dedicated tool like Pi-hole for comprehensive
+// DNS-level ad blocking.
+type BlacklistConfig struct {
+	Enabled   bool     `toml:"enabled"`
+	ListFiles []string `toml:"list_files"`
+	ListTTL   int      `toml:"list_ttl"`
 }
 
 // PrivacyConfig holds privacy-related settings for EDNS0 option handling.
@@ -237,6 +257,7 @@ type Config struct {
 	Blocking         BlockingConfig     `toml:"blocking"`
 	Logging          LoggingConfig      `toml:"logging"`
 	Whitelist        WhitelistConfig    `toml:"whitelist"`
+	Blacklist        BlacklistConfig    `toml:"blacklist"`
 	Privacy          PrivacyConfig      `toml:"privacy"`
 	TCPKeepalive     TCPKeepaliveConfig `toml:"tcp_keepalive"`
 	DDR              DDRConfig          `toml:"ddr"`
@@ -296,6 +317,9 @@ func DefaultConfig() *Config {
 			Enabled:          false,
 			ResolverAddress:  "https://1.1.1.1/dns-query",
 			ResolverProtocol: "doh",
+		},
+		Blacklist: BlacklistConfig{
+			Enabled: false,
 		},
 		Privacy: PrivacyConfig{
 			ECS: ECSConfig{
@@ -470,8 +494,13 @@ func (c *Config) Validate() (warnings []string, errors []string) {
 	warnings = append(warnings, w...)
 	errors = append(errors, e...)
 
-	w = c.validateWhitelist()
+	w, e = c.validateWhitelist()
 	warnings = append(warnings, w...)
+	errors = append(errors, e...)
+
+	w, e = c.validateBlacklist()
+	warnings = append(warnings, w...)
+	errors = append(errors, e...)
 
 	w, e = c.validateBlocking()
 	warnings = append(warnings, w...)
@@ -626,16 +655,37 @@ func (c *Config) validateTLS() (warnings []string, errors []string) {
 }
 
 // validateWhitelist checks whitelist configuration for potential issues.
-func (c *Config) validateWhitelist() (warnings []string) {
+func (c *Config) validateWhitelist() (warnings []string, errors []string) {
 	if !c.Whitelist.Enabled {
-		return nil
+		return nil, nil
 	}
-	for _, d := range c.Whitelist.Domains {
-		if d == "*" {
-			warnings = append(warnings, "Whitelist contains \"*\" which matches all domains, this effectively disables all blocking")
-		}
+	if len(c.Whitelist.ListFiles) == 0 {
+		warnings = append(warnings, "Whitelist is enabled but list_files is not configured; whitelist will have no effect until list files are specified")
 	}
-	return warnings
+	if c.Whitelist.ListTTL < 0 {
+		warnings = append(warnings, fmt.Sprintf("whitelist.list_ttl=%d is negative, treated as disabled (0)", c.Whitelist.ListTTL))
+	}
+	switch c.Whitelist.ResolverProtocol {
+	case "", "doh", "dot", "udp":
+		// valid (empty defaults to doh)
+	default:
+		errors = append(errors, fmt.Sprintf("whitelist.resolver_protocol=%q is invalid, must be doh, dot, or udp", c.Whitelist.ResolverProtocol))
+	}
+	return warnings, errors
+}
+
+// validateBlacklist checks blacklist configuration for potential issues.
+func (c *Config) validateBlacklist() (warnings []string, errors []string) {
+	if !c.Blacklist.Enabled {
+		return nil, nil
+	}
+	if len(c.Blacklist.ListFiles) == 0 {
+		warnings = append(warnings, "Blacklist is enabled but list_files is not configured; blacklist will have no effect until list files are specified")
+	}
+	if c.Blacklist.ListTTL < 0 {
+		warnings = append(warnings, fmt.Sprintf("blacklist.list_ttl=%d is negative, treated as disabled (0)", c.Blacklist.ListTTL))
+	}
+	return warnings, errors
 }
 
 // validateBlocking checks blocking configuration for invalid values.
@@ -1095,27 +1145,71 @@ slow_upstream_ms = 200
 # =============================================================================
 # Whitelist
 # =============================================================================
-# Domains listed here are resolved using a dedicated non-blocking resolver
-# (default: Cloudflare 1.1.1.1 DoH) and bypass all blocking upstreams.
+# Domains listed in whitelist files are resolved using a dedicated non-blocking
+# resolver (default: Cloudflare 1.1.1.1 DoH) and bypass all blocking upstreams.
 # The whitelist is disabled by default.
 #
-# Domain matching:
-#   "example.com"      - exact match only
-#   "*.example.com"    - matches all subdomains of example.com
-#   "*.cn"             - matches all .cn top-level domains
-#   "*"                - matches everything (disables blocking entirely)
+# List file format (one domain per line):
+#   "example.com"      - exact match only (subdomains NOT matched)
+#   "*.example.com"    - matches example.com AND all subdomains
+#   Lines starting with # or ! are comments
+#   Hosts-file format auto-detected: "0.0.0.0 domain" or "127.0.0.1 domain"
+#
+# list_files supports glob patterns (like nginx/ssh conf.d):
+#   list_files = ["/etc/dnsieve/whitelist/*.list"]
+#   list_files = ["/etc/dnsieve/whitelist/custom.list"]
+#
+# Windows paths -- use forward slashes or double backslashes inside strings:
+#   list_files = ["C:/dnsieve/lists/whitelist.txt"]
+#   list_files = ["C:\\dnsieve\\lists\\whitelist.txt"]
+#   list_files = ["C:/dnsieve/lists/wl-*.txt"]
+#
+# list_ttl controls automatic reload (in seconds):
+#   0 = disabled (default), no automatic reload
+#   >0 = check for file changes every N seconds, reload if modified
 
 [whitelist]
 enabled = false
 
-# Domains to whitelist. Use * prefix for wildcard matching.
-# domains = ["example.com", "*.internal.local"]
-domains = []
+# Glob patterns for whitelist files.
+# list_files = ["/etc/dnsieve/whitelist/*.list"]
+# list_files = ["C:/dnsieve/lists/whitelist.txt"]   # Windows example
+list_files = []
+
+# Automatic reload interval in seconds (0 = disabled).
+list_ttl = 0
 
 # The resolver used for whitelisted lookups.
 # Default: Cloudflare 1.1.1.1 DoH (does not filter or block).
 resolver_address = "https://1.1.1.1/dns-query"
 resolver_protocol = "doh"
+
+
+# =============================================================================
+# Blacklist
+# =============================================================================
+# Domains listed in blacklist files are blocked locally without querying
+# upstream servers. The blocked response uses the same mode as [blocking].
+# The blacklist is disabled by default.
+#
+# List file format is identical to whitelist (see above).
+#
+# Note: blacklisting/whitelisting is not the primary purpose of this program.
+# It is provided for cases where you need to block specific domains that your
+# upstream filtering does not cover. Large blocklists are not officially
+# supported; consider a dedicated tool like Pi-hole for comprehensive
+# DNS-level ad blocking.
+
+[blacklist]
+enabled = false
+
+# Glob patterns for blacklist files.
+# list_files = ["/etc/dnsieve/blacklist/*.list"]
+# list_files = ["C:/dnsieve/lists/blacklist.txt"]   # Windows example
+list_files = []
+
+# Automatic reload interval in seconds (0 = disabled).
+list_ttl = 0
 
 
 # =============================================================================

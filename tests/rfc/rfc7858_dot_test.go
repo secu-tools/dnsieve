@@ -31,7 +31,7 @@ func TestRFC7858_DoT_BasicQuery(t *testing.T) {
 
 	for _, srv := range servers {
 		t.Run(srv.name, func(t *testing.T) {
-			client, err := upstream.NewDoTClient(srv.address, false, "ipv4", upstream.ResolveDisabled)
+			client, err := upstream.NewDoTClient(srv.address, false, "ipv4", upstream.ResolveDisabled, 0, nil)
 			if err != nil {
 				t.Fatalf("create DoT client: %v", err)
 			}
@@ -57,7 +57,7 @@ func TestRFC7858_DoT_BasicQuery(t *testing.T) {
 
 // TestRFC7858_DoT_AAAA tests DoT with AAAA query.
 func TestRFC7858_DoT_AAAA(t *testing.T) {
-	client, err := upstream.NewDoTClient("1.1.1.1:853", false, "ipv4", upstream.ResolveDisabled)
+	client, err := upstream.NewDoTClient("1.1.1.1:853", false, "ipv4", upstream.ResolveDisabled, 0, nil)
 	if err != nil {
 		t.Fatalf("create DoT client: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestRFC7858_DoT_AAAA(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	query := makeQuery("google.com.", dns.TypeAAAA)
+	query := makeQuery("example.com.", dns.TypeAAAA)
 	resp, err := client.Query(ctx, query)
 	if err != nil {
 		t.Fatalf("DoT AAAA: %v", err)
@@ -78,12 +78,12 @@ func TestRFC7858_DoT_AAAA(t *testing.T) {
 
 // TestRFC7858_DoT_MultipleQueries tests multiple queries over a single DoT connection.
 func TestRFC7858_DoT_MultipleQueries(t *testing.T) {
-	client, err := upstream.NewDoTClient("1.1.1.1:853", false, "ipv4", upstream.ResolveDisabled)
+	client, err := upstream.NewDoTClient("1.1.1.1:853", false, "ipv4", upstream.ResolveDisabled, 0, nil)
 	if err != nil {
 		t.Fatalf("create DoT client: %v", err)
 	}
 
-	domains := []string{"example.com.", "google.com.", "cloudflare.com."}
+	domains := []string{"example.com.", "example.net.", "example.org."}
 	for _, domain := range domains {
 		t.Run(domain, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -105,7 +105,7 @@ func TestRFC7858_DoT_MultipleQueries(t *testing.T) {
 func TestRFC7858_DoT_TLS12Minimum(t *testing.T) {
 	// This test verifies the client configuration enforces TLS 1.2+.
 	// The upstream.NewDoTClient already sets MinVersion: tls.VersionTLS12.
-	client, err := upstream.NewDoTClient("1.1.1.1:853", true, "ipv4", upstream.ResolveDisabled)
+	client, err := upstream.NewDoTClient("1.1.1.1:853", true, "ipv4", upstream.ResolveDisabled, 0, nil)
 	if err != nil {
 		t.Fatalf("create DoT client: %v", err)
 	}

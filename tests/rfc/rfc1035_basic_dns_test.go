@@ -62,7 +62,7 @@ func TestRFC1035_PlainDNS_TCP(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			query := makeQuery("google.com.", dns.TypeTXT)
+			query := makeQuery("example.com.", dns.TypeTXT)
 			resp, _, err := new(dns.Client).Exchange(ctx, query, "tcp", srv.address)
 			if err != nil {
 				t.Fatalf("TCP to %s: %v", srv.name, err)

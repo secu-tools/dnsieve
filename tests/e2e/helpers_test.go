@@ -28,6 +28,8 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -174,7 +176,7 @@ func startServer(t *testing.T, cfg *config.Config) context.CancelFunc {
 		cfg.Cache.RenewPercent,
 	)
 
-	handler := server.NewHandler(resolver, wlResolver, c, logger, cfg)
+	handler := server.NewHandler(resolver, wlResolver, nil, c, logger, cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -875,4 +877,16 @@ func dohHTTPConfig(plainPort, dohPort int) *config.Config {
 	cfg.Downstream.DoH.Port = dohPort
 	cfg.Downstream.DoH.UsePlaintextHTTP = true
 	return cfg
+}
+
+// writeE2EListFile writes domain list content to a temporary file and returns
+// the file path. The file is cleaned up when the test finishes.
+func writeE2EListFile(t *testing.T, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "domains.list")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write list file: %v", err)
+	}
+	return path
 }

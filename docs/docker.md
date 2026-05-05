@@ -148,12 +148,12 @@ The compose file uses `restart: on-failure`. This means:
 
 ## Health Check
 
-The compose file includes a health check that queries `google.com` via the
+The compose file includes a health check that queries `example.com` via the
 DNS server:
 
 ```yaml
 healthcheck:
-  test: ["CMD", "nslookup", "google.com", "127.0.0.1"]
+  test: ["CMD", "nslookup", "example.com", "127.0.0.1"]
   interval: 30s
   timeout: 5s
   retries: 3

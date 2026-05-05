@@ -12,6 +12,8 @@ package integration
 
 import (
 	"net/netip"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"codeberg.org/miekg/dns"
@@ -139,17 +141,19 @@ func TestIntegration_IDN_ACELabel_AAAA(t *testing.T) {
 }
 
 // TestIntegration_IDN_Whitelist_UnicodeEntry verifies that a whitelist entry
-// containing a Unicode label (encoded as Go escape sequences here to keep the
-// source ASCII-clean) matches the corresponding ACE-form DNS query that the
-// proxy receives over the wire.
+// containing a Unicode label ("bücher.example.com") matches the corresponding
+// ACE-form DNS query that the proxy receives over the wire.
 func TestIntegration_IDN_Whitelist_UnicodeEntry(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Whitelist.Enabled = true
-	// "b\u00fccher.example.com" contains the umlaut-u character U+00FC.
+	// "bücher.example.com" is a German IDN domain (bücher = books).
 	// Its ACE/Punycode form (xn--bcher-kva.example.com) is what a DNS client
 	// sends over the wire; the proxy must match the Unicode config entry to
 	// the ACE query name.
-	cfg.Whitelist.Domains = []string{"b\u00fccher.example.com"}
+	dir := t.TempDir()
+	listPath := filepath.Join(dir, "wl.list")
+	os.WriteFile(listPath, []byte("bücher.example.com\n"), 0644)
+	cfg.Whitelist.ListFiles = []string{listPath}
 	cfg.Whitelist.ResolverAddress = "https://1.1.1.1/dns-query"
 	cfg.Whitelist.ResolverProtocol = "doh"
 
@@ -158,7 +162,7 @@ func TestIntegration_IDN_Whitelist_UnicodeEntry(t *testing.T) {
 
 	// Query using the ACE form of the configured Unicode domain.
 	// "xn--bcher-kva.example.com" is the Punycode encoding of
-	// "b\u00fccher.example.com" (bücher = books in German).
+	// "bücher.example.com" (bücher = books in German).
 	resp := queryLocal(t, port, "xn--bcher-kva.example.com", dns.TypeA)
 	if resp == nil {
 		t.Fatal("expected a non-nil DNS response for ACE whitelist query")

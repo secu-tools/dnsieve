@@ -42,8 +42,8 @@ var knownBlockedDomains = []string{
 // knownSafeDomain is a domain that should never be blocked.
 var knownSafeDomains = []string{
 	"example.com",
-	"google.com",
-	"cloudflare.com",
+	"example.net",
+	"example.org",
 }
 
 type provider struct {

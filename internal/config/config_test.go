@@ -545,19 +545,70 @@ func TestValidate_PlainDNS_Warning(t *testing.T) {
 	}
 }
 
-func TestValidate_WhitelistGlobalWildcard_Warning(t *testing.T) {
+func TestValidate_WhitelistNoListFiles_Warning(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Whitelist.Enabled = true
-	cfg.Whitelist.Domains = []string{"*"}
+	// No list_files configured
 	warns, _ := cfg.Validate()
 	found := false
 	for _, w := range warns {
-		if contains(w, "matches all domains") {
+		if contains(w, "list_files is not configured") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected global wildcard warning, got: %v", warns)
+		t.Errorf("expected no list_files warning, got: %v", warns)
+	}
+}
+
+func TestValidate_WhitelistInvalidProtocol_Error(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Whitelist.Enabled = true
+	cfg.Whitelist.ListFiles = []string{"whitelist.txt"}
+	cfg.Whitelist.ResolverProtocol = "grpc"
+	_, errs := cfg.Validate()
+	found := false
+	for _, e := range errs {
+		if contains(e, "resolver_protocol") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected resolver_protocol error, got: %v", errs)
+	}
+}
+
+func TestValidate_WhitelistNegativeListTTL_Warning(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Whitelist.Enabled = true
+	cfg.Whitelist.ListFiles = []string{"whitelist.txt"}
+	cfg.Whitelist.ListTTL = -30
+	warns, _ := cfg.Validate()
+	found := false
+	for _, w := range warns {
+		if contains(w, "list_ttl") && contains(w, "negative") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected negative list_ttl warning, got: %v", warns)
+	}
+}
+
+func TestValidate_BlacklistNegativeListTTL_Warning(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Blacklist.Enabled = true
+	cfg.Blacklist.ListFiles = []string{"blacklist.txt"}
+	cfg.Blacklist.ListTTL = -5
+	warns, _ := cfg.Validate()
+	found := false
+	for _, w := range warns {
+		if contains(w, "list_ttl") && contains(w, "negative") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected negative list_ttl warning, got: %v", warns)
 	}
 }
 
