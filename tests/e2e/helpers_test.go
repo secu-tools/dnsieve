@@ -30,6 +30,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -102,6 +103,15 @@ func generateSelfSignedCert(t *testing.T) *testCert {
 	}
 }
 
+// claimedPorts tracks ports that findFreePort has already returned in this
+// test binary run. This prevents the OS from handing the same port to two
+// consecutive calls when a port is briefly released between allocation and
+// server bind (e.g. dohPort == plainPort in a two-listener test).
+var (
+	claimedPortsMu sync.Mutex
+	claimedPorts   = map[int]bool{}
+)
+
 // findFreePort returns an available port on localhost that is bindable on
 // both TCP and UDP. On Windows some ports are in the OS-reserved/excluded
 // range for UDP even when TCP is free (e.g. Hyper-V, WSL2, Docker), so both
@@ -116,16 +126,30 @@ func findFreePort(t *testing.T) int {
 		port := ln.Addr().(*net.TCPAddr).Port
 		ln.Close()
 
+		claimedPortsMu.Lock()
+		if claimedPorts[port] {
+			claimedPortsMu.Unlock()
+			continue
+		}
+		claimedPorts[port] = true
+		claimedPortsMu.Unlock()
+
 		addr := fmt.Sprintf("127.0.0.1:%d", port)
 
 		checkTCP, err := net.Listen("tcp", addr)
 		if err != nil {
+			claimedPortsMu.Lock()
+			delete(claimedPorts, port)
+			claimedPortsMu.Unlock()
 			continue
 		}
 		checkTCP.Close()
 
 		checkUDP, err := net.ListenPacket("udp4", addr)
 		if err != nil {
+			claimedPortsMu.Lock()
+			delete(claimedPorts, port)
+			claimedPortsMu.Unlock()
 			continue
 		}
 		checkUDP.Close()

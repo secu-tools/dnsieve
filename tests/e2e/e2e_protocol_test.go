@@ -330,7 +330,7 @@ func TestE2E_DoH_NXDOMAIN(t *testing.T) {
 	dohPort := findFreePort(t)
 
 	cfg := dohHTTPConfig(plainPort, dohPort)
-	cancel := startServer(t, cfg)
+	cancel := startServerReachable(t, cfg)
 	defer cancel()
 
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", dohPort)
