@@ -25,7 +25,7 @@ example.com
 example.net
 example.org
 `
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestParseReader_WildcardDomains(t *testing.T) {
 	input := `*.example.com
 *.example.org
 `
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestParseReader_HostsFormat(t *testing.T) {
 ::1 block.example.org
 :: spam.example.com
 `
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -108,7 +108,7 @@ example.com
 127.0.0.1 malware.test
 *.block.test
 `
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestParseReader_InlineComments(t *testing.T) {
 	input := `example.com # inline comment
 example.net#comment without space
 `
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestContains_CaseInsensitive(t *testing.T) {
 	input := `Example.Com
 *.Example.NET
 `
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestContains_CaseInsensitive(t *testing.T) {
 
 func TestContains_TrailingDot(t *testing.T) {
 	input := `example.com`
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestContains_NilSet(t *testing.T) {
 
 func TestWildcard_SubdomainDepth(t *testing.T) {
 	input := `*.abc.example.com`
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestWildcard_SubdomainDepth(t *testing.T) {
 
 func TestExactMatch_DoesNotMatchSubdomains(t *testing.T) {
 	input := `example.com`
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestExactMatch_DoesNotMatchSubdomains(t *testing.T) {
 
 func TestWildcard_MatchesBase(t *testing.T) {
 	input := `*.example.com`
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestWildcard_MatchesBase(t *testing.T) {
 
 func TestWildcard_TLD(t *testing.T) {
 	input := `*.fr`
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestWildcard_TLD(t *testing.T) {
 func TestIDN_PunycodeConversion(t *testing.T) {
 	// German umlaut domain
 	input := "*.xn--mnchen-3ya.de\n"
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestIDN_PunycodeConversion(t *testing.T) {
 func TestIDN_UnicodeInput(t *testing.T) {
 	// Unicode domain in list - should be converted to punycode
 	input := "*.xn--mnchen-3ya.example.com\n"
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestEmptySet_Count(t *testing.T) {
 }
 
 func TestParseReader_EmptyInput(t *testing.T) {
-	set, err := ParseReader(strings.NewReader(""))
+	set, err := ParseReader(strings.NewReader(""), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestParseReader_OnlyComments(t *testing.T) {
 ! comment 2
 # comment 3
 `
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestParseReader_Deduplication(t *testing.T) {
 example.com
 EXAMPLE.COM
 `
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -337,7 +337,7 @@ EXAMPLE.COM
 func TestParseReader_WildcardWithoutDot(t *testing.T) {
 	// "*.com" has base "com" which has no dot - should be rejected
 	input := `*.com`
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestDomainList_LoadSingleFile(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "test.list", "example.com\nexample.net\n*.block.test\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "*.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "*.list")})
 	count, _, _, err := dl.Load(nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -375,7 +375,7 @@ func TestDomainList_LoadMultipleFiles(t *testing.T) {
 	writeTestFile(t, dir, "file1.list", "example.com\nexample.net\n")
 	writeTestFile(t, dir, "file2.list", "*.block.test\n*.block2.test\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "*.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "*.list")})
 	count, _, _, err := dl.Load(nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -387,7 +387,7 @@ func TestDomainList_LoadMultipleFiles(t *testing.T) {
 
 func TestDomainList_LoadNoFiles(t *testing.T) {
 	dir := t.TempDir()
-	dl := NewDomainList("test", []string{filepath.Join(dir, "*.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "*.list")})
 	count, _, _, err := dl.Load(nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -407,7 +407,7 @@ func TestDomainList_LoadMultipleGlobs(t *testing.T) {
 	writeTestFile(t, sub1, "a.list", "a.com\n")
 	writeTestFile(t, sub2, "b.list", "b.com\n")
 
-	dl := NewDomainList("test", []string{
+	dl := NewDomainList("test", ModeBlock, []string{
 		filepath.Join(sub1, "*.list"),
 		filepath.Join(sub2, "*.list"),
 	})
@@ -431,7 +431,7 @@ func TestDomainList_SkipsDirectories(t *testing.T) {
 	writeTestFile(t, dir, "test.list", "example.com\n")
 	os.MkdirAll(filepath.Join(dir, "subdir.list"), 0700) // directory with .list extension
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "*.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "*.list")})
 	count, _, _, err := dl.Load(nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -449,7 +449,7 @@ func TestDomainList_DetectChanges_ModifiedFile(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "test.list", "example.com\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "*.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "*.list")})
 	if _, _, _, err := dl.Load(nil); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -471,7 +471,7 @@ func TestDomainList_DetectChanges_NewFile(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "test.list", "example.com\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "*.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "*.list")})
 	if _, _, _, err := dl.Load(nil); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -493,7 +493,7 @@ func TestDomainList_DetectChanges_DeletedFile(t *testing.T) {
 	writeTestFile(t, dir, "test.list", "example.com\n")
 	writeTestFile(t, dir, "extra.list", "example.net\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "*.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "*.list")})
 	if _, _, _, err := dl.Load(nil); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -514,7 +514,7 @@ func TestDomainList_DetectChanges_NoChange(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "test.list", "example.com\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "*.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "*.list")})
 	if _, _, _, err := dl.Load(nil); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -529,7 +529,7 @@ func TestDomainList_Reload_AtomicSwap(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "test.list", "example.com\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "*.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "*.list")})
 	if _, _, _, err := dl.Load(nil); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -562,7 +562,7 @@ func TestDomainList_Watcher_Integration(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "test.list", "example.com\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "*.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "*.list")})
 	if _, _, _, err := dl.Load(nil); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -606,7 +606,7 @@ func TestDomainList_Stop(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "test.list", "example.com\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "*.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "*.list")})
 	if _, _, _, err := dl.Load(nil); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -620,7 +620,7 @@ func TestDomainList_ConcurrentAccess(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "test.list", "example.com\n*.example.net\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "*.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "*.list")})
 	if _, _, _, err := dl.Load(nil); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -668,7 +668,7 @@ func TestDomainList_ReloadFailure_KeepsPrevious(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "test.list", "example.com\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "*.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "*.list")})
 	if _, _, _, err := dl.Load(nil); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -759,7 +759,7 @@ func TestLoad_InvalidLines_CountedAndLogged(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "*.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "*.list")})
 	count, invalid, _, err := dl.Load(dbg)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -795,7 +795,7 @@ func TestLoad_InvalidLines_NilDebugNoPanic(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "test.list", "good.com\nbad!line\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "test.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "test.list")})
 	count, invalid, _, err := dl.Load(nil) // nil logger must not panic
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -815,7 +815,7 @@ func TestLoad_AllInvalidLines(t *testing.T) {
 	// Use characters that are clearly invalid DNS labels and are not skip prefixes.
 	writeTestFile(t, dir, "test.list", "@invalid\n***\n{not valid}\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "test.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "test.list")})
 	count, invalid, _, err := dl.Load(nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -833,7 +833,7 @@ func TestLoad_HostsFormatInvalidDomain(t *testing.T) {
 	// Hosts file line where the domain part is invalid.
 	writeTestFile(t, dir, "test.list", "0.0.0.0 good.com\n0.0.0.0 bad!domain\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "test.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "test.list")})
 	count, invalid, _, err := dl.Load(nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -853,7 +853,7 @@ func TestLoad_HostsFormatInvalidDomain(t *testing.T) {
 func TestDedup_WildcardSupersededByExact(t *testing.T) {
 	// If *.foo.com comes AFTER foo.com, the exact should be removed.
 	input := "foo.com\n*.foo.com\n"
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -870,7 +870,7 @@ func TestDedup_WildcardSupersededByExact(t *testing.T) {
 func TestDedup_ExactAfterWildcard(t *testing.T) {
 	// If foo.com comes AFTER *.foo.com, the exact should be skipped.
 	input := "*.foo.com\nfoo.com\n"
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -885,7 +885,7 @@ func TestDedup_ExactAfterWildcard(t *testing.T) {
 func TestDedup_DuplicateExact(t *testing.T) {
 	// Two identical exact entries should result in 1 stored entry (map dedup).
 	input := "foo.com\nfoo.com\n"
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -896,7 +896,7 @@ func TestDedup_DuplicateExact(t *testing.T) {
 
 func TestDedup_DuplicateWildcard(t *testing.T) {
 	input := "*.foo.com\n*.foo.com\n"
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -910,7 +910,7 @@ func TestDedup_Load_ReturnsCount(t *testing.T) {
 	// foo.com + *.foo.com: exact should be deduped away.
 	writeTestFile(t, dir, "test.list", "987890.com\n*.987890.com\n987890.com\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "test.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "test.list")})
 	count, _, dedup, err := dl.Load(nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -936,7 +936,7 @@ func TestDedup_Reload_MessageContainsDedup(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "test.list", "example.com\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "*.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "*.list")})
 	if _, _, _, err := dl.Load(nil); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -970,7 +970,7 @@ func TestInvalid_Reload_MessageContainsInvalid(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "test.list", "example.com\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "*.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "*.list")})
 	if _, _, _, err := dl.Load(nil); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -1008,7 +1008,7 @@ func BenchmarkContains_ExactMatch(b *testing.B) {
 		sb.WriteString(strings.Repeat("x", i%10))
 		sb.WriteString(".com\n")
 	}
-	set, _ := ParseReader(strings.NewReader(sb.String()))
+	set, _ := ParseReader(strings.NewReader(sb.String()), ModeBlock)
 
 	b.ResetTimer()
 	for range b.N {
@@ -1023,7 +1023,7 @@ func BenchmarkContains_WildcardMatch(b *testing.B) {
 		sb.WriteString(strings.Repeat("x", i%10))
 		sb.WriteString(".com\n")
 	}
-	set, _ := ParseReader(strings.NewReader(sb.String()))
+	set, _ := ParseReader(strings.NewReader(sb.String()), ModeBlock)
 
 	b.ResetTimer()
 	for range b.N {
@@ -1038,7 +1038,7 @@ func BenchmarkContains_Miss(b *testing.B) {
 		sb.WriteString(strings.Repeat("x", i%10))
 		sb.WriteString(".com\n")
 	}
-	set, _ := ParseReader(strings.NewReader(sb.String()))
+	set, _ := ParseReader(strings.NewReader(sb.String()), ModeBlock)
 
 	b.ResetTimer()
 	for range b.N {
@@ -1066,7 +1066,7 @@ func TestAdblock_BasicParsing(t *testing.T) {
 	input := `||example.com^
 ||example.net^
 `
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -1093,7 +1093,7 @@ func TestAdblock_WithOptions(t *testing.T) {
 	input := `||domain.com^$important
 ||other.com^$third-party,important
 `
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -1117,7 +1117,7 @@ func TestAdblock_ExceptionRules_SilentlySkipped(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "test.list", input)
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "test.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "test.list")})
 	count, invalid, _, err := dl.Load(nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -1142,7 +1142,7 @@ func TestAdblock_WithPath_CountedAsInvalid(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "test.list", input)
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "test.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "test.list")})
 	count, invalid, _, err := dl.Load(nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -1164,7 +1164,7 @@ func TestAdblock_NoCaretTerminator_CountedAsInvalid(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "test.list", input)
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "test.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "test.list")})
 	count, invalid, _, err := dl.Load(nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -1187,7 +1187,7 @@ plain.com
 *.wildcard.net
 @@||skipped-exception.com^
 `
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -1229,7 +1229,7 @@ func TestAdblock_RealisticStyleList(t *testing.T) {
 ||tracker.net^$important
 @@||allowed.com^
 `
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -1256,7 +1256,7 @@ func TestAdblock_RealisticStyleList(t *testing.T) {
 func TestHierarchicalDedup_WildcardCoversExact_WildcardFirst(t *testing.T) {
 	// *.example.com is added first; sub.example.com should be skipped by addEntry.
 	input := "*.example.com\nsub.example.com\n"
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -1271,7 +1271,7 @@ func TestHierarchicalDedup_WildcardCoversExact_WildcardFirst(t *testing.T) {
 func TestHierarchicalDedup_WildcardCoversExact_ExactFirst(t *testing.T) {
 	// sub.example.com is added first; *.example.com should cause cleanup.
 	input := "sub.example.com\n*.example.com\n"
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -1286,7 +1286,7 @@ func TestHierarchicalDedup_WildcardCoversExact_ExactFirst(t *testing.T) {
 func TestHierarchicalDedup_WildcardCoversNarrowWildcard_WideFirst(t *testing.T) {
 	// *.example.com makes *.sub.example.com redundant when added first.
 	input := "*.example.com\n*.sub.example.com\n"
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -1298,7 +1298,7 @@ func TestHierarchicalDedup_WildcardCoversNarrowWildcard_WideFirst(t *testing.T) 
 func TestHierarchicalDedup_WildcardCoversNarrowWildcard_NarrowFirst(t *testing.T) {
 	// *.sub.example.com added first; *.example.com should trigger cleanup.
 	input := "*.sub.example.com\n*.example.com\n"
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -1315,7 +1315,7 @@ sub.example.com
 *.sub.example.com
 deep.sub.example.com
 `
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -1350,7 +1350,7 @@ sub.example.com
 deep.sub.example.com
 *.example.com
 `
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -1362,7 +1362,7 @@ deep.sub.example.com
 func TestHierarchicalDedup_DeepNesting(t *testing.T) {
 	// *.a.b.c.d.example.com should be covered by *.example.com.
 	input := "*.example.com\n*.a.b.c.d.example.com\nleaf.a.b.c.d.example.com\n"
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -1377,7 +1377,7 @@ func TestHierarchicalDedup_DeepNesting(t *testing.T) {
 func TestHierarchicalDedup_Independent_Wildcards_Kept(t *testing.T) {
 	// *.foo.com and *.bar.com are independent; both must be kept.
 	input := "*.foo.com\n*.bar.com\nsub.foo.com\nsub.bar.com\n"
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -1398,7 +1398,7 @@ func TestHierarchicalDedup_Load_DedupCount(t *testing.T) {
 	writeTestFile(t, dir, "test.list",
 		"*.example.com\nexample.com\nsub.example.com\n*.sub2.example.com\n*.deep.sub.example.com\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "test.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "test.list")})
 	count, _, dedup, err := dl.Load(nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -1418,7 +1418,7 @@ func TestHierarchicalDedup_AcrossFiles(t *testing.T) {
 	writeTestFile(t, dir, "file1.list", "*.example.com\n")
 	writeTestFile(t, dir, "file2.list", "sub.example.com\n*.inner.example.com\nexact.example.com\n")
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "*.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "*.list")})
 	count, _, dedup, err := dl.Load(nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -1514,7 +1514,7 @@ func TestAdblockBracketHeader_SilentlySkipped(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "test.list", input)
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "test.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "test.list")})
 	count, invalid, _, err := dl.Load(nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -1529,7 +1529,7 @@ func TestAdblockBracketHeader_SilentlySkipped(t *testing.T) {
 
 func TestAdblockBracketHeader_ParseReader(t *testing.T) {
 	input := "[Adblock Plus]\n! Comment\n||domain.com^\n"
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -1560,7 +1560,7 @@ func TestRealWorld_AdblockFormat_EdgeCases(t *testing.T) {
 		"||blocked.example.com^\n" +
 		"||0066-example.com^\n" +
 		"||09239-174328543.shop^\n"
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -1597,7 +1597,7 @@ func TestRealWorld_WildcardFormat_EdgeCases(t *testing.T) {
 		"*.m1.ad.10010.com\n" +
 		"*.log-auth.zztfly.com\n" +
 		"*.upc.zztfly.com\n"
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -1629,7 +1629,7 @@ func TestRealWorld_HostsFormat_EdgeCases(t *testing.T) {
 		"0.0.0.0 xn--ex-adreq-asa-c5b.example.com\n" +
 		"0.0.0.0 blocked.example.com\n" +
 		"0.0.0.0 blocked2.example.com\n"
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -1656,7 +1656,7 @@ func TestRealWorld_DomainsFormat_EdgeCases(t *testing.T) {
 		"xn--80affa3aj0al.xn--80asehdb\n" +
 		"blocked.example.com\n" +
 		"blocked2.example.com\n"
-	set, err := ParseReader(strings.NewReader(input))
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
 	if err != nil {
 		t.Fatalf("ParseReader: %v", err)
 	}
@@ -1681,7 +1681,7 @@ func TestRealWorld_MixedAdblockFormats(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "test.list", input)
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "test.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "test.list")})
 	count, invalid, _, err := dl.Load(nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -1757,7 +1757,7 @@ func TestIntegration_MixedFormatFile_LoadAndSmoke(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "mixed.list", content)
 
-	dl := NewDomainList("test", []string{filepath.Join(dir, "mixed.list")})
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "mixed.list")})
 	count, invalid, _, err := dl.Load(nil)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -1799,5 +1799,540 @@ func TestIntegration_MixedFormatFile_LoadAndSmoke(t *testing.T) {
 	// Exception rule (@@||) must not be loaded.
 	if dl.Contains("exception.example.com") {
 		t.Error("exception rule (@@||) should not be loaded as a block entry")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ModeAllow: allowlist-specific parsing
+// ---------------------------------------------------------------------------
+
+func TestAllowMode_AtAtDoubleBar_Valid(t *testing.T) {
+	// "@@||domain^" is the valid allowlist rule in ModeAllow.
+	input := "@@||allow.com^\n@@||safe.example.net^\n"
+	dir := t.TempDir()
+	writeTestFile(t, dir, "test.list", input)
+
+	dl := NewDomainList("test", ModeAllow, []string{filepath.Join(dir, "test.list")})
+	count, invalid, _, err := dl.Load(nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 valid entries, got %d", count)
+	}
+	if invalid != 0 {
+		t.Errorf("expected 0 invalid, got %d", invalid)
+	}
+	if !dl.Contains("allow.com") {
+		t.Error("allow.com should match (from @@||allow.com^)")
+	}
+	if !dl.Contains("sub.allow.com") {
+		t.Error("sub.allow.com should match via wildcard")
+	}
+	if !dl.Contains("safe.example.net") {
+		t.Error("safe.example.net should match (from @@||safe.example.net^)")
+	}
+}
+
+func TestAllowMode_DoubleBarOnly_SilentlySkipped(t *testing.T) {
+	// "||domain^" is a blocking rule and must be silently skipped in ModeAllow
+	// (not counted as invalid) so the same list file can be used for both modes.
+	input := "@@||valid.com^\n||blocking.com^\n"
+	dir := t.TempDir()
+	writeTestFile(t, dir, "test.list", input)
+
+	dl := NewDomainList("test", ModeAllow, []string{filepath.Join(dir, "test.list")})
+	count, invalid, _, err := dl.Load(nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 valid entry (@@||valid.com^), got %d", count)
+	}
+	if invalid != 0 {
+		t.Errorf("||domain^ in allowlist must be silently skipped (invalid=0), got %d", invalid)
+	}
+	if !dl.Contains("valid.com") {
+		t.Error("valid.com should match")
+	}
+	if dl.Contains("blocking.com") {
+		t.Error("blocking.com must not be in the allowlist")
+	}
+}
+
+func TestAllowMode_PlainDomain_Valid(t *testing.T) {
+	// Plain domains, wildcard, and hosts-file format are valid in both modes.
+	input := "safe.example.com\n*.whitelist.net\n0.0.0.0 bypass.org\n127.0.0.1 local.bypass.org\n"
+	dir := t.TempDir()
+	writeTestFile(t, dir, "test.list", input)
+
+	dl := NewDomainList("test", ModeAllow, []string{filepath.Join(dir, "test.list")})
+	count, invalid, _, err := dl.Load(nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if count != 4 {
+		t.Errorf("expected 4 valid entries, got %d", count)
+	}
+	if invalid != 0 {
+		t.Errorf("expected 0 invalid, got %d", invalid)
+	}
+	if !dl.Contains("safe.example.com") {
+		t.Error("safe.example.com should match")
+	}
+	if !dl.Contains("sub.whitelist.net") {
+		t.Error("sub.whitelist.net should match via wildcard")
+	}
+	if !dl.Contains("bypass.org") {
+		t.Error("bypass.org should match (hosts-file entry)")
+	}
+	if !dl.Contains("local.bypass.org") {
+		t.Error("local.bypass.org should match (hosts-file entry)")
+	}
+}
+
+func TestAllowMode_AtAtWithModifiers_ModifiersIgnored(t *testing.T) {
+	// Everything after ^ is a rule modifier and must be ignored.
+	input := "@@||domain.com^$important\n@@||other.net^$third-party,domain=example.com\n"
+	dir := t.TempDir()
+	writeTestFile(t, dir, "test.list", input)
+
+	dl := NewDomainList("test", ModeAllow, []string{filepath.Join(dir, "test.list")})
+	count, invalid, _, err := dl.Load(nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 valid entries (modifiers stripped), got %d", count)
+	}
+	if invalid != 0 {
+		t.Errorf("expected 0 invalid, got %d", invalid)
+	}
+	if !dl.Contains("domain.com") {
+		t.Error("domain.com should match (modifier stripped)")
+	}
+	if !dl.Contains("other.net") {
+		t.Error("other.net should match (modifier stripped)")
+	}
+}
+
+func TestAllowMode_ParseReader_AtAtDoubleBar_Valid(t *testing.T) {
+	// ParseReader with ModeAllow must accept @@||domain^ entries.
+	input := "@@||allowed.com^\n@@||safe.net^$important\nplain.org\n"
+	set, err := ParseReader(strings.NewReader(input), ModeAllow)
+	if err != nil {
+		t.Fatalf("ParseReader: %v", err)
+	}
+	// @@||allowed.com^ -> *.allowed.com, @@||safe.net^ -> *.safe.net, plain.org -> exact
+	if set.Count() != 3 {
+		t.Errorf("expected 3 entries, got %d", set.Count())
+	}
+	if !set.Contains("allowed.com") {
+		t.Error("allowed.com should match (from @@||allowed.com^)")
+	}
+	if !set.Contains("sub.allowed.com") {
+		t.Error("sub.allowed.com should match via wildcard")
+	}
+	if !set.Contains("safe.net") {
+		t.Error("safe.net should match (modifier stripped)")
+	}
+	if !set.Contains("plain.org") {
+		t.Error("plain.org should match")
+	}
+}
+
+func TestAllowMode_ParseReader_DoubleBarOnly_NotLoaded(t *testing.T) {
+	// ParseReader with ModeAllow: ||domain^ is silently skipped; domain NOT in set.
+	input := "||blocking.com^\n@@||valid.com^\n"
+	set, err := ParseReader(strings.NewReader(input), ModeAllow)
+	if err != nil {
+		t.Fatalf("ParseReader: %v", err)
+	}
+	if set.Count() != 1 {
+		t.Errorf("expected 1 entry, got %d", set.Count())
+	}
+	if set.Contains("blocking.com") {
+		t.Error("blocking.com must not be in allowlist (|| is a blocking rule)")
+	}
+	if !set.Contains("valid.com") {
+		t.Error("valid.com should match (from @@||valid.com^)")
+	}
+}
+
+func TestSameFileUsedForBothModes(t *testing.T) {
+	// Key use-case: a single file contains both ||domain^ (blocking) and
+	// @@||domain^ (allowlist) rules. When loaded as a blocklist (ModeBlock)
+	// only the || entries are loaded; when loaded as an allowlist (ModeAllow)
+	// only the @@|| entries are loaded. Neither mode counts the other's rules
+	// as invalid.
+	const content = "[Adblock Plus 2.0]\n" +
+		"! Title: shared list\n" +
+		"||blocked-a.com^\n" +
+		"||blocked-b.net^\n" +
+		"@@||allowed-x.com^\n" +
+		"@@||allowed-y.net^$important\n" +
+		"plain.example.org\n" +
+		"*.wildcard.example.com\n" +
+		"0.0.0.0 hosts.example.net\n"
+
+	dir := t.TempDir()
+	writeTestFile(t, dir, "shared.list", content)
+	path := filepath.Join(dir, "shared.list")
+
+	// Load as blocklist: || entries + universal formats loaded; @@ silently skipped.
+	block := NewDomainList("blocklist", ModeBlock, []string{path})
+	blockCount, blockInvalid, _, err := block.Load(nil)
+	if err != nil {
+		t.Fatalf("Load blocklist: %v", err)
+	}
+	// 2 || entries + plain + wildcard + hosts = 5
+	if blockCount != 5 {
+		t.Errorf("blocklist: expected 5 entries, got %d", blockCount)
+	}
+	if blockInvalid != 0 {
+		t.Errorf("blocklist: expected 0 invalid (@@|| silently skipped), got %d", blockInvalid)
+	}
+	if !block.Contains("blocked-a.com") {
+		t.Error("blocklist: blocked-a.com should match")
+	}
+	if !block.Contains("sub.blocked-b.net") {
+		t.Error("blocklist: sub.blocked-b.net should match")
+	}
+	if block.Contains("allowed-x.com") {
+		t.Error("blocklist: allowed-x.com must not be loaded (@@|| silently skipped)")
+	}
+	if !block.Contains("plain.example.org") {
+		t.Error("blocklist: plain.example.org should match")
+	}
+
+	// Load same file as allowlist: @@|| entries + universal formats; || silently skipped.
+	allow := NewDomainList("allowlist", ModeAllow, []string{path})
+	allowCount, allowInvalid, _, err := allow.Load(nil)
+	if err != nil {
+		t.Fatalf("Load allowlist: %v", err)
+	}
+	// 2 @@|| entries + plain + wildcard + hosts = 5
+	if allowCount != 5 {
+		t.Errorf("allowlist: expected 5 entries, got %d", allowCount)
+	}
+	if allowInvalid != 0 {
+		t.Errorf("allowlist: expected 0 invalid (|| silently skipped), got %d", allowInvalid)
+	}
+	if !allow.Contains("allowed-x.com") {
+		t.Error("allowlist: allowed-x.com should match (from @@||)")
+	}
+	if !allow.Contains("sub.allowed-y.net") {
+		t.Error("allowlist: sub.allowed-y.net should match via wildcard (from @@||)")
+	}
+	if allow.Contains("blocked-a.com") {
+		t.Error("allowlist: blocked-a.com must not be loaded (|| silently skipped)")
+	}
+	if !allow.Contains("plain.example.org") {
+		t.Error("allowlist: plain.example.org should match")
+	}
+	if !allow.Contains("hosts.example.net") {
+		t.Error("allowlist: hosts.example.net should match")
+	}
+}
+
+func TestBlockMode_AtAt_SilentlySkipped_NotInvalid(t *testing.T) {
+	// In ModeBlock, @@ lines of any form are silently skipped, not counted as invalid.
+	input := "||block.com^\n@@||exception.net^\n@@plainexception.org\n"
+	dir := t.TempDir()
+	writeTestFile(t, dir, "test.list", input)
+
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "test.list")})
+	count, invalid, _, err := dl.Load(nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 valid entry, got %d", count)
+	}
+	if invalid != 0 {
+		t.Errorf("@@ lines must be silently skipped (invalid=0), got %d", invalid)
+	}
+	if dl.Contains("exception.net") {
+		t.Error("exception.net must not be in blocklist")
+	}
+	if dl.Contains("plainexception.org") {
+		t.Error("plainexception.org must not be in blocklist")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Parsing hardening: DNS length limits and malicious input resistance
+// ---------------------------------------------------------------------------
+
+// TestIsValidDomain_MaxTotalLength verifies that a domain name exceeding the
+// RFC 1035 s2.3.4 limit of 253 characters is rejected.
+func TestIsValidDomain_MaxTotalLength(t *testing.T) {
+	// Build a domain exactly 254 characters long using valid label characters.
+	// Each label is "aaaaaaaaaaaaaaa" (15 chars) plus a dot separator.
+	// 15+1 repeated 16 times = 256, trim trailing dot -> 255.
+	// Use a simpler approach: one long label padded to 254 chars.
+	label63 := strings.Repeat("a", 63)
+	// Four 63-char labels join to 63*4+3 dots = 255 chars -- just over limit.
+	tooLong := label63 + "." + label63 + "." + label63 + "." + label63
+	// tooLong is 63+1+63+1+63+1+63 = 255 chars -- exceeds 253.
+	if len(tooLong) <= maxDomainLen {
+		t.Fatalf("test setup: expected len>%d, got %d", maxDomainLen, len(tooLong))
+	}
+
+	input := tooLong + "\n"
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
+	if err != nil {
+		t.Fatalf("ParseReader: %v", err)
+	}
+	if set.Count() != 0 {
+		t.Errorf("domain > 253 chars must be rejected, got %d entries", set.Count())
+	}
+}
+
+// TestIsValidDomain_MaxLabelLength verifies that a label exceeding 63 chars
+// is rejected per RFC 1035 s2.3.4.
+func TestIsValidDomain_MaxLabelLength(t *testing.T) {
+	// Build a domain with a 64-character label.
+	label64 := strings.Repeat("a", 64)
+	input := label64 + ".example.com\n"
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
+	if err != nil {
+		t.Fatalf("ParseReader: %v", err)
+	}
+	if set.Count() != 0 {
+		t.Errorf("label > 63 chars must be rejected, got %d entries", set.Count())
+	}
+}
+
+// TestIsValidDomain_MaxLabelLength_Adblock verifies that a long label in an
+// AdGuard block rule is rejected.
+func TestIsValidDomain_MaxLabelLength_Adblock(t *testing.T) {
+	label64 := strings.Repeat("a", 64)
+	input := "||" + label64 + ".example.com^\n"
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
+	if err != nil {
+		t.Fatalf("ParseReader: %v", err)
+	}
+	if set.Count() != 0 {
+		t.Errorf("AdGuard rule with label > 63 chars must be rejected")
+	}
+}
+
+// TestIsValidDomain_MaxLabelLength_Allow verifies that a long label in an
+// AdGuard allowlist rule is rejected in ModeAllow.
+func TestIsValidDomain_MaxLabelLength_Allow(t *testing.T) {
+	label64 := strings.Repeat("a", 64)
+	input := "@@||" + label64 + ".example.com^\n"
+	set, err := ParseReader(strings.NewReader(input), ModeAllow)
+	if err != nil {
+		t.Fatalf("ParseReader: %v", err)
+	}
+	if set.Count() != 0 {
+		t.Errorf("allowlist AdGuard rule with label > 63 chars must be rejected")
+	}
+}
+
+// TestIsValidDomain_BoundaryLabel verifies that a label exactly 63 chars is
+// accepted.
+func TestIsValidDomain_BoundaryLabel(t *testing.T) {
+	label63 := strings.Repeat("a", 63)
+	input := label63 + ".example.com\n"
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
+	if err != nil {
+		t.Fatalf("ParseReader: %v", err)
+	}
+	if set.Count() != 1 {
+		t.Errorf("label exactly 63 chars must be accepted, got %d", set.Count())
+	}
+}
+
+// TestIsValidDomain_BoundaryTotal verifies that a domain exactly 253 chars is
+// accepted.
+func TestIsValidDomain_BoundaryTotal(t *testing.T) {
+	// Build a domain exactly 253 chars: four labels of 62, 62, 62, 63 chars.
+	// 62+1+62+1+62+1+63 = 252... adjust to hit exactly 253.
+	// Easiest: "a"*63 + "." + "a"*62 + "." + "a"*62 + "." + "a"*62 = 63+1+62+1+62+1+62 = 252. Add one: "a"*63+"."+...
+	// Simpler: "a"*63 + "." + "a"*63 + "." + "a"*62 + "." + "aa" = 63+1+63+1+62+1+2 = 193. Not right.
+	// Use a different approach: single label of 63 chars + ".com" = 67. Build up.
+	// label63 + "." + label63 + "." + label61 + "." + label63 = 63+1+63+1+61+1+63 = 253.
+	label63 := strings.Repeat("a", 63)
+	label61 := strings.Repeat("b", 61)
+	domain253 := label63 + "." + label63 + "." + label61 + "." + label63
+	if len(domain253) != 253 {
+		// Recalculate to ensure the constant is correct
+		t.Skipf("test setup: domain len=%d (want 253), skipping", len(domain253))
+	}
+	set, err := ParseReader(strings.NewReader(domain253+"\n"), ModeBlock)
+	if err != nil {
+		t.Fatalf("ParseReader: %v", err)
+	}
+	if set.Count() != 1 {
+		t.Errorf("domain exactly 253 chars must be accepted, got %d", set.Count())
+	}
+}
+
+// TestHardening_MaliciousAdblockPath verifies that AdGuard rules with a URL
+// path component are rejected as invalid (DNS cannot target sub-paths).
+func TestHardening_MaliciousAdblockPath(t *testing.T) {
+	inputs := []string{
+		"||example.com/path^\n",
+		"||example.com/path/subpath^\n",
+		"@@||example.com/path^\n",
+	}
+	for _, input := range inputs {
+		set, err := ParseReader(strings.NewReader(input), ModeBlock)
+		if err != nil {
+			t.Fatalf("ParseReader(%q): %v", input, err)
+		}
+		if set.Count() != 0 {
+			t.Errorf("path-based rule %q must be rejected, got %d entries", input, set.Count())
+		}
+	}
+}
+
+// TestHardening_MaliciousAdblockPath_Allow verifies path rejection in ModeAllow.
+func TestHardening_MaliciousAdblockPath_Allow(t *testing.T) {
+	input := "@@||example.com/path^\n"
+	set, err := ParseReader(strings.NewReader(input), ModeAllow)
+	if err != nil {
+		t.Fatalf("ParseReader: %v", err)
+	}
+	if set.Count() != 0 {
+		t.Errorf("path-based allowlist rule must be rejected")
+	}
+}
+
+// TestHardening_NullByteInDomain verifies that a line containing a null byte
+// is rejected (isValidDomain rejects non-printable ASCII chars).
+func TestHardening_NullByteInDomain(t *testing.T) {
+	input := "ex\x00ample.com\n"
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
+	if err != nil {
+		t.Fatalf("ParseReader: %v", err)
+	}
+	if set.Count() != 0 {
+		t.Errorf("domain with null byte must be rejected")
+	}
+}
+
+// TestHardening_ControlCharsInDomain verifies that control characters in a
+// domain name are rejected.
+func TestHardening_ControlCharsInDomain(t *testing.T) {
+	inputs := []string{
+		"exam\x01ple.com\n",
+		"exam\x1fple.com\n",
+		"exam\x7fple.com\n",
+	}
+	for _, input := range inputs {
+		set, err := ParseReader(strings.NewReader(input), ModeBlock)
+		if err != nil {
+			t.Fatalf("ParseReader(%q): %v", input, err)
+		}
+		if set.Count() != 0 {
+			t.Errorf("domain with control char %q must be rejected", input)
+		}
+	}
+}
+
+// TestHardening_AllowMode_MalformedAtAtDoubleBar_CountedAsInvalid verifies
+// that a "@@||" line with an invalid domain in ModeAllow is counted as invalid
+// (not silently skipped). This distinguishes a typo from a mode-crossing rule.
+func TestHardening_AllowMode_MalformedAtAtDoubleBar_CountedAsInvalid(t *testing.T) {
+	// "@@||bad!domain^" has the allowlist prefix but an invalid domain character.
+	input := "@@||bad!domain.com^\n@@||valid.com^\n"
+	dir := t.TempDir()
+	writeTestFile(t, dir, "test.list", input)
+
+	dl := NewDomainList("test", ModeAllow, []string{filepath.Join(dir, "test.list")})
+	count, invalid, _, err := dl.Load(nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 valid entry (@@||valid.com^), got %d", count)
+	}
+	if invalid != 1 {
+		t.Errorf("@@||bad!domain^ in ModeAllow must be counted as invalid, got invalid=%d", invalid)
+	}
+	if !dl.Contains("valid.com") {
+		t.Error("valid.com should match")
+	}
+}
+
+// TestHardening_AllowMode_MalformedAtAtDoubleBar_NoPath verifies that
+// "@@||domain.com/path^" in ModeAllow is counted as invalid (not skipped).
+func TestHardening_AllowMode_MalformedAtAtDoubleBar_NoPath(t *testing.T) {
+	input := "@@||domain.com/path^\n"
+	dir := t.TempDir()
+	writeTestFile(t, dir, "test.list", input)
+
+	dl := NewDomainList("test", ModeAllow, []string{filepath.Join(dir, "test.list")})
+	count, invalid, _, err := dl.Load(nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("path-based @@|| rule must be rejected, got count=%d", count)
+	}
+	if invalid != 1 {
+		t.Errorf("path-based @@|| in ModeAllow must be counted as invalid, got invalid=%d", invalid)
+	}
+}
+
+// TestHardening_BlockMode_AtAt_PlainText_SilentlySkipped verifies that a
+// plain "@@ without ||" line in ModeBlock is still silently skipped (not
+// an invalid entry). Only "@@||" in ModeAllow changes behavior.
+func TestHardening_BlockMode_AtAt_PlainText_SilentlySkipped(t *testing.T) {
+	input := "||valid.com^\n@@just-a-comment-style.org\n"
+	dir := t.TempDir()
+	writeTestFile(t, dir, "test.list", input)
+
+	dl := NewDomainList("test", ModeBlock, []string{filepath.Join(dir, "test.list")})
+	count, invalid, _, err := dl.Load(nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 valid entry, got %d", count)
+	}
+	if invalid != 0 {
+		t.Errorf("@@ line in ModeBlock must be silently skipped, got invalid=%d", invalid)
+	}
+}
+
+// TestHardening_AllowMode_AtAt_Plain_SilentlySkipped verifies that a
+// "@@plain-text" line (without "||") in ModeAllow is silently skipped rather
+// than counted as invalid.
+func TestHardening_AllowMode_AtAt_Plain_SilentlySkipped(t *testing.T) {
+	input := "@@||valid.com^\n@@just-a-tag\n"
+	dir := t.TempDir()
+	writeTestFile(t, dir, "test.list", input)
+
+	dl := NewDomainList("test", ModeAllow, []string{filepath.Join(dir, "test.list")})
+	count, invalid, _, err := dl.Load(nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 valid entry, got %d", count)
+	}
+	if invalid != 0 {
+		t.Errorf("@@non-|| in ModeAllow must be silently skipped, got invalid=%d", invalid)
+	}
+}
+
+// TestHardening_VeryLongLine_NotLoaded verifies that a syntactically valid
+// domain entry whose text exceeds the DNS length limit is silently discarded
+// (counted as invalid) without crashing or consuming excessive memory.
+func TestHardening_VeryLongLine_NotLoaded(t *testing.T) {
+	// 300 'a' chars in one label -- violates both label (>63) and total (>253).
+	longLabel := strings.Repeat("a", 300)
+	input := longLabel + ".example.com\n"
+	set, err := ParseReader(strings.NewReader(input), ModeBlock)
+	if err != nil {
+		t.Fatalf("ParseReader: %v", err)
+	}
+	if set.Count() != 0 {
+		t.Errorf("300-char label domain must be rejected, got %d entries", set.Count())
 	}
 }

@@ -6,16 +6,30 @@
 // patterns, automatic hot-reload via file modification detection, and
 // thread-safe concurrent lookups using atomic pointer swaps.
 //
-// Supported domain entry formats:
-//   - "example.com"       exact match only (subdomains NOT matched)
-//   - "*.example.com"     matches example.com AND all subdomains
-//   - "||example.com^"    Adblock/uBlock double-pipe: matches example.com AND all subdomains
-//   - Lines starting with # or ! are comments
+// Each DomainList is created with a Mode that controls which AdGuard-style
+// rule prefixes are recognised:
+//
+//   - ModeBlock (blocklist): "||domain^" rules are valid and produce a
+//     wildcard entry covering the apex and all subdomains. Lines starting
+//     with "@@" (AdGuard exception/allowlist rules) are silently skipped --
+//     they are not counted as invalid so that the same list file can be used
+//     for both a blocklist and an allowlist simultaneously.
+//
+//   - ModeAllow (allowlist): "@@||domain^" rules are valid and produce the
+//     same wildcard entry. Plain "||domain^" lines (blocking rules) are
+//     silently skipped for the same reason.
+//
+// Formats valid in BOTH modes:
+//   - "example.com"         exact match only (subdomains NOT matched)
+//   - "*.example.com"       matches example.com AND all subdomains
+//   - "0.0.0.0 domain"      hosts-file format (exact match)
+//   - "127.0.0.1 domain"    hosts-file format (exact match)
+//   - Lines starting with # or ! are comments and are silently skipped
 //   - Lines starting with [ (e.g. "[Adblock Plus]") are silently skipped
-//   - Lines starting with @@ (Adblock exception rules) are silently skipped
-//   - Hosts-file format auto-detected: "0.0.0.0 domain" or "127.0.0.1 domain"
 //   - Empty lines are skipped
 //   - IDN (internationalized) domains are converted to punycode (xn--)
+//   - Everything after ^ in an AdGuard rule is a rule modifier; modifiers
+//     are not applicable for DNS-level filtering and are silently ignored
 //
 // Deduplication:
 //   - "*.foo.com" supersedes "foo.com" (wildcard already covers the apex)
@@ -37,6 +51,22 @@ import (
 	"time"
 
 	"golang.org/x/net/idna"
+)
+
+// Mode controls which AdGuard-style rule prefixes are recognised when
+// loading a domain list. See the package documentation for details.
+type Mode int
+
+const (
+	// ModeBlock is for blocklists. "||domain^" rules are valid. "@@" lines
+	// are silently skipped (not counted as invalid) so the same list file
+	// can serve both a blocklist and an allowlist at the same time.
+	ModeBlock Mode = iota
+
+	// ModeAllow is for allowlists. "@@||domain^" rules are valid. Plain
+	// "||domain^" lines (blocking rules) are silently skipped for the same
+	// reason.
+	ModeAllow
 )
 
 // DomainSet is an immutable snapshot of domain entries optimized for fast
@@ -121,8 +151,8 @@ func toASCII(domain string) string {
 }
 
 // ParseReader reads domain entries from r and returns a DomainSet.
-// It auto-detects hosts-file format, plain domain format, and Adblock format.
-func ParseReader(r io.Reader) (*DomainSet, error) {
+// mode controls which AdGuard-style rule prefixes are recognised; see Mode.
+func ParseReader(r io.Reader, mode Mode) (*DomainSet, error) {
 	exact := make(map[string]struct{})
 	wildcard := make(map[string]struct{})
 	var dedup int
@@ -134,13 +164,12 @@ func ParseReader(r io.Reader) (*DomainSet, error) {
 		if line == "" || line[0] == '#' || line[0] == '!' {
 			continue
 		}
-		// Silently skip Adblock/AdGuard format headers ("[Adblock Plus]", etc.)
-		// and exception rules ("@@||..."). Neither is applicable for DNS filtering.
-		if line[0] == '[' || strings.HasPrefix(line, "@@") {
+		// Silently skip [Adblock Plus] and similar filter-list headers.
+		if line[0] == '[' {
 			continue
 		}
 
-		domain := extractDomain(line)
+		domain := extractDomain(line, mode)
 		if domain == "" {
 			continue
 		}
@@ -162,15 +191,41 @@ func ParseReader(r io.Reader) (*DomainSet, error) {
 	}, nil
 }
 
-// extractDomain parses a single line and returns the domain entry,
-// or an empty string when the line is not a recognised domain format.
-// It handles hosts-file lines ("0.0.0.0 domain"), plain domain lines, and
-// Adblock/uBlock double-pipe lines ("||domain.com^").
-// The returned value passes isValidDomain before being returned.
-func extractDomain(line string) string {
-	// Adblock/uBlock double-pipe: ||domain.com^[options]
-	// Returns *.domain.com so the wildcard covers the apex and all subdomains.
+// extractDomain parses a single line and returns the domain entry to store,
+// or an empty string when the line should not produce an entry.
+//
+// Mode-specific AdGuard rule handling:
+//   - ModeBlock: "||domain^" is valid. "@@" lines are silently skipped
+//     (return "", not counted as invalid).
+//   - ModeAllow: "@@||domain^" is valid. Plain "||" lines are silently
+//     skipped (return "", not counted as invalid).
+//
+// Everything after ^ in an AdGuard rule is a rule modifier and is ignored.
+// The returned value has already passed isValidDomain.
+func extractDomain(line string, mode Mode) string {
+	// Handle @@ prefix (AdGuard exception/allowlist marker).
+	if strings.HasPrefix(line, "@@") {
+		if mode == ModeAllow && strings.HasPrefix(line, "@@||") {
+			// "@@||domain^" is valid in an allowlist.
+			d := parseAdblockDomain(line[4:])
+			if d == "" || !isValidDomain(d) {
+				return ""
+			}
+			return "*." + d
+		}
+		// Any other @@ line: silently skip in both modes. Return "" without
+		// incrementing the invalid counter so that a file shared between a
+		// blocklist and an allowlist does not produce spurious warnings.
+		return ""
+	}
+
+	// Handle || prefix (AdGuard block rule marker).
 	if strings.HasPrefix(line, "||") {
+		if mode == ModeAllow {
+			// "||domain^" is a blocking rule; silently skip it in an allowlist.
+			return ""
+		}
+		// ModeBlock: "||domain^[options]" -- strip options, extract domain.
 		d := parseAdblockDomain(line[2:])
 		if d == "" || !isValidDomain(d) {
 			return ""
@@ -229,11 +284,18 @@ func isHostsPrefix(s string) bool {
 	return s == "0.0.0.0" || s == "127.0.0.1" || s == "::1" || s == "::"
 }
 
+// DNS name length limits per RFC 1035 s2.3.4.
+const (
+	maxDomainLen = 253 // maximum characters in a text-format domain name
+	maxLabelLen  = 63  // maximum characters in a single DNS label
+)
+
 // isValidDomain returns true when s looks like a syntactically plausible DNS
 // label sequence. It accepts plain labels, ACE labels (xn--...), and the
 // wildcard prefix "*.". It rejects anything containing non-DNS characters
 // such as spaces, slashes, or punctuation other than hyphens and dots.
-// It does NOT perform a network lookup; it is a cheap syntactic guard only.
+// It enforces RFC 1035 s2.3.4 length limits: total domain <= 253 chars and
+// each label <= 63 chars. It does NOT perform a network lookup.
 func isValidDomain(s string) bool {
 	if s == "*" {
 		return true // global wildcard
@@ -246,8 +308,12 @@ func isValidDomain(s string) bool {
 	if check == "" {
 		return false
 	}
+	// Enforce total domain length (RFC 1035 s2.3.4).
+	if len(check) > maxDomainLen {
+		return false
+	}
 	for _, label := range strings.Split(check, ".") {
-		if label == "" {
+		if label == "" || len(label) > maxLabelLen {
 			return false
 		}
 		for _, r := range label {
@@ -390,6 +456,7 @@ type DomainList struct {
 	current  atomic.Pointer[DomainSet]
 	patterns []string
 	name     string // "whitelist" or "blacklist" for logging
+	mode     Mode   // controls which AdGuard-style prefixes are valid
 
 	// Watcher state
 	mu         sync.Mutex
@@ -408,11 +475,13 @@ type loadStats struct {
 }
 
 // NewDomainList creates a new DomainList. It does not load any domains
-// until Load() is called.
-func NewDomainList(name string, patterns []string) *DomainList {
+// until Load() is called. mode controls which AdGuard-style rule prefixes
+// are recognised; use ModeBlock for blocklists and ModeAllow for allowlists.
+func NewDomainList(name string, mode Mode, patterns []string) *DomainList {
 	dl := &DomainList{
 		patterns: patterns,
 		name:     name,
+		mode:     mode,
 	}
 	dl.current.Store(EmptySet())
 	return dl
@@ -600,7 +669,7 @@ func (dl *DomainList) loadFromPatterns(logDebug LogFunc) (*DomainSet, []fileStat
 			return nil, nil, loadStats{}, fmt.Errorf("stat %s: %w", path, err)
 		}
 
-		fileInvalid, fileDedup, err := loadFile(path, exact, wildcard, logDebug)
+		fileInvalid, fileDedup, err := loadFile(path, dl.mode, exact, wildcard, logDebug)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
@@ -631,10 +700,11 @@ func (dl *DomainList) loadFromPatterns(logDebug LogFunc) (*DomainSet, []fileStat
 }
 
 // loadFile reads a single domain list file into the provided maps.
+// mode controls which AdGuard-style prefixes are recognised.
 // Returns counts of invalid lines and deduplicated entries.
 // logDebug may be nil; when non-nil each invalid line is logged with its
 // line number and content.
-func loadFile(path string, exact, wildcard map[string]struct{}, logDebug LogFunc) (invalid, dedup int, err error) {
+func loadFile(path string, mode Mode, exact, wildcard map[string]struct{}, logDebug LogFunc) (invalid, dedup int, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, 0, err
@@ -651,14 +721,25 @@ func loadFile(path string, exact, wildcard map[string]struct{}, logDebug LogFunc
 		if line == "" || line[0] == '#' || line[0] == '!' {
 			continue
 		}
-		// Silently skip Adblock/AdGuard format headers ("[Adblock Plus]", etc.)
-		// and exception rules ("@@||..."). Neither is applicable for DNS filtering.
-		if line[0] == '[' || strings.HasPrefix(line, "@@") {
+		// Silently skip [Adblock Plus] and similar filter-list headers.
+		if line[0] == '[' {
 			continue
 		}
 
-		domain := extractDomain(line)
+		domain := extractDomain(line, mode)
 		if domain == "" {
+			// extractDomain returns "" for two reasons:
+			// 1. Silently skipped lines (@@... in ModeBlock, ||... in ModeAllow)
+			//    -- these are not invalid, so we only count truly unrecognised
+			//    lines as invalid.
+			// 2. Genuinely unrecognised/malformed lines.
+			//
+			// To distinguish them without adding a second return value, check
+			// the prefix: if the line starts with @@ or (in ModeAllow) ||, it
+			// was silently skipped.
+			if isSilentlySkipped(line, mode) {
+				continue
+			}
 			invalid++
 			if logDebug != nil {
 				logDebug("%s: line %d invalid, skipping: %q", base, lineNum, line)
@@ -670,6 +751,40 @@ func loadFile(path string, exact, wildcard map[string]struct{}, logDebug LogFunc
 	}
 
 	return invalid, dedup, scanner.Err()
+}
+
+// isSilentlySkipped reports whether a line that produced no domain from
+// extractDomain should be considered a silent skip (not an invalid entry).
+//
+// Silent-skip rules:
+//   - ModeBlock: any line beginning with "@@" is an allowlist rule; skip it
+//     without warning so the same file can serve both modes.
+//   - ModeAllow: any line beginning with "||" (but NOT "@@||") is a blocking
+//     rule; skip it without warning for the same reason.
+//   - ModeAllow: a line beginning with "@@" but NOT "@@||" is an unrecognised
+//     @@ format; skip it silently.
+//   - ModeAllow, "@@||...": extractDomain validates the domain and returns ""
+//     only when the domain is malformed. That IS a genuinely invalid entry and
+//     must NOT be silently skipped so the user sees a warning.
+func isSilentlySkipped(line string, mode Mode) bool {
+	if strings.HasPrefix(line, "@@") {
+		if mode == ModeAllow && strings.HasPrefix(line, "@@||") {
+			// "@@||" is the valid allowlist prefix in ModeAllow. If
+			// extractDomain returned "" for it the domain part was malformed
+			// (e.g. "@@||bad!domain^"). Count it as invalid so the user is
+			// warned, rather than hiding the typo.
+			return false
+		}
+		// All other @@ lines (ModeBlock: any @@; ModeAllow: @@ without ||)
+		// are silently skipped because they belong to the other mode or are
+		// an unrecognised @@ variant.
+		return true
+	}
+	if mode == ModeAllow && strings.HasPrefix(line, "||") {
+		// "||domain^" is a blocking rule; silently skipped in allowlists.
+		return true
+	}
+	return false
 }
 
 // expandGlobs takes a list of glob patterns and returns all matching file

@@ -96,7 +96,7 @@ func testDomainList(t *testing.T, entries []string) *domainlist.DomainList {
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("write test list: %v", err)
 	}
-	dl := domainlist.NewDomainList("test", []string{path})
+	dl := domainlist.NewDomainList("test", domainlist.ModeBlock, []string{path})
 	if _, _, _, err := dl.Load(nil); err != nil {
 		t.Fatalf("load test list: %v", err)
 	}
@@ -1945,6 +1945,177 @@ func TestReadDOHWireQuery_POST_ContentType_WrongTypeWithParams(t *testing.T) {
 	_, status, _ := readDOHWireQuery(r)
 	if status != http.StatusUnsupportedMediaType {
 		t.Errorf("wrong Content-Type with params: expected 415, got %d", status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Local blacklist and priority ordering tests
+// ---------------------------------------------------------------------------
+
+// TestHandleQuery_LocalBlacklistBlocks verifies that a domain in the local
+// blacklist returns a blocked response without querying upstream.
+func TestHandleQuery_LocalBlacklistBlocks(t *testing.T) {
+	query := makeQuery("evil.blacklisted.example.com", dns.TypeA)
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = false
+
+	bl := testDomainList(t, []string{"||evil.blacklisted.example.com^"})
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	c := cache.New(100, 3600, 5, 0)
+
+	// Normal upstream -- must NOT be reached.
+	normalResp := makeNormalResp(query)
+	resolver := upstream.NewResolverFromClients(
+		[]upstream.Client{&mockUpstreamClient{name: "upstream", response: normalResp}},
+		2*time.Second, 50*time.Millisecond, logger,
+	)
+
+	handler := NewHandler(resolver, nil, bl, c, logger, cfg)
+	resp := handler.HandleQuery(context.Background(), query)
+
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	// Null mode: NOERROR with 0.0.0.0 answer and EDE Blocked.
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("local blacklist rcode=%s, want NOERROR (null mode)", dns.RcodeToString[resp.Rcode])
+	}
+	if !hasEDEBlocked(resp) {
+		t.Error("local blacklist response must include EDE Blocked (code 15)")
+	}
+	// Verify the null-mode 0.0.0.0 address is present.
+	if len(resp.Answer) == 0 {
+		t.Fatal("expected answer record in null mode blocked response")
+	}
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatal("expected A record in null mode blocked response")
+	}
+	if a.Addr != (netip.AddrFrom4([4]byte{})) {
+		t.Errorf("null mode blocked IP = %v, want 0.0.0.0", a.Addr)
+	}
+}
+
+// TestHandleQuery_LocalBlacklistLogsInfo verifies that a blacklist block
+// produces an info-level log entry with the domain name.
+func TestHandleQuery_LocalBlacklistLogsInfo(t *testing.T) {
+	query := makeQuery("logged.blacklisted.example.com", dns.TypeA)
+
+	var buf bytes.Buffer
+	logger := logging.NewWriterLogger(&buf, logging.DefaultConfig(), "test")
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = false
+	bl := testDomainList(t, []string{"||logged.blacklisted.example.com^"})
+	c := cache.New(100, 3600, 5, 0)
+	resolver := upstream.NewResolverFromClients(nil, 2*time.Second, 50*time.Millisecond, logger)
+	handler := NewHandler(resolver, nil, bl, c, logger, cfg)
+
+	handler.HandleQuery(context.Background(), query)
+
+	out := buf.String()
+	if !strings.Contains(out, "logged.blacklisted.example.com.") {
+		t.Errorf("expected domain in blacklist log, got: %s", out)
+	}
+	if !strings.Contains(out, "local blacklist") {
+		t.Errorf("expected 'local blacklist' in log, got: %s", out)
+	}
+}
+
+// TestHandleQuery_WhitelistPreemptsBlacklist verifies that when a domain
+// appears in both the whitelist and the blacklist, the whitelist wins: the
+// query is resolved cleanly rather than blocked.
+// Priority order: DDR > whitelist > blacklist > cache > upstream.
+func TestHandleQuery_WhitelistPreemptsBlacklist(t *testing.T) {
+	query := makeQuery("shared.example.com", dns.TypeA)
+
+	wlResponse := new(dns.Msg)
+	dnsutil.SetReply(wlResponse, query)
+	wlResponse.Answer = append(wlResponse.Answer, &dns.A{
+		Hdr: dns.Header{Name: "shared.example.com.", Class: dns.ClassINET, TTL: 300},
+		A:   rdata.A{Addr: netip.MustParseAddr("7.7.7.7")},
+	})
+	wlClient := &mockUpstreamClient{name: "whitelist-resolver", response: wlResponse}
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = false
+	cfg.Whitelist.Enabled = true
+
+	// Domain is in BOTH the whitelist and the blacklist.
+	wlList := testDomainList(t, []string{"||shared.example.com^"})
+	bl := testDomainList(t, []string{"||shared.example.com^"})
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	c := cache.New(100, 3600, 5, 0)
+
+	// Blocking upstream -- must NOT be reached.
+	blockClient := &mockUpstreamClient{name: "blocker", response: makeBlockedResp(query)}
+	resolver := upstream.NewResolverFromClients(
+		[]upstream.Client{blockClient},
+		2*time.Second, 50*time.Millisecond, logger,
+	)
+	wlRes := upstream.NewWhitelistResolverFromClient(wlClient, &cfg.Whitelist, wlList)
+
+	handler := NewHandler(resolver, wlRes, bl, c, logger, cfg)
+	resp := handler.HandleQuery(context.Background(), query)
+
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	// Whitelist must win: clean resolution, no EDE Blocked.
+	if hasEDEBlocked(resp) {
+		t.Error("whitelist must preempt blacklist: response must not be blocked")
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("whitelist response rcode=%s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) == 0 {
+		t.Fatal("expected answer record from whitelist resolver")
+	}
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatal("expected A record from whitelist resolver")
+	}
+	if a.Addr != netip.MustParseAddr("7.7.7.7") {
+		t.Errorf("whitelist resolver IP = %v, want 7.7.7.7", a.Addr)
+	}
+}
+
+// TestHandleQuery_BlacklistDoesNotAffectNonMatchingDomain verifies that a
+// domain NOT in the blacklist is resolved normally via upstream.
+func TestHandleQuery_BlacklistDoesNotAffectNonMatchingDomain(t *testing.T) {
+	query := makeQuery("safe.example.com", dns.TypeA)
+	normalResp := makeNormalResp(query)
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = false
+
+	// Blacklist only contains a different domain.
+	bl := testDomainList(t, []string{"||other.example.com^"})
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	c := cache.New(100, 3600, 5, 0)
+	resolver := upstream.NewResolverFromClients(
+		[]upstream.Client{&mockUpstreamClient{name: "upstream", response: normalResp}},
+		2*time.Second, 50*time.Millisecond, logger,
+	)
+
+	handler := NewHandler(resolver, nil, bl, c, logger, cfg)
+	resp := handler.HandleQuery(context.Background(), query)
+
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	if hasEDEBlocked(resp) {
+		t.Error("non-blacklisted domain must not be blocked")
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("rcode=%s, want NOERROR for non-blacklisted domain", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) == 0 {
+		t.Error("expected answer records for non-blacklisted domain")
 	}
 }
 

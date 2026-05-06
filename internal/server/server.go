@@ -127,13 +127,15 @@ func (h *Handler) handleCacheHit(query *dns.Msg, qname, qtype string) *dns.Msg {
 //
 // Flow:
 //  1. Handle DDR (RFC 9461/9462) if applicable
-//  2. Check cache -> return cached if hit
-//  3. Fan out to all upstreams concurrently (with EDNS middleware)
-//  4. If any upstream signals blocked -> cache blocked, return 0.0.0.0/::
-//  5. If not blocked and all responded -> cache from 1st priority, return
-//  6. If some failed -> don't cache, return best available
-//  7. Process DNAME synthesis (RFC 6672)
-//  8. Process EDNS response options
+//  2. Whitelist check -> resolve via whitelist resolver if matched
+//  3. Blacklist check -> return blocked response if matched
+//  4. Check cache -> return cached if hit
+//  5. Fan out to all upstreams concurrently (with EDNS middleware)
+//  6. If any upstream signals blocked -> cache blocked, return 0.0.0.0/::
+//  7. If not blocked and all responded -> cache from 1st priority, return
+//  8. If some failed -> don't cache, return best available
+//  9. Process DNAME synthesis (RFC 6672)
+//  10. Process EDNS response options
 func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 	if len(query.Question) == 0 {
 		resp := new(dns.Msg)
@@ -165,20 +167,20 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 		return ddrResp
 	}
 
-	// Step 1: Blacklist check -- block immediately without upstream query
-	if resp := h.handleBlacklistedQuery(query, qname, qtype); resp != nil {
-		h.edns.HandleNSIDSubstitute(query, resp)
-		return resp
-	}
-
-	// Step 2: Whitelist check -- bypass all blocking upstreams
+	// Step 1: Whitelist check -- bypass all blocking upstreams
 	if resp := h.handleWhitelistedQuery(ctx, query, qname, qtype); resp != nil {
 		// RFC 5001: inject proxy NSID for substitute mode even on whitelist hits.
 		h.edns.HandleNSIDSubstitute(query, resp)
 		return resp
 	}
 
-	// Step 2: Cache lookup
+	// Step 2: Blacklist check -- block immediately without upstream query
+	if resp := h.handleBlacklistedQuery(query, qname, qtype); resp != nil {
+		h.edns.HandleNSIDSubstitute(query, resp)
+		return resp
+	}
+
+	// Step 3: Cache lookup
 	if resp := h.handleCacheHit(query, qname, qtype); resp != nil {
 		// RFC 5001: inject proxy NSID for substitute mode even on cache hits.
 		// NSID is per-client-request and must not be baked into the cached entry.
@@ -186,7 +188,7 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 		return resp
 	}
 
-	// Step 3: Resolve via upstreams
+	// Step 4: Resolve via upstreams
 	result := h.resolver.Resolve(ctx, query)
 
 	if result.BestResponse == nil {
@@ -199,7 +201,7 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 		return resp
 	}
 
-	// Step 4: If blocked, return blocked response
+	// Step 5: If blocked, return blocked response
 	if result.Blocked {
 		h.logger.Infof("%s is blocked by %s", qname, result.BlockedBy)
 
@@ -214,16 +216,16 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 		return blockedResp
 	}
 
-	// Step 5: Process upstream response through EDNS middleware
+	// Step 6: Process upstream response through EDNS middleware
 	h.edns.ProcessUpstreamResponse(result.BestResponse, "")
 
-	// Step 6: DNAME synthesis (RFC 6672)
+	// Step 7: DNAME synthesis (RFC 6672)
 	edns.SynthesizeDNAME(query, result.BestResponse)
 
-	// Step 7: NSID substitute (RFC 5001)
+	// Step 8: NSID substitute (RFC 5001)
 	h.edns.HandleNSIDSubstitute(query, result.BestResponse)
 
-	// Step 8: Return best response, cache if appropriate
+	// Step 9: Return best response, cache if appropriate
 	h.logger.Debugf("Query %s %s -> rcode=%s cacheable=%v allResponded=%v",
 		qname, qtype, dns.RcodeToString[result.BestResponse.Rcode], result.Cacheable, result.AllResponded)
 
@@ -423,7 +425,7 @@ func newBlacklist(cfg *config.BlacklistConfig, logger *logging.Logger) *domainli
 	if !cfg.Enabled {
 		return nil
 	}
-	bl := domainlist.NewDomainList("blacklist", cfg.ListFiles)
+	bl := domainlist.NewDomainList("blacklist", domainlist.ModeBlock, cfg.ListFiles)
 	dbg := func(f string, a ...interface{}) { logger.Debugf(f, a...) }
 	count, invalid, dedup, loadErr := bl.Load(dbg)
 	if loadErr != nil {

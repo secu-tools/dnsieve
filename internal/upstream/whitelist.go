@@ -59,7 +59,7 @@ func NewWhitelistResolver(cfg *config.WhitelistConfig, verifyCert bool, bootstra
 	}
 
 	// Load domain list from files
-	list := domainlist.NewDomainList("whitelist", cfg.ListFiles)
+	list := domainlist.NewDomainList("whitelist", domainlist.ModeAllow, cfg.ListFiles)
 	var dbg domainlist.LogFunc
 	if logger != nil {
 		dbg = func(f string, a ...interface{}) { logger.Debugf(f, a...) }

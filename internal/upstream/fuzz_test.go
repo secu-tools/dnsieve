@@ -38,7 +38,7 @@ func FuzzWhitelistIsWhitelisted(f *testing.F) {
 	content := strings.Join([]string{"example.com", "*.safe.net"}, "\n") + "\n"
 	listPath := filepath.Join(dir, "fuzz.list")
 	os.WriteFile(listPath, []byte(content), 0644)
-	list := domainlist.NewDomainList("fuzz", []string{listPath})
+	list := domainlist.NewDomainList("fuzz", domainlist.ModeAllow, []string{listPath})
 	list.Load(nil)
 	wl := &WhitelistResolver{cfg: cfg, client: &mockClient{name: "fuzz"}, list: list}
 

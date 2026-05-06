@@ -526,30 +526,68 @@ list_files = [
 ]
 ```
 
-**File format:** DNSieve accepts four formats in the same file. Empty lines
-and lines starting with `#` or `!` are treated as comments. Lines starting
-with `[` (Adblock format headers such as `[Adblock Plus]`) and Adblock
-exception rules starting with `@@` are silently skipped. Trailing dots are
-stripped. Entries are case-insensitive.
+**File format:** DNSieve accepts the following formats in a list file. Empty
+lines and lines starting with `#` or `!` are treated as comments and are
+silently skipped. Lines starting with `[` (Adblock format headers such as
+`[Adblock Plus]`) are also silently skipped.
+
+The following formats are accepted in **both** blocklists and allowlists:
 
 | Format | Example line | Behaviour |
 |--------|-------------|----------|
 | **Plain domain** | `example.com` | Exact match only -- subdomains are NOT matched |
 | **Wildcard domain** | `*.example.com` | Matches `example.com` AND all subdomains |
 | **Hosts-file** | `0.0.0.0 example.com` | Exact match; IP address prefix (`0.0.0.0`, `127.0.0.1`, `::1`, `::`) is ignored |
-| **Adblock/uBlock double-pipe** | `\|\|example.com^` | Matches `example.com` AND all subdomains (same as `*.example.com`) |
 
-Adblock exception rules (`@@\|\|...`) and format headers (`[Adblock Plus]`)
-are silently skipped and are not counted as invalid lines. Adblock rules
-with a URL path (`\|\|domain.com/path^`) are counted as invalid because DNS
-filtering cannot target sub-paths.
+In addition, **AdGuard-style rules** use mode-specific prefixes:
+
+| Rule | Valid in blocklist | Valid in allowlist | Behaviour when valid |
+|------|-------------------|--------------------|----------------------|
+| `\|\|example.com^` | **Yes** | Silently skipped | Matches `example.com` AND all subdomains |
+| `@@\|\|example.com^` | Silently skipped | **Yes** | Matches `example.com` AND all subdomains |
+
+Lines that are silently skipped are **not counted as invalid**. This means
+you can use the **same list file for both the whitelist and the blacklist**:
+the blocklist loads only the `||domain^` rules, and the allowlist loads only
+the `@@||domain^` rules. Neither mode warns about the other's rules.
+
+Everything after `^` in an AdGuard rule is a rule modifier (e.g. `$important`,
+`$third-party`). Rule modifiers are not applicable at the DNS level and are
+silently ignored -- the domain is still loaded normally.
+
+AdGuard rules with a URL path (`\|\|domain.com/path^`) are counted as invalid
+because DNS filtering cannot target sub-paths.
 
 ```text
-# My list (all four formats are supported in the same file)
+# Blocklist file -- supports both formats; blocklist loads ||, silently skips @@||
+||google-analytics.com^
+||tracker.example.com^
+@@||safe.example.com^        # silently skipped in blocklist mode
 example.com
 *.internal.local
 0.0.0.0 ads.tracker.net
-||google-analytics.com^
+```
+
+```text
+# Allowlist file -- supports both formats; allowlist loads @@||, silently skips ||
+||google-analytics.com^       # silently skipped in allowlist mode
+@@||safe.example.com^
+@@||cdn.example.net^$important
+exact-allow.example.org
+*.whitelist.local
+```
+
+```text
+# Shared file used for both whitelist and blacklist list_files at once.
+# Blocklist loads ||domain^; allowlist loads @@||domain^.
+# Plain/wildcard/hosts-file entries are loaded by both.
+||ads.example.com^
+||tracker.example.net^
+@@||cdn.trusted.com^
+@@||fonts.trusted.org^
+plain.example.com
+*.always-loaded.net
+0.0.0.0 hosts-entry.example.com
 ```
 
 ### Hot Reload
@@ -608,7 +646,8 @@ example.com
 
 # Wildcard match -- matches apex and all subdomains
 *.example.com
-||example.com^             # Adblock/uBlock double-pipe: equivalent wildcard
+||example.com^              # blocklist only: AdGuard block rule (same as *.example.com)
+@@||example.com^            # allowlist only: AdGuard exception rule (same as *.example.com)
 
 # TLD wildcard
 *.fr
@@ -674,7 +713,7 @@ resolver_protocol = "doh"
 The blacklist blocks specific domains locally without querying upstream
 servers. Blocked domains return the same response as upstream-detected blocks
 (configured via `[blocking]`). Blacklist has higher priority than the cache
-and upstream resolvers.
+and upstream resolvers, but lower priority than the whitelist.
 
 The blacklist is **disabled by default**.
 
@@ -693,14 +732,21 @@ The `list_files` and `list_ttl` options work identically to the whitelist
 (see above). The file format, domain matching, glob patterns, hot reload,
 and IDN support are all the same.
 
+The **blocklist uses `||domain^` rules** and silently skips `@@||domain^`
+lines. The **whitelist uses `@@||domain^` rules** and silently skips
+`||domain^` lines. Because skipped lines do not generate warnings, you can
+point both `whitelist.list_files` and `blacklist.list_files` at the same
+file: `||` entries are loaded for blocking and `@@||` entries are loaded for
+allowing, with no spurious warnings from either side.
+
 ### Query Processing Order
 
 When both whitelist and blacklist are enabled, queries are processed in
 this order:
 
 1. **DDR** (Discovery of Designated Resolvers) -- handled first
-2. **Blacklist** -- if matched, return blocked response immediately
-3. **Whitelist** -- if matched, resolve through whitelist resolver
+2. **Whitelist** -- if matched, resolve through whitelist resolver
+3. **Blacklist** -- if matched, return blocked response immediately
 4. **Cache** -- return cached response if available
 5. **Upstream** -- query all configured upstream servers
 
@@ -871,7 +917,8 @@ These occur after config validation passes, as the server loads list files into 
 - A glob pattern in `list_files` matches no files -- warning logged, that entry is skipped
 - A list file fails to open or read -- warning logged, that file is skipped
 - All `list_files` loaded but no valid domain entries found -- warning logged
-- A line that is not a comment, not blank, not an Adblock format header (`[Adblock Plus]`), not an exception rule (`@@||`), and not a valid plain/hosts/Adblock domain entry is counted as invalid. A warning is logged with the total invalid count after each load or reload. With `log_level = "debug"`, each invalid line is logged individually with its line number and content.
+- A line that is not a comment, not blank, not an Adblock format header (`[Adblock Plus]`), and not a valid plain/hosts/AdGuard domain entry is counted as invalid. A warning is logged with the total invalid count after each load or reload. With `log_level = "debug"`, each invalid line is logged individually with its line number and content. Silently-skipped lines (mode-crossing rules such as `||` in an allowlist or `@@||` in a blocklist) are **not** counted as invalid. A `@@||` line with an invalid or overlong domain in an allowlist **is** counted as invalid so the user sees a warning.
+- A domain entry that violates DNS length limits (label > 63 characters or total name > 253 characters per RFC 1035 s2.3.4) is rejected and counted as invalid.
 - Total loaded domain count exceeds 100,000 -- warning logged (large lists are not officially supported)
 
 **Deduplication** is applied automatically during loading:

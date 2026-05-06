@@ -48,10 +48,13 @@ The app communicates only with the IPs and domains you explicitly configure in t
 ## How It Works
 
 1. Client sends a DNS query to DNSieve (plain DNS, DoT, or DoH)
-2. DNSieve checks the cache -- if hit, returns immediately
-3. On cache miss, DNSieve fans out the query to all configured upstream
+2. DDR check: queries for `_dns.resolver.arpa. SVCB` are answered locally
+3. Whitelist check: if matched, resolve via the whitelist resolver immediately
+4. Blacklist check: if matched, return a blocked response immediately
+5. DNSieve checks the cache -- if hit, returns immediately
+6. On cache miss, DNSieve fans out the query to all configured upstream
    servers concurrently
-4. Results are collected:
+7. Results are collected:
    - If **any** upstream signals **blocked**, cache the block and return
      a blocked response with EDE Blocked (RFC 8914 code 15) to the client.
      Default mode: NOERROR + 0.0.0.0/:: (configurable: null, nxdomain,
@@ -60,7 +63,7 @@ The app communicates only with the IPs and domains you explicitly configure in t
      highest-priority upstream and return
    - If some upstreams had errors, do **not** cache but still return the
      best available result
-5. Nearly-expired cache entries are refreshed in the background to keep
+8. Nearly-expired cache entries are refreshed in the background to keep
    responses fast for frequently queried domains
 
 ## Features

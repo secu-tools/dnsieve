@@ -605,7 +605,7 @@ func makeTestDomainList(t *testing.T, entries []string) *domainlist.DomainList {
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("write test list: %v", err)
 	}
-	dl := domainlist.NewDomainList("test", []string{path})
+	dl := domainlist.NewDomainList("test", domainlist.ModeAllow, []string{path})
 	if _, _, _, err := dl.Load(nil); err != nil {
 		t.Fatalf("load test list: %v", err)
 	}
