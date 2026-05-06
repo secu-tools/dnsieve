@@ -1960,11 +1960,20 @@ func TestAllowMode_ParseReader_DoubleBarOnly_NotLoaded(t *testing.T) {
 }
 
 func TestSameFileUsedForBothModes(t *testing.T) {
-	// Key use-case: a single file contains both ||domain^ (blocking) and
-	// @@||domain^ (allowlist) rules. When loaded as a blocklist (ModeBlock)
-	// only the || entries are loaded; when loaded as an allowlist (ModeAllow)
-	// only the @@|| entries are loaded. Neither mode counts the other's rules
-	// as invalid.
+	// Verify the parser behavior when the same file is referenced by both a
+	// blocklist and an allowlist.
+	//
+	// AdGuard-style rules are correctly separated:
+	//   - ModeBlock loads only "||domain^" entries; "@@||" lines are silently skipped.
+	//   - ModeAllow loads only "@@||domain^" entries; "||" lines are silently skipped.
+	//
+	// WARNING: plain/wildcard/hosts-file entries in the file are loaded by
+	// BOTH modes. Because the whitelist takes precedence over the blacklist in
+	// the query processing order, those domains become unconditionally
+	// whitelisted: they will resolve via the whitelist resolver and will never
+	// be blocked. This test includes such entries to document and verify that
+	// behavior; it is NOT a recommendation to use plain/wildcard/hosts-file
+	// entries in shared files.
 	const content = "[Adblock Plus 2.0]\n" +
 		"! Title: shared list\n" +
 		"||blocked-a.com^\n" +
@@ -1979,13 +1988,14 @@ func TestSameFileUsedForBothModes(t *testing.T) {
 	writeTestFile(t, dir, "shared.list", content)
 	path := filepath.Join(dir, "shared.list")
 
-	// Load as blocklist: || entries + universal formats loaded; @@ silently skipped.
+	// Load as blocklist: || entries loaded; @@ silently skipped.
+	// Plain/wildcard/hosts-file entries are also loaded (demonstrates the danger).
 	block := NewDomainList("blocklist", ModeBlock, []string{path})
 	blockCount, blockInvalid, _, err := block.Load(nil)
 	if err != nil {
 		t.Fatalf("Load blocklist: %v", err)
 	}
-	// 2 || entries + plain + wildcard + hosts = 5
+	// 2 || entries + plain + wildcard + hosts = 5 (plain entries load in both modes)
 	if blockCount != 5 {
 		t.Errorf("blocklist: expected 5 entries, got %d", blockCount)
 	}
@@ -2005,13 +2015,15 @@ func TestSameFileUsedForBothModes(t *testing.T) {
 		t.Error("blocklist: plain.example.org should match")
 	}
 
-	// Load same file as allowlist: @@|| entries + universal formats; || silently skipped.
+	// Load same file as allowlist: @@|| entries loaded; || silently skipped.
+	// Plain/wildcard/hosts-file entries are also loaded -- in a real deployment
+	// this makes those domains unconditionally whitelisted.
 	allow := NewDomainList("allowlist", ModeAllow, []string{path})
 	allowCount, allowInvalid, _, err := allow.Load(nil)
 	if err != nil {
 		t.Fatalf("Load allowlist: %v", err)
 	}
-	// 2 @@|| entries + plain + wildcard + hosts = 5
+	// 2 @@|| entries + plain + wildcard + hosts = 5 (plain entries load in both modes)
 	if allowCount != 5 {
 		t.Errorf("allowlist: expected 5 entries, got %d", allowCount)
 	}

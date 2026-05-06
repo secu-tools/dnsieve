@@ -547,9 +547,11 @@ In addition, **AdGuard-style rules** use mode-specific prefixes:
 | `@@\|\|example.com^` | Silently skipped | **Yes** | Matches `example.com` AND all subdomains |
 
 Lines that are silently skipped are **not counted as invalid**. This means
-you can use the **same list file for both the whitelist and the blacklist**:
-the blocklist loads only the `||domain^` rules, and the allowlist loads only
-the `@@||domain^` rules. Neither mode warns about the other's rules.
+you can point both `whitelist.list_files` and `blacklist.list_files` at the
+same file without spurious warnings: the blocklist loads only the `||domain^`
+rules and the allowlist loads only the `@@||domain^` rules.
+See [Sharing a File Between Whitelist and Blacklist](#sharing-a-file-between-whitelist-and-blacklist)
+for important restrictions.
 
 Everything after `^` in an AdGuard rule is a rule modifier (e.g. `$important`,
 `$third-party`). Rule modifiers are not applicable at the DNS level and are
@@ -559,7 +561,8 @@ AdGuard rules with a URL path (`\|\|domain.com/path^`) are counted as invalid
 because DNS filtering cannot target sub-paths.
 
 ```text
-# Blocklist file -- supports both formats; blocklist loads ||, silently skips @@||
+# Blocklist file: only block rules and universal formats.
+# @@|| lines are silently skipped; they are not counted as invalid.
 ||google-analytics.com^
 ||tracker.example.com^
 @@||safe.example.com^        # silently skipped in blocklist mode
@@ -569,25 +572,13 @@ example.com
 ```
 
 ```text
-# Allowlist file -- supports both formats; allowlist loads @@||, silently skips ||
+# Allowlist file: only exception rules and universal formats.
+# || lines are silently skipped; they are not counted as invalid.
 ||google-analytics.com^       # silently skipped in allowlist mode
 @@||safe.example.com^
 @@||cdn.example.net^$important
 exact-allow.example.org
 *.whitelist.local
-```
-
-```text
-# Shared file used for both whitelist and blacklist list_files at once.
-# Blocklist loads ||domain^; allowlist loads @@||domain^.
-# Plain/wildcard/hosts-file entries are loaded by both.
-||ads.example.com^
-||tracker.example.net^
-@@||cdn.trusted.com^
-@@||fonts.trusted.org^
-plain.example.com
-*.always-loaded.net
-0.0.0.0 hosts-entry.example.com
 ```
 
 ### Hot Reload
@@ -734,10 +725,11 @@ and IDN support are all the same.
 
 The **blocklist uses `||domain^` rules** and silently skips `@@||domain^`
 lines. The **whitelist uses `@@||domain^` rules** and silently skips
-`||domain^` lines. Because skipped lines do not generate warnings, you can
-point both `whitelist.list_files` and `blacklist.list_files` at the same
-file: `||` entries are loaded for blocking and `@@||` entries are loaded for
-allowing, with no spurious warnings from either side.
+`||domain^` lines. Because skipped lines do not generate warnings, the same
+physical file can be referenced by both `whitelist.list_files` and
+`blacklist.list_files`. See
+[Sharing a File Between Whitelist and Blacklist](#sharing-a-file-between-whitelist-and-blacklist)
+for important restrictions.
 
 ### Query Processing Order
 
@@ -750,6 +742,57 @@ this order:
 4. **Cache** -- return cached response if available
 5. **Upstream** -- query all configured upstream servers
 
+## Sharing a File Between Whitelist and Blacklist
+
+Because `||domain^` lines are silently skipped by the allowlist and
+`@@||domain^` lines are silently skipped by the blocklist, the same physical
+file can appear in both `whitelist.list_files` and `blacklist.list_files`
+without generating spurious warnings.
+
+```text
+# Shared file: AdGuard-style rules only.
+||ads.example.com^       # loaded by blocklist, skipped by allowlist
+||tracker.example.net^
+@@||cdn.trusted.com^     # loaded by allowlist, skipped by blocklist
+@@||fonts.trusted.org^
+```
+
+**Restriction: use AdGuard-style rules only in shared files.**
+
+Plain domains (`example.com`), wildcard entries (`*.example.com`), and
+hosts-file lines (`0.0.0.0 example.com`) are loaded by **both** the blocklist
+and the allowlist. Because the whitelist takes precedence over the blacklist
+in the query processing order (whitelist is checked before blacklist), any
+domain expressed in one of those formats will be unconditionally whitelisted:
+it will always resolve via the whitelist resolver and will never be blocked,
+regardless of what the blacklist says.
+
+In short: a shared file must contain **only** `||domain^` (blocking) and
+`@@||domain^` (exception) lines. Keep plain/wildcard/hosts-file entries in
+separate, dedicated blocklist or allowlist files.
+
+```text
+# DO NOT do this in a shared file.
+# These entries are loaded by BOTH the blocklist and the allowlist.
+# Because the whitelist takes precedence, they become unconditionally
+# whitelisted -- they will never be blocked.
+example.com           # plain domain: loaded by both
+*.example.com         # wildcard: loaded by both
+0.0.0.0 example.com  # hosts-file: loaded by both
+```
+
+```text
+# DO this instead: plain/wildcard/hosts entries in dedicated files.
+
+# blocklist-only.txt  (referenced only in blacklist.list_files)
+example.com
+*.ads.example.net
+0.0.0.0 tracker.example.org
+
+# allowlist-only.txt  (referenced only in whitelist.list_files)
+bypass.example.com
+*.trusted.example.net
+```
 
 ## Privacy (EDNS0 Options)
 

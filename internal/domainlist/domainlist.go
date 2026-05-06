@@ -12,8 +12,8 @@
 //   - ModeBlock (blocklist): "||domain^" rules are valid and produce a
 //     wildcard entry covering the apex and all subdomains. Lines starting
 //     with "@@" (AdGuard exception/allowlist rules) are silently skipped --
-//     they are not counted as invalid so that the same list file can be used
-//     for both a blocklist and an allowlist simultaneously.
+//     they are not counted as invalid so the same file can be referenced by
+//     both a blocklist and an allowlist without spurious warnings.
 //
 //   - ModeAllow (allowlist): "@@||domain^" rules are valid and produce the
 //     same wildcard entry. Plain "||domain^" lines (blocking rules) are
@@ -30,6 +30,14 @@
 //   - IDN (internationalized) domains are converted to punycode (xn--)
 //   - Everything after ^ in an AdGuard rule is a rule modifier; modifiers
 //     are not applicable for DNS-level filtering and are silently ignored
+//
+// WARNING: plain/wildcard/hosts-file entries (the formats in "BOTH modes"
+// above) are loaded by BOTH the blocklist and the allowlist. When a file is
+// shared between whitelist.list_files and blacklist.list_files, placing such
+// entries in it will unconditionally whitelist those domains: the whitelist
+// takes precedence over the blacklist, so they will always resolve via the
+// whitelist resolver and will never be blocked. Shared files should contain
+// only AdGuard-style rules ("||domain^" and "@@||domain^").
 //
 // Deduplication:
 //   - "*.foo.com" supersedes "foo.com" (wildcard already covers the apex)
@@ -59,8 +67,11 @@ type Mode int
 
 const (
 	// ModeBlock is for blocklists. "||domain^" rules are valid. "@@" lines
-	// are silently skipped (not counted as invalid) so the same list file
-	// can serve both a blocklist and an allowlist at the same time.
+	// are silently skipped (not counted as invalid) so the same physical file
+	// can be referenced by both a blocklist and an allowlist without warnings.
+	// Note: plain/wildcard/hosts-file entries are also valid in ModeBlock but
+	// are loaded by ModeAllow too; do not place them in a shared file if
+	// blocking those domains is intended (the whitelist takes precedence).
 	ModeBlock Mode = iota
 
 	// ModeAllow is for allowlists. "@@||domain^" rules are valid. Plain
@@ -758,7 +769,7 @@ func loadFile(path string, mode Mode, exact, wildcard map[string]struct{}, logDe
 //
 // Silent-skip rules:
 //   - ModeBlock: any line beginning with "@@" is an allowlist rule; skip it
-//     without warning so the same file can serve both modes.
+//     without warning so the same file can be referenced by both modes.
 //   - ModeAllow: any line beginning with "||" (but NOT "@@||") is a blocking
 //     rule; skip it without warning for the same reason.
 //   - ModeAllow: a line beginning with "@@" but NOT "@@||" is an unrecognised
