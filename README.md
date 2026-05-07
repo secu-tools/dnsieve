@@ -190,6 +190,7 @@ validation errors.
 
 ## Documentation
 
+- [docs/caching.md](docs/caching.md) -- Caching design details
 - [docs/compilation.md](docs/compilation.md) -- Build instructions
 - [docs/configuration.md](docs/configuration.md) -- Configuration reference
 - [docs/docker.md](docs/docker.md) -- Docker deployment guide
