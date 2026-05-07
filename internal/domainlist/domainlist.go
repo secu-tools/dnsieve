@@ -474,6 +474,11 @@ type DomainList struct {
 	files      []fileState
 	cancelFunc context.CancelFunc
 	wg         sync.WaitGroup
+
+	// Reload notification callbacks. Protected by reloadMu.
+	// Callbacks are called after each successful hot-reload with the new set.
+	reloadMu        sync.Mutex
+	reloadCallbacks []func(newSet *DomainSet)
 }
 
 // LogFunc is the signature for logging callbacks.
@@ -507,6 +512,20 @@ func (dl *DomainList) Contains(domain string) bool {
 // Count returns the current number of loaded domain entries.
 func (dl *DomainList) Count() int {
 	return dl.current.Load().Count()
+}
+
+// OnReload registers cb to be called after each successful hot-reload with the
+// newly loaded DomainSet. Callbacks are invoked synchronously in the watcher
+// goroutine after the atomic pointer swap; they must be non-blocking or
+// schedule work in their own goroutines.
+// Safe to call before or after StartWatcher.
+func (dl *DomainList) OnReload(cb func(newSet *DomainSet)) {
+	if cb == nil {
+		return
+	}
+	dl.reloadMu.Lock()
+	dl.reloadCallbacks = append(dl.reloadCallbacks, cb)
+	dl.reloadMu.Unlock()
 }
 
 // Load performs the initial load of domain files matching the configured
@@ -602,6 +621,16 @@ func (dl *DomainList) checkAndReload(logInfo, logWarn, logDebug LogFunc) {
 		logWarn("%s", msg)
 	} else {
 		logInfo("%s", msg)
+	}
+
+	// Notify registered callbacks about the new set.
+	// Copy the slice under lock to avoid holding it during callback execution.
+	dl.reloadMu.Lock()
+	callbacks := make([]func(*DomainSet), len(dl.reloadCallbacks))
+	copy(callbacks, dl.reloadCallbacks)
+	dl.reloadMu.Unlock()
+	for _, cb := range callbacks {
+		cb(set)
 	}
 }
 

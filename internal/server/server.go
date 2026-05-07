@@ -51,17 +51,57 @@ func NewHandler(resolver *upstream.Resolver, wlResolver *upstream.WhitelistResol
 	}
 }
 
-// handleWhitelistedQuery checks whether qname is whitelisted and, if so,
-// resolves it via the whitelist resolver and returns the response.
-// Returns nil when the query is not whitelisted (normal path continues).
+// handleWhitelistedQuery checks whether qname is whitelisted. When it is:
+//  1. The cache is checked first for a prior Whitelisted=true entry and
+//     returned immediately on a hit, avoiding an upstream round-trip.
+//  2. On a miss the whitelist resolver is queried, the result is stored in
+//     the cache with Whitelisted=true, and the response is returned.
+//
+// Returning nil continues processing through the normal pipeline (blacklist,
+// general cache, upstreams).
 func (h *Handler) handleWhitelistedQuery(ctx context.Context, query *dns.Msg, qname, qtype string) *dns.Msg {
 	if h.whitelistResolver == nil || !h.whitelistResolver.IsWhitelisted(qname) {
 		return nil
 	}
 	h.logger.Debugf("Query %s %s -> whitelisted", qname, qtype)
+
+	// Check the cache before hitting the whitelist upstream.
+	// Only serve entries that were themselves stored via the whitelist path
+	// (Whitelisted=true) to avoid accidentally returning a stale blocked or
+	// general entry under the whitelist label.
+	if h.cfg.Cache.Enabled {
+		entry, refreshTriggered := h.cache.Get(query)
+		if entry != nil && entry.Whitelisted {
+			ttlSec := int64(entry.ExpiresAt.Sub(entry.InsertedAt).Seconds())
+			rtlSec := int64(time.Until(entry.ExpiresAt).Seconds())
+			if rtlSec < 0 {
+				rtlSec = 0
+			}
+			if refreshTriggered {
+				h.logger.Debugf("Query %s %s -> whitelisted (cached, background-refresh queued, ttl=%ds rtl=%ds)", qname, qtype, ttlSec, rtlSec)
+			} else {
+				h.logger.Debugf("Query %s %s -> whitelisted (cached, ttl=%ds rtl=%ds)", qname, qtype, ttlSec, rtlSec)
+			}
+			if resp := cache.MakeCachedResponse(query, entry); resp != nil {
+				return resp
+			}
+			// MakeCachedResponse failed (corrupted wire bytes in stored entry);
+			// re-query the whitelist resolver rather than falling through to the
+			// normal pipeline which could block a whitelisted domain.
+			h.logger.Warnf("Whitelist cache entry for %s %s could not be unpacked, re-querying whitelist resolver", qname, qtype)
+		} else if entry != nil {
+			// A non-whitelist entry exists (e.g. stale blocked entry not yet
+			// invalidated after a whitelist reload). The whitelist always wins,
+			// so we ignore it and re-query the resolver.
+			h.logger.Debugf("Query %s %s -> whitelisted (non-whitelist cache entry present, querying resolver)", qname, qtype)
+		}
+	}
+
+	// Cache miss, cache disabled, or cache unusable: resolve via whitelist resolver.
+	h.logger.Debugf("Query %s %s -> whitelisted (querying resolver)", qname, qtype)
 	resp, err := h.whitelistResolver.Query(ctx, query)
 	if err != nil {
-		h.logger.Warnf("Whitelist resolver error for %s: %v", qname, err)
+		h.logger.Warnf("Whitelist resolver error for %s %s: %v", qname, qtype, err)
 		resp = new(dns.Msg)
 		dnsutil.SetReply(resp, query)
 		resp.Rcode = dns.RcodeServerFailure
@@ -70,7 +110,10 @@ func (h *Handler) handleWhitelistedQuery(ctx context.Context, query *dns.Msg, qn
 	resp.ID = query.ID
 	resp.RecursionAvailable = true
 	if h.cfg.Cache.Enabled {
-		h.cache.Put(query, resp, false)
+		h.cache.Put(query, resp, false, true) // whitelisted=true
+		h.logger.Debugf("Query %s %s -> final: rcode=%s blocked=false cached=true (whitelist resolver)", qname, qtype, dns.RcodeToString[resp.Rcode])
+	} else {
+		h.logger.Debugf("Query %s %s -> final: rcode=%s blocked=false cached=false (whitelist resolver)", qname, qtype, dns.RcodeToString[resp.Rcode])
 	}
 	return resp
 }
@@ -127,9 +170,9 @@ func (h *Handler) handleCacheHit(query *dns.Msg, qname, qtype string) *dns.Msg {
 //
 // Flow:
 //  1. Handle DDR (RFC 9461/9462) if applicable
-//  2. Whitelist check -> resolve via whitelist resolver if matched
-//  3. Blacklist check -> return blocked response if matched
-//  4. Check cache -> return cached if hit
+//  2. Whitelist check -> if whitelisted: check whitelist cache -> hit: return; miss: resolve via whitelist resolver, cache(Whitelisted=true), return
+//  3. Blacklist check -> return blocked response if matched (no cache read or write)
+//  4. Check general cache -> return cached if hit
 //  5. Fan out to all upstreams concurrently (with EDNS middleware)
 //  6. If any upstream signals blocked -> cache blocked, return 0.0.0.0/::
 //  7. If not blocked and all responded -> cache from 1st priority, return
@@ -208,7 +251,7 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 		blockedResp := dnsmsg.MakeBlockedResponse(query, h.cfg.Blocking.Mode, result.BlockedBy)
 
 		if h.cfg.Cache.Enabled && result.Cacheable {
-			h.cache.Put(query, blockedResp, true)
+			h.cache.Put(query, blockedResp, true, false)
 		}
 
 		h.logger.Debugf("Query %s %s -> final: rcode=%s blocked=true cached=%v",
@@ -230,7 +273,7 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 		qname, qtype, dns.RcodeToString[result.BestResponse.Rcode], result.Cacheable, result.AllResponded)
 
 	if h.cfg.Cache.Enabled && result.Cacheable {
-		h.cache.Put(query, result.BestResponse, false)
+		h.cache.Put(query, result.BestResponse, false, false)
 	}
 	result.BestResponse.ID = query.ID
 	// Set RA (Recursion Available) since we perform recursive resolution for
@@ -248,6 +291,80 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 	h.logger.Debugf("Query %s %s -> final: rcode=%s blocked=false cached=%v",
 		qname, qtype, dns.RcodeToString[result.BestResponse.Rcode], h.cfg.Cache.Enabled && result.Cacheable)
 	return result.BestResponse
+}
+
+// makeRefreshFunc returns the background-refresh callback for the cache.
+// Whitelisted entries are refreshed via wlResolver (keeping Whitelisted=true).
+// Normal entries fan out to all upstreams with block-consensus.
+func makeRefreshFunc(
+	resolver *upstream.Resolver,
+	wlResolver *upstream.WhitelistResolver,
+	c *cache.Cache,
+	cfg *config.Config,
+	logger *logging.Logger,
+	timeoutDur time.Duration,
+) func(*dns.Msg) {
+	return func(query *dns.Msg) {
+		qname, qtype := refreshQueryInfo(query)
+		logger.Debugf("Cache background-refresh started: %s %s", qname, qtype)
+
+		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), timeoutDur)
+		defer refreshCancel()
+
+		if wlResolver != nil && wlResolver.IsWhitelisted(qname) {
+			resp, err := wlResolver.Query(refreshCtx, query)
+			if err != nil {
+				logger.Debugf("Cache background-refresh (whitelist) failed: %s %s: %v", qname, qtype, err)
+				return
+			}
+			resp.ID = query.ID
+			resp.RecursionAvailable = true
+			c.Put(query, resp, false, true)
+			logger.Debugf("Cache background-refresh (whitelist) success: %s %s", qname, qtype)
+			return
+		}
+
+		result := resolver.Resolve(refreshCtx, query)
+		if result.BestResponse == nil {
+			logger.Debugf("Cache background-refresh failed (no response): %s %s", qname, qtype)
+			return
+		}
+		if !result.Cacheable {
+			logger.Debugf("Cache background-refresh skipped (not cacheable): %s %s", qname, qtype)
+			return
+		}
+		if result.Blocked {
+			logger.Debugf("Cache background-refresh: %s %s is now blocked, updating cache", qname, qtype)
+			blockedResp := dnsmsg.MakeBlockedResponse(query, cfg.Blocking.Mode, result.BlockedBy)
+			c.Put(query, blockedResp, true, false)
+		} else {
+			logger.Debugf("Cache background-refresh success: %s %s (rcode=%d)", qname, qtype, result.BestResponse.Rcode)
+			c.Put(query, result.BestResponse, false, false)
+		}
+	}
+}
+
+// makeWhitelistInvalidator returns a reload callback that invalidates cache
+// entries whose whitelist membership has changed.
+//
+//   - Whitelisted=true but no longer in whitelist: remove so next query
+//     re-evaluates through normal pipeline (may be blocked by upstreams).
+//   - Not whitelisted but now in whitelist: remove so next query is routed
+//     to the whitelist resolver and re-cached with Whitelisted=true.
+//
+// Invalidation runs in a background goroutine to avoid blocking the watcher.
+func makeWhitelistInvalidator(c *cache.Cache, logger *logging.Logger) func(*domainlist.DomainSet) {
+	return func(newSet *domainlist.DomainSet) {
+		go func() {
+			n := c.InvalidateIf(func(name string, entry *cache.Entry) bool {
+				isNowWhitelisted := newSet.Contains(name)
+				return entry.Whitelisted != isNowWhitelisted
+			})
+			if n > 0 {
+				logger.Infof("whitelist reload: invalidated %d cache entries whose whitelist membership changed", n)
+			}
+		}()
+	}
 }
 
 // startListeners starts all enabled downstream protocol listeners as
@@ -358,37 +475,16 @@ func RunContext(ctx context.Context, cfg *config.Config, logger *logging.Logger)
 	handler := NewHandler(resolver, wlResolver, blacklist, c, logger, cfg)
 
 	// Set up background cache refresh when renew_percent > 0.
-	// On each trigger: fan out to ALL upstreams using the same block-consensus
-	// rules. Commit to cache only when the result is cacheable. If not
-	// cacheable, the old entry remains valid until it naturally expires.
 	if cfg.Cache.Enabled && cfg.Cache.RenewPercent > 0 {
 		timeoutDur := time.Duration(cfg.UpstreamSettings.TimeoutMS) * time.Millisecond
-		c.SetRefreshFunc(func(query *dns.Msg) {
-			qname, qtype := refreshQueryInfo(query)
-			logger.Debugf("Cache background-refresh started: %s %s", qname, qtype)
+		c.SetRefreshFunc(makeRefreshFunc(resolver, wlResolver, c, cfg, logger, timeoutDur))
+	}
 
-			ctx, cancel := context.WithTimeout(context.Background(), timeoutDur)
-			defer cancel()
-
-			result := resolver.Resolve(ctx, query)
-
-			if result.BestResponse == nil {
-				logger.Debugf("Cache background-refresh failed (no response): %s %s", qname, qtype)
-				return
-			}
-			if !result.Cacheable {
-				logger.Debugf("Cache background-refresh skipped (not cacheable): %s %s", qname, qtype)
-				return // old entry stays valid until expiry
-			}
-			if result.Blocked {
-				logger.Debugf("Cache background-refresh: %s %s is now blocked, updating cache", qname, qtype)
-				blockedResp := dnsmsg.MakeBlockedResponse(query, cfg.Blocking.Mode, result.BlockedBy)
-				c.Put(query, blockedResp, true)
-			} else {
-				logger.Debugf("Cache background-refresh success: %s %s (rcode=%d)", qname, qtype, result.BestResponse.Rcode)
-				c.Put(query, result.BestResponse, false)
-			}
-		})
+	// When the whitelist hot-reloads, invalidate cache entries whose whitelist
+	// membership changed so that the next query picks the correct resolution
+	// path (whitelist resolver vs. blocking upstreams).
+	if wlResolver != nil {
+		wlResolver.OnListReload(makeWhitelistInvalidator(c, logger))
 	}
 
 	ctx, cancel := context.WithCancel(ctx)

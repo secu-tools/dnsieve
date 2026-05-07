@@ -49,23 +49,16 @@ Topology A
 
 **Q: Does DNSieve do DNSSEC validation?**
 
-No. DNSieve does not validate DNSSEC signatures itself. However, it does the
-following to improve DNSSEC behaviour:
+No. DNSieve is a forwarding proxy and does not validate DNSSEC signatures. However:
 
-- It always sets DO=1 on every upstream query so that DNSSEC-capable upstreams
-  return signed records (RRSIG) and the Authenticated Data (AD) bit, even when
-  the client did not request DNSSEC.
-- When multiple upstreams respond, DNSieve prefers a response that carries DNSSEC
-  data (RRSIG records or AD=1) over an unsigned response, regardless of the
-  upstream's configured priority index. Among DNSSEC responses, the
-  highest-priority index wins.
-- If none of the configured upstreams support DNSSEC, DNSieve falls back to the
-  normal highest-priority selection.
+- DO=1 is always set on every upstream query so DNSSEC-capable upstreams return
+  signed records even when the client did not request DNSSEC.
+- When multiple upstreams respond, DNSieve prefers a DNSSEC response (RRSIG or
+  AD=1) over an unsigned one.
+- Cache entries are segregated by the DO bit so DNSSEC-aware and non-DNSSEC
+  clients both receive correct responses.
 
-For best results, configure DNSSEC-validating upstreams. They perform the full
-chain-of-trust validation and set AD=1, which DNSieve recognises and forwards to
-clients that requested DNSSEC. Cache entries are segregated by the DO bit so
-DNSSEC-aware and non-DNSSEC clients both receive correct responses.
+See [docs/protocol.md -- DO Bit](protocol.md#do-bit-rfc-3225) for full details.
 
 **Q: Is DNSieve a recursive resolver?**
 
@@ -83,24 +76,18 @@ development and testing. To use the standard port, change `port = 5353` to
 **Q: How does block-consensus work?**
 
 On a cache miss, DNSieve fans out every query to all configured upstreams
-concurrently. If **any** upstream signals that the domain is blocked (by returning
-0.0.0.0, NXDOMAIN with no authority, REFUSED, or similar provider conventions),
-DNSieve caches and returns a blocked response to the client -- regardless of what
-the other upstreams replied. This ensures that the strictest upstream always wins.
+concurrently. If any upstream signals the domain is blocked, DNSieve returns
+a blocked response -- the strictest upstream always wins. See
+[docs/protocol.md -- Consensus Algorithm](protocol.md#consensus-algorithm) for
+the full algorithm.
 
 **Q: What does a "blocked" response look like to clients?**
 
-The response format depends on the configured `blocking.mode` setting. The
-default mode is `"null"`, which returns NOERROR with 0.0.0.0 (for A queries)
-or :: (for AAAA queries) and an Extended DNS Error (EDE) option with InfoCode
-15 (Blocked) per RFC 8914. Connections to 0.0.0.0/:: fail immediately with
-"connection refused" -- no timeout, no retry. This is the same approach used
-by Pi-hole (NULL blocking mode) and Technitium (AnyAddress mode).
-
-Other available modes: `"nxdomain"` (NXDOMAIN + empty answer), `"nodata"`
-(NOERROR + empty answer), and `"refused"` (REFUSED + empty answer). All modes
-include EDE code 15 with the name of the upstream that detected the block.
-See [configuration.md](configuration.md#blocking-mode) for details.
+The response format depends on `blocking.mode` in config. The default `"null"`
+mode returns NOERROR with 0.0.0.0 (A queries) or :: (AAAA queries) and an EDE
+option with InfoCode 15 (Blocked) per RFC 8914. Connections fail immediately with
+"connection refused". See [docs/protocol.md -- Blocked Response Format](protocol.md#blocked-response-format)
+and [docs/configuration.md -- Blocking Mode](configuration.md#blocking-mode).
 
 **Q: What is `min_wait_ms` and why does it exist?**
 
@@ -122,8 +109,8 @@ configure more than three.
 
 Yes. Enable the `[downstream.dot]` and/or `[downstream.doh]` listeners in your
 config and provide a TLS certificate under `[tls]`. DoH can also run in plaintext
-HTTP mode (`use_plaintext_http = true`) behind a reverse proxy like nginx that
-handles TLS termination.
+HTTP mode (`use_plaintext_http = true`) behind a reverse proxy. See
+[docs/configuration.md -- Downstream Listeners](configuration.md#downstream-listeners).
 
 **Q: Can I whitelist a domain so it is never blocked?**
 
@@ -162,11 +149,10 @@ Yes -- entries in list files use the same format:
 
 **Q: How does the cache background refresh work?**
 
-When a cached entry's remaining TTL falls below `renew_percent` (default: 10 %)
+When a cached entry's remaining TTL falls below `renew_percent` (default 10%)
 and a client requests that domain, DNSieve returns the cached result immediately
-and re-queries all upstreams in the background. This keeps frequently used entries
-fresh without adding latency to the client. If the background re-query shows a
-change in block status, the cache is updated before the entry expires naturally.
+and re-queries upstreams in the background. This keeps frequently used entries
+fresh without adding latency. See [docs/caching.md -- Background Refresh](caching.md#background-refresh) for full details.
 
 **Q: Do I need to restart DNSieve to change the config?**
 

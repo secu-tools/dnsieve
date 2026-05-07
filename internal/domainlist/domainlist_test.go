@@ -2348,3 +2348,153 @@ func TestHardening_VeryLongLine_NotLoaded(t *testing.T) {
 		t.Errorf("300-char label domain must be rejected, got %d entries", set.Count())
 	}
 }
+
+// =============================================================================
+// OnReload callback tests
+// =============================================================================
+
+func TestDomainList_OnReload_CalledAfterHotReload(t *testing.T) {
+	// Write initial list file with one domain.
+	dir := t.TempDir()
+	listPath := filepath.Join(dir, "list.txt")
+	if err := os.WriteFile(listPath, []byte("initial.example.com\n"), 0644); err != nil {
+		t.Fatalf("write initial list: %v", err)
+	}
+
+	dl := NewDomainList("test", ModeBlock, []string{listPath})
+	if _, _, _, err := dl.Load(nil); err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+
+	var (
+		mu        sync.Mutex
+		callCount int
+		lastSet   *DomainSet
+	)
+	dl.OnReload(func(newSet *DomainSet) {
+		mu.Lock()
+		callCount++
+		lastSet = newSet
+		mu.Unlock()
+	})
+
+	// Start watcher with a short interval.
+	dl.StartWatcher(1, func(f string, a ...interface{}) {}, func(f string, a ...interface{}) {}, func(f string, a ...interface{}) {})
+	defer dl.Stop()
+
+	// Modify the file.
+	time.Sleep(200 * time.Millisecond)
+	if err := os.WriteFile(listPath, []byte("initial.example.com\nnew.example.com\n"), 0644); err != nil {
+		t.Fatalf("write updated list: %v", err)
+	}
+
+	// Wait for reload (watcher checks every 1s).
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := callCount
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	mu.Lock()
+	n := callCount
+	set := lastSet
+	mu.Unlock()
+
+	if n == 0 {
+		t.Fatal("OnReload callback was not called after file change")
+	}
+	if set == nil {
+		t.Fatal("OnReload callback received nil DomainSet")
+	}
+	if !set.Contains("new.example.com") {
+		t.Error("reloaded set should contain newly added domain new.example.com")
+	}
+}
+
+func TestDomainList_OnReload_NotCalledWhenNoChange(t *testing.T) {
+	dir := t.TempDir()
+	listPath := filepath.Join(dir, "list.txt")
+	if err := os.WriteFile(listPath, []byte("stable.example.com\n"), 0644); err != nil {
+		t.Fatalf("write list: %v", err)
+	}
+
+	dl := NewDomainList("test", ModeBlock, []string{listPath})
+	if _, _, _, err := dl.Load(nil); err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+
+	var called bool
+	dl.OnReload(func(_ *DomainSet) { called = true })
+
+	dl.StartWatcher(1, func(f string, a ...interface{}) {}, func(f string, a ...interface{}) {}, func(f string, a ...interface{}) {})
+	defer dl.Stop()
+
+	// No file change: wait two watcher cycles.
+	time.Sleep(2500 * time.Millisecond)
+
+	if called {
+		t.Error("OnReload should not be called when no file change occurred")
+	}
+}
+
+func TestDomainList_OnReload_MultipleCallbacks(t *testing.T) {
+	dir := t.TempDir()
+	listPath := filepath.Join(dir, "list.txt")
+	if err := os.WriteFile(listPath, []byte("a.example.com\n"), 0644); err != nil {
+		t.Fatalf("write list: %v", err)
+	}
+
+	dl := NewDomainList("test", ModeBlock, []string{listPath})
+	if _, _, _, err := dl.Load(nil); err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+
+	var mu sync.Mutex
+	counts := [3]int{}
+	for i := range counts {
+		idx := i
+		dl.OnReload(func(_ *DomainSet) {
+			mu.Lock()
+			counts[idx]++
+			mu.Unlock()
+		})
+	}
+
+	dl.StartWatcher(1, func(f string, a ...interface{}) {}, func(f string, a ...interface{}) {}, func(f string, a ...interface{}) {})
+	defer dl.Stop()
+
+	time.Sleep(200 * time.Millisecond)
+	if err := os.WriteFile(listPath, []byte("a.example.com\nb.example.com\n"), 0644); err != nil {
+		t.Fatalf("write updated list: %v", err)
+	}
+
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		allCalled := counts[0] > 0 && counts[1] > 0 && counts[2] > 0
+		mu.Unlock()
+		if allCalled {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for i, n := range counts {
+		if n == 0 {
+			t.Errorf("callback %d was not called after reload", i)
+		}
+	}
+}
+
+func TestDomainList_OnReload_NilCallbackIgnored(t *testing.T) {
+	dl := NewDomainList("test", ModeBlock, nil)
+	// Must not panic.
+	dl.OnReload(nil)
+}

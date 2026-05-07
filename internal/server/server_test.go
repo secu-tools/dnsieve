@@ -2243,3 +2243,1023 @@ func TestServePlain_EDNS_HasOPTInResponse(t *testing.T) {
 		t.Error("EDNS client: response should include OPT record (UDPSize != 0)")
 	}
 }
+
+// =============================================================================
+// Whitelist caching tests
+// =============================================================================
+
+// newTestHandlerWithWhitelistAndUpstream creates a Handler that has a whitelist
+// resolver and a separate blocking upstream. whitelistDomains specifies which
+// domains are in the whitelist; whitelistResp is what the whitelist resolver
+// returns; blockingResp is what the main upstream returns (typically blocked).
+func newTestHandlerWithWhitelistAndUpstream(
+	t *testing.T,
+	whitelistDomains []string,
+	whitelistResp *dns.Msg,
+	upstreamResp *dns.Msg,
+) *Handler {
+	t.Helper()
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+	cfg.Cache.MaxEntries = 100
+	cfg.Cache.MinTTL = 1
+	cfg.Whitelist = config.WhitelistConfig{Enabled: true}
+
+	c := cache.New(100, 3600, 1, 0)
+
+	// Whitelist domain list from temp file
+	wlList := testDomainList(t, whitelistDomains)
+
+	wlClient := &mockUpstreamClient{name: "whitelist-resolver", response: whitelistResp}
+	wlRes := upstream.NewWhitelistResolverFromClient(wlClient, &cfg.Whitelist, wlList)
+
+	upClient := &mockUpstreamClient{name: "main-upstream", response: upstreamResp}
+	resolver := upstream.NewResolverFromClients([]upstream.Client{upClient}, 2*time.Second, 50*time.Millisecond, logger)
+
+	return NewHandler(resolver, wlRes, nil, c, logger, cfg)
+}
+
+// countCallsClient wraps a mockUpstreamClient and counts Query invocations.
+type countCallsClient struct {
+	*mockUpstreamClient
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countCallsClient) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+	return c.mockUpstreamClient.Query(ctx, msg)
+}
+
+func (c *countCallsClient) Calls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+func TestHandleQuery_WhitelistCacheHit(t *testing.T) {
+	// First query should hit whitelist resolver; second should be served from cache.
+	query := makeQuery("safe.example.com", dns.TypeA)
+
+	wlResp := new(dns.Msg)
+	dnsutil.SetReply(wlResp, query)
+	wlResp.Answer = append(wlResp.Answer, &dns.A{
+		Hdr: dns.Header{Name: "safe.example.com.", Class: dns.ClassINET, TTL: 300},
+		A:   rdata.A{Addr: netip.MustParseAddr("5.5.5.5")},
+	})
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+	cfg.Cache.MaxEntries = 100
+	cfg.Cache.MinTTL = 1
+	cfg.Whitelist = config.WhitelistConfig{Enabled: true}
+
+	c := cache.New(100, 3600, 1, 0)
+	wlList := testDomainList(t, []string{"safe.example.com"})
+
+	wlCount := &countCallsClient{
+		mockUpstreamClient: &mockUpstreamClient{name: "wl", response: wlResp},
+	}
+	wlRes := upstream.NewWhitelistResolverFromClient(wlCount, &cfg.Whitelist, wlList)
+
+	blockResp := makeBlockedResp(query)
+	upCount := &countCallsClient{
+		mockUpstreamClient: &mockUpstreamClient{name: "up", response: blockResp},
+	}
+	resolver := upstream.NewResolverFromClients([]upstream.Client{upCount}, 2*time.Second, 50*time.Millisecond, logger)
+
+	handler := NewHandler(resolver, wlRes, nil, c, logger, cfg)
+
+	// First query: whitelist resolver called, result cached.
+	resp1 := handler.HandleQuery(context.Background(), query)
+	if resp1 == nil {
+		t.Fatal("expected response on first query")
+	}
+	a1, ok := resp1.Answer[0].(*dns.A)
+	if !ok || a1.Addr != netip.MustParseAddr("5.5.5.5") {
+		t.Errorf("first query: expected whitelist IP 5.5.5.5, got %v", resp1.Answer)
+	}
+	if wlCount.Calls() != 1 {
+		t.Errorf("first query: expected 1 whitelist resolver call, got %d", wlCount.Calls())
+	}
+
+	// Second query: served from cache, whitelist resolver NOT called again.
+	query2 := makeQuery("safe.example.com", dns.TypeA)
+	query2.ID = 9999
+	resp2 := handler.HandleQuery(context.Background(), query2)
+	if resp2 == nil {
+		t.Fatal("expected cached response on second query")
+	}
+	if resp2.ID != 9999 {
+		t.Errorf("cached response ID should be 9999, got %d", resp2.ID)
+	}
+	if wlCount.Calls() != 1 {
+		t.Errorf("second query: whitelist resolver should not be called again (got %d calls)", wlCount.Calls())
+	}
+	if upCount.Calls() != 0 {
+		t.Errorf("upstream should never be queried for whitelisted domain (got %d calls)", upCount.Calls())
+	}
+}
+
+func TestHandleQuery_WhitelistCacheOnlyServesWhitelistedEntry(t *testing.T) {
+	// If the cache has a non-whitelisted entry for a domain and the domain is
+	// then added to the whitelist, the non-whitelisted entry must NOT be served
+	// from the whitelist path. (Invalidation handles this in RunContext; here we
+	// verify the whitelist path checks entry.Whitelisted before serving.)
+	query := makeQuery("flip.example.com", dns.TypeA)
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+	cfg.Cache.MaxEntries = 100
+	cfg.Cache.MinTTL = 1
+	cfg.Whitelist = config.WhitelistConfig{Enabled: true}
+
+	c := cache.New(100, 3600, 1, 0)
+
+	// Pre-seed cache with a non-whitelisted (blocked) entry.
+	blockedResp := makeBlockedResp(query)
+	c.Put(query, blockedResp, true, false) // whitelisted=false
+
+	wlResp := new(dns.Msg)
+	dnsutil.SetReply(wlResp, query)
+	wlResp.Answer = append(wlResp.Answer, &dns.A{
+		Hdr: dns.Header{Name: "flip.example.com.", Class: dns.ClassINET, TTL: 300},
+		A:   rdata.A{Addr: netip.MustParseAddr("9.9.9.9")},
+	})
+	wlList := testDomainList(t, []string{"flip.example.com"})
+	wlClient := &mockUpstreamClient{name: "wl", response: wlResp}
+	wlRes := upstream.NewWhitelistResolverFromClient(wlClient, &cfg.Whitelist, wlList)
+
+	upClient := &mockUpstreamClient{name: "up", response: makeNormalResp(query)}
+	resolver := upstream.NewResolverFromClients([]upstream.Client{upClient}, 2*time.Second, 50*time.Millisecond, logger)
+
+	handler := NewHandler(resolver, wlRes, nil, c, logger, cfg)
+	resp := handler.HandleQuery(context.Background(), query)
+
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	// The domain is whitelisted, non-whitelisted cached entry should be bypassed,
+	// whitelist resolver should return 9.9.9.9.
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok || a.Addr != netip.MustParseAddr("9.9.9.9") {
+		t.Errorf("expected whitelist resolver IP 9.9.9.9, got %v", resp.Answer)
+	}
+}
+
+func TestHandleQuery_WhitelistCacheDisabledFlowsToResolver(t *testing.T) {
+	// When cache is disabled, every whitelist query must hit the whitelist resolver.
+	query := makeQuery("safe.example.com", dns.TypeA)
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = false
+	cfg.Whitelist = config.WhitelistConfig{Enabled: true}
+
+	c := cache.New(0, 1, 1, 0)
+
+	wlResp := new(dns.Msg)
+	dnsutil.SetReply(wlResp, query)
+	wlResp.Answer = append(wlResp.Answer, &dns.A{
+		Hdr: dns.Header{Name: "safe.example.com.", Class: dns.ClassINET, TTL: 300},
+		A:   rdata.A{Addr: netip.MustParseAddr("1.1.1.1")},
+	})
+	wlCount := &countCallsClient{
+		mockUpstreamClient: &mockUpstreamClient{name: "wl", response: wlResp},
+	}
+	wlList := testDomainList(t, []string{"safe.example.com"})
+	wlRes := upstream.NewWhitelistResolverFromClient(wlCount, &cfg.Whitelist, wlList)
+
+	resolver := upstream.NewResolverFromClients(nil, 2*time.Second, 50*time.Millisecond, logger)
+	handler := NewHandler(resolver, wlRes, nil, c, logger, cfg)
+
+	for i := 0; i < 3; i++ {
+		q := makeQuery("safe.example.com", dns.TypeA)
+		handler.HandleQuery(context.Background(), q)
+	}
+	if wlCount.Calls() != 3 {
+		t.Errorf("cache disabled: expected 3 whitelist resolver calls, got %d", wlCount.Calls())
+	}
+}
+
+func TestHandleQuery_WhitelistCacheRespectsTTL(t *testing.T) {
+	// Cached whitelist entry must respect min_ttl (clamping short upstream TTLs).
+	query := makeQuery("safe.example.com", dns.TypeA)
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+	cfg.Cache.MaxEntries = 100
+	cfg.Cache.MinTTL = 60 // force min 60s
+	cfg.Whitelist = config.WhitelistConfig{Enabled: true}
+
+	c := cache.New(100, 3600, 60, 0)
+
+	wlResp := new(dns.Msg)
+	dnsutil.SetReply(wlResp, query)
+	wlResp.Answer = append(wlResp.Answer, &dns.A{
+		Hdr: dns.Header{Name: "safe.example.com.", Class: dns.ClassINET, TTL: 10}, // short TTL
+		A:   rdata.A{Addr: netip.MustParseAddr("5.5.5.5")},
+	})
+	wlList := testDomainList(t, []string{"safe.example.com"})
+	wlClient := &mockUpstreamClient{name: "wl", response: wlResp}
+	wlRes := upstream.NewWhitelistResolverFromClient(wlClient, &cfg.Whitelist, wlList)
+
+	upClient := &mockUpstreamClient{name: "up", response: makeBlockedResp(query)}
+	resolver := upstream.NewResolverFromClients([]upstream.Client{upClient}, 2*time.Second, 50*time.Millisecond, logger)
+	handler := NewHandler(resolver, wlRes, nil, c, logger, cfg)
+
+	resp := handler.HandleQuery(context.Background(), query)
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+
+	// Entry should be cached -- verify it has a Whitelisted flag.
+	entry, _ := c.Get(query)
+	if entry == nil {
+		t.Fatal("expected cached entry")
+	}
+	if !entry.Whitelisted {
+		t.Error("cached entry should have Whitelisted=true")
+	}
+	// TTL should be clamped to minTTL (60s) since upstream gave 10s.
+	ttl := entry.ExpiresAt.Sub(entry.InsertedAt)
+	if ttl < 59*time.Second {
+		t.Errorf("expected TTL >= 60s (minTTL), got %s", ttl)
+	}
+}
+
+func TestHandleQuery_BlacklistNoCacheLookupNoWrite(t *testing.T) {
+	// Blacklisted domain: no cache lookup, no cache write, just block.
+	query := makeQuery("evil.example.com", dns.TypeA)
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+	cfg.Cache.MaxEntries = 100
+
+	c := cache.New(100, 3600, 5, 0)
+
+	// Pre-seed cache with a normal entry to confirm cache is not read.
+	normalEntry := makeNormalResp(query)
+	c.Put(query, normalEntry, false, false)
+
+	bl := testDomainList(t, []string{"evil.example.com"})
+
+	upClient := &mockUpstreamClient{name: "up", response: makeNormalResp(query)}
+	resolver := upstream.NewResolverFromClients([]upstream.Client{upClient}, 2*time.Second, 50*time.Millisecond, logger)
+	handler := NewHandler(resolver, nil, bl, c, logger, cfg)
+
+	resp := handler.HandleQuery(context.Background(), query)
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	// Must be blocked (EDE Blocked).
+	if !hasEDEBlocked(resp) {
+		t.Error("blacklisted domain must return EDE Blocked, not the cached normal entry")
+	}
+	// Cache should still only have the original 1 entry -- blacklist does not write.
+	if c.Len() != 1 {
+		t.Errorf("blacklist should not write to cache, got %d entries", c.Len())
+	}
+}
+
+func TestHandleQuery_WhitelistReloadInvalidatesRemovedDomain(t *testing.T) {
+	// When a domain is removed from the whitelist and the list hot-reloads,
+	// its cache entry (Whitelisted=true) must be invalidated so the next
+	// query goes through the normal upstream path (which may block it).
+	query := makeQuery("waswhite.example.com", dns.TypeA)
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+	cfg.Cache.MaxEntries = 100
+	cfg.Whitelist = config.WhitelistConfig{Enabled: true}
+
+	c := cache.New(100, 3600, 5, 0)
+
+	// Seed a whitelisted cache entry.
+	wlResp := makeNormalResp(query)
+	c.Put(query, wlResp, false, true) // Whitelisted=true
+
+	if entry, _ := c.Get(query); entry == nil || !entry.Whitelisted {
+		t.Fatal("precondition: entry must be cached as whitelisted")
+	}
+
+	// Build a new DomainSet that does NOT contain the domain (simulates removal).
+	emptySet := domainlist.EmptySet()
+
+	// Simulate whitelist invalidation logic as wired in RunContext:
+	// when whitelist entry.Whitelisted != isNowWhitelisted, invalidate.
+	go func() {
+		n := c.InvalidateIf(func(name string, entry *cache.Entry) bool {
+			isNowWhitelisted := emptySet.Contains(name)
+			return entry.Whitelisted != isNowWhitelisted
+		})
+		if n != 1 {
+			t.Errorf("expected 1 entry invalidated, got %d", n)
+		}
+	}()
+
+	// Allow the goroutine to complete.
+	time.Sleep(50 * time.Millisecond)
+
+	if entry, _ := c.Get(query); entry != nil {
+		t.Error("cache entry for removed-whitelist domain should have been invalidated")
+	}
+}
+
+func TestHandleQuery_WhitelistReloadInvalidatesAddedDomain(t *testing.T) {
+	// When a domain is ADDED to the whitelist and the list hot-reloads,
+	// any previously cached (non-whitelist) entry must be invalidated so the
+	// next query goes through the whitelist path.
+	query := makeQuery("newwhite.example.com", dns.TypeA)
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+	cfg.Cache.MaxEntries = 100
+	cfg.Whitelist = config.WhitelistConfig{Enabled: true}
+	_ = logger
+
+	c := cache.New(100, 3600, 5, 0)
+
+	// Seed a blocked (non-whitelisted) cache entry.
+	blockedResp := makeBlockedResp(query)
+	c.Put(query, blockedResp, true, false) // Whitelisted=false, Blocked=true
+
+	if entry, _ := c.Get(query); entry == nil || entry.Whitelisted {
+		t.Fatal("precondition: entry must be cached as blocked/non-whitelisted")
+	}
+
+	// Build a new DomainSet that DOES contain the domain (simulates addition).
+	newSet, _ := domainlist.ParseReader(strings.NewReader("newwhite.example.com\n"), domainlist.ModeAllow)
+
+	go func() {
+		n := c.InvalidateIf(func(name string, entry *cache.Entry) bool {
+			isNowWhitelisted := newSet.Contains(name)
+			return entry.Whitelisted != isNowWhitelisted
+		})
+		if n != 1 {
+			t.Errorf("expected 1 entry invalidated, got %d", n)
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	if entry, _ := c.Get(query); entry != nil {
+		t.Error("blocked cache entry for newly-whitelisted domain should have been invalidated")
+	}
+}
+
+func TestHandleQuery_WhitelistEntryTaggedInCache(t *testing.T) {
+	// After a whitelist resolver query, the cache entry must have Whitelisted=true.
+	query := makeQuery("tag.example.com", dns.TypeA)
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+	cfg.Cache.MaxEntries = 100
+	cfg.Whitelist = config.WhitelistConfig{Enabled: true}
+
+	c := cache.New(100, 3600, 5, 0)
+	wlResp := makeNormalResp(query)
+	wlList := testDomainList(t, []string{"tag.example.com"})
+	wlClient := &mockUpstreamClient{name: "wl", response: wlResp}
+	wlRes := upstream.NewWhitelistResolverFromClient(wlClient, &cfg.Whitelist, wlList)
+
+	upClient := &mockUpstreamClient{name: "up", response: makeBlockedResp(query)}
+	resolver := upstream.NewResolverFromClients([]upstream.Client{upClient}, 2*time.Second, 50*time.Millisecond, logger)
+	handler := NewHandler(resolver, wlRes, nil, c, logger, cfg)
+
+	handler.HandleQuery(context.Background(), query)
+
+	entry, _ := c.Get(query)
+	if entry == nil {
+		t.Fatal("expected entry in cache after whitelist query")
+	}
+	if !entry.Whitelisted {
+		t.Error("entry cached after whitelist resolution must have Whitelisted=true")
+	}
+	if entry.Blocked {
+		t.Error("whitelisted entry must not be blocked")
+	}
+}
+
+func TestHandleQuery_WhitelistErrorNoCache(t *testing.T) {
+	// When whitelist resolver errors, SERVFAIL is returned and nothing is cached.
+	query := makeQuery("safe.example.com", dns.TypeA)
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+	cfg.Cache.MaxEntries = 100
+	cfg.Whitelist = config.WhitelistConfig{Enabled: true}
+
+	c := cache.New(100, 3600, 5, 0)
+	wlList := testDomainList(t, []string{"safe.example.com"})
+	errClient := &mockUpstreamClient{
+		name: "wl-err",
+		err:  fmt.Errorf("whitelist resolver timeout"),
+	}
+	wlRes := upstream.NewWhitelistResolverFromClient(errClient, &cfg.Whitelist, wlList)
+
+	upClient := &mockUpstreamClient{name: "up", response: makeNormalResp(query)}
+	resolver := upstream.NewResolverFromClients([]upstream.Client{upClient}, 2*time.Second, 50*time.Millisecond, logger)
+	handler := NewHandler(resolver, wlRes, nil, c, logger, cfg)
+
+	resp := handler.HandleQuery(context.Background(), query)
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	if resp.Rcode != dns.RcodeServerFailure {
+		t.Errorf("expected SERVFAIL on whitelist resolver error, got %s", dns.RcodeToString[resp.Rcode])
+	}
+	if c.Len() != 0 {
+		t.Errorf("error response must not be cached, got %d entries", c.Len())
+	}
+}
+
+func TestHandleQuery_WhitelistNormalDomainNotCachedAsWhitelisted(t *testing.T) {
+	// A normal (non-whitelisted) upstream result must NOT be tagged Whitelisted.
+	query := makeQuery("normal.example.com", dns.TypeA)
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+	cfg.Cache.MaxEntries = 100
+	cfg.Whitelist = config.WhitelistConfig{Enabled: true}
+
+	c := cache.New(100, 3600, 5, 0)
+	wlList := testDomainList(t, []string{"safe.example.com"}) // different domain
+	wlClient := &mockUpstreamClient{name: "wl", response: makeNormalResp(query)}
+	wlRes := upstream.NewWhitelistResolverFromClient(wlClient, &cfg.Whitelist, wlList)
+
+	upClient := &mockUpstreamClient{name: "up", response: makeNormalResp(query)}
+	resolver := upstream.NewResolverFromClients([]upstream.Client{upClient}, 2*time.Second, 50*time.Millisecond, logger)
+	handler := NewHandler(resolver, wlRes, nil, c, logger, cfg)
+
+	handler.HandleQuery(context.Background(), query)
+
+	entry, _ := c.Get(query)
+	if entry == nil {
+		t.Fatal("expected cached entry")
+	}
+	if entry.Whitelisted {
+		t.Error("normal (non-whitelisted) domain must not be tagged Whitelisted in cache")
+	}
+}
+
+// =============================================================================
+// Wildcard whitelist invalidation tests
+//
+// These tests verify that makeWhitelistInvalidator correctly handles wildcard
+// matching via DomainSet.Contains. The key property is that
+// DomainSet.Contains uses matchWildcard which walks up the domain hierarchy,
+// so "*.example.com" covers "abc.example.com", "x.y.z.example.com", etc.
+//
+// The predicate used in production: entry.Whitelisted != newSet.Contains(name)
+// removes an entry when its cached whitelist status no longer matches the
+// current whitelist domain set.
+// =============================================================================
+
+// makeQueryDO returns a query with the DNSSEC OK (DO) bit set.
+func makeQueryDO(name string, qtype uint16) *dns.Msg {
+	q := makeQuery(name, qtype)
+	opt := &dns.OPT{}
+	opt.Hdr.Name = "."
+	opt.SetUDPSize(4096)
+	opt.SetSecurity(true)
+	q.Pseudo = append(q.Pseudo, opt)
+	return q
+}
+
+// invalidatePred is the production predicate from makeWhitelistInvalidator.
+func invalidatePred(newSet *domainlist.DomainSet) func(string, *cache.Entry) bool {
+	return func(name string, entry *cache.Entry) bool {
+		return entry.Whitelisted != newSet.Contains(name)
+	}
+}
+
+// TestHandleQuery_WhitelistReloadWildcard_SubdomainInvalidated verifies that
+// when *.example.com is removed from the whitelist, a cached entry for a
+// direct subdomain (abc.example.com) tagged Whitelisted=true is removed.
+func TestHandleQuery_WhitelistReloadWildcard_SubdomainInvalidated(t *testing.T) {
+	c := cache.New(100, 3600, 5, 0)
+	q := makeQuery("abc.example.com", dns.TypeA)
+	c.Put(q, makeNormalResp(q), false, true) // Whitelisted=true
+
+	if entry, _ := c.Get(q); entry == nil || !entry.Whitelisted {
+		t.Fatal("precondition: entry must be cached as whitelisted")
+	}
+
+	// New set: *.example.com is GONE.
+	emptySet := domainlist.EmptySet()
+	n := c.InvalidateIf(invalidatePred(emptySet))
+	if n != 1 {
+		t.Errorf("expected 1 invalidated entry, got %d", n)
+	}
+	if entry, _ := c.Get(q); entry != nil {
+		t.Error("abc.example.com must be invalidated when *.example.com is removed")
+	}
+}
+
+// TestHandleQuery_WhitelistReloadWildcard_DeepSubdomainInvalidated verifies
+// that a deep subdomain many levels below the wildcard apex is invalidated
+// when the wildcard is removed. This validates that matchWildcard walks up the
+// full hierarchy, not just one level.
+func TestHandleQuery_WhitelistReloadWildcard_DeepSubdomainInvalidated(t *testing.T) {
+	c := cache.New(100, 3600, 5, 0)
+	q := makeQuery("e1.a2.b3.v4.sub.example.com", dns.TypeA)
+	c.Put(q, makeNormalResp(q), false, true) // Whitelisted=true, covered by *.example.com
+
+	// New set with *.example.com removed entirely.
+	emptySet := domainlist.EmptySet()
+	n := c.InvalidateIf(invalidatePred(emptySet))
+	if n != 1 {
+		t.Errorf("expected 1 invalidated entry, got %d", n)
+	}
+	if entry, _ := c.Get(q); entry != nil {
+		t.Error("e1.a2.b3.v4.sub.example.com must be invalidated when *.example.com is removed")
+	}
+}
+
+// TestHandleQuery_WhitelistReloadWildcard_AddedCoversDeepSubdomain verifies
+// the reverse direction: a non-whitelisted cache entry for a deep subdomain
+// is invalidated when *.example.com is ADDED to the whitelist.
+func TestHandleQuery_WhitelistReloadWildcard_AddedCoversDeepSubdomain(t *testing.T) {
+	c := cache.New(100, 3600, 5, 0)
+	q := makeQuery("e1.a2.b3.v4.sub.example.com", dns.TypeA)
+	c.Put(q, makeBlockedResp(q), true, false) // Whitelisted=false, Blocked=true
+
+	if entry, _ := c.Get(q); entry == nil || entry.Whitelisted {
+		t.Fatal("precondition: entry must be cached as blocked/non-whitelisted")
+	}
+
+	// New set: *.example.com is NOW in the whitelist.
+	newSet, err := domainlist.ParseReader(strings.NewReader("*.example.com\n"), domainlist.ModeAllow)
+	if err != nil {
+		t.Fatalf("parse domain set: %v", err)
+	}
+	n := c.InvalidateIf(invalidatePred(newSet))
+	if n != 1 {
+		t.Errorf("expected 1 invalidated entry, got %d", n)
+	}
+	if entry, _ := c.Get(q); entry != nil {
+		t.Error("deep subdomain blocked entry must be invalidated when *.example.com is added to whitelist")
+	}
+}
+
+// TestHandleQuery_WhitelistReloadWildcard_ApexMatchedByWildcard verifies that
+// the apex domain itself (example.com) is also covered by *.example.com in the
+// whitelist, so it is invalidated when the wildcard is removed.
+// DomainSet stores *.example.com as wildcard["example.com"], and matchWildcard
+// for "example.com" will match it directly.
+func TestHandleQuery_WhitelistReloadWildcard_ApexMatchedByWildcard(t *testing.T) {
+	c := cache.New(100, 3600, 5, 0)
+	// The apex domain "example.com" is matched by *.example.com.
+	q := makeQuery("example.com", dns.TypeA)
+	c.Put(q, makeNormalResp(q), false, true) // Whitelisted=true
+
+	// Verify it's whitelisted (meaning *.example.com was in the list at write time).
+	if entry, _ := c.Get(q); entry == nil || !entry.Whitelisted {
+		t.Fatal("precondition: apex entry must be cached as whitelisted")
+	}
+
+	// New set: *.example.com is GONE.
+	emptySet := domainlist.EmptySet()
+	n := c.InvalidateIf(invalidatePred(emptySet))
+	if n != 1 {
+		t.Errorf("expected 1 invalidated entry (apex), got %d", n)
+	}
+	if entry, _ := c.Get(q); entry != nil {
+		t.Error("apex example.com entry must be invalidated when *.example.com wildcard is removed")
+	}
+}
+
+// TestHandleQuery_WhitelistReloadWildcard_PreservesOtherDomain verifies that
+// invalidating entries for example.com does not touch entries for other.com.
+func TestHandleQuery_WhitelistReloadWildcard_PreservesOtherDomain(t *testing.T) {
+	c := cache.New(100, 3600, 5, 0)
+
+	qExample := makeQuery("abc.example.com", dns.TypeA)
+	qOther := makeQuery("abc.other.com", dns.TypeA)
+	c.Put(qExample, makeNormalResp(qExample), false, true) // Whitelisted=true
+	c.Put(qOther, makeNormalResp(qOther), false, true)     // Whitelisted=true
+
+	// New set: *.other.com still present, *.example.com removed.
+	newSet, err := domainlist.ParseReader(strings.NewReader("*.other.com\n"), domainlist.ModeAllow)
+	if err != nil {
+		t.Fatalf("parse domain set: %v", err)
+	}
+	n := c.InvalidateIf(invalidatePred(newSet))
+	if n != 1 {
+		t.Errorf("expected 1 invalidated entry (example only), got %d", n)
+	}
+	if entry, _ := c.Get(qExample); entry != nil {
+		t.Error("abc.example.com must be invalidated")
+	}
+	if entry, _ := c.Get(qOther); entry == nil {
+		t.Error("abc.other.com must be preserved (still whitelisted)")
+	}
+}
+
+// TestHandleQuery_WhitelistReloadWildcard_MultipleQtypesBothInvalidated
+// verifies that when a domain has separate cache entries for A, AAAA, and MX
+// (all whitelisted), removing the wildcard invalidates all of them.
+func TestHandleQuery_WhitelistReloadWildcard_MultipleQtypesBothInvalidated(t *testing.T) {
+	c := cache.New(100, 3600, 5, 0)
+
+	qA := makeQuery("abc.example.com", dns.TypeA)
+	qAAAA := makeQuery("abc.example.com", dns.TypeAAAA)
+
+	respA := makeNormalResp(qA)
+	respAAAA := new(dns.Msg)
+	dnsutil.SetReply(respAAAA, qAAAA)
+	respAAAA.Answer = append(respAAAA.Answer, &dns.AAAA{
+		Hdr:  dns.Header{Name: qAAAA.Question[0].Header().Name, Class: dns.ClassINET, TTL: 300},
+		AAAA: rdata.AAAA{Addr: netip.MustParseAddr("2001:db8::1")},
+	})
+
+	c.Put(qA, respA, false, true)       // Whitelisted=true
+	c.Put(qAAAA, respAAAA, false, true) // Whitelisted=true
+
+	if c.Len() != 2 {
+		t.Fatalf("precondition: expected 2 cache entries, got %d", c.Len())
+	}
+
+	emptySet := domainlist.EmptySet()
+	n := c.InvalidateIf(invalidatePred(emptySet))
+	if n != 2 {
+		t.Errorf("expected both A and AAAA entries invalidated, got %d", n)
+	}
+	if c.Len() != 0 {
+		t.Error("cache must be empty after invalidating all entries")
+	}
+}
+
+// TestHandleQuery_WhitelistReloadWildcard_DOBitSegregatedBothInvalidated
+// verifies that DO=0 and DO=1 entries for the same domain (stored under
+// different cache keys per RFC 3225) are both invalidated when the wildcard
+// is removed from the whitelist.
+func TestHandleQuery_WhitelistReloadWildcard_DOBitSegregatedBothInvalidated(t *testing.T) {
+	c := cache.New(100, 3600, 5, 0)
+
+	qNoDO := makeQuery("abc.example.com", dns.TypeA)
+	qDO := makeQueryDO("abc.example.com", dns.TypeA)
+
+	c.Put(qNoDO, makeNormalResp(qNoDO), false, true) // key: abc.example.com./A/IN
+	c.Put(qDO, makeNormalResp(qDO), false, true)     // key: abc.example.com./A/IN/DO
+
+	if c.Len() != 2 {
+		t.Fatalf("precondition: expected 2 separate cache entries (DO=0 and DO=1), got %d", c.Len())
+	}
+
+	emptySet := domainlist.EmptySet()
+	n := c.InvalidateIf(invalidatePred(emptySet))
+	if n != 2 {
+		t.Errorf("expected both DO=0 and DO=1 entries invalidated, got %d", n)
+	}
+}
+
+// TestHandleQuery_WhitelistReloadWildcard_MixedEntriesSelective verifies the
+// full mixed scenario:
+//   - example.com entries (whitelisted=true): invalidated when *.example.com removed
+//   - other.com entries (whitelisted=false): invalidated when *.other.com added
+//   - third.com entries (whitelisted=true): preserved (still in whitelist)
+func TestHandleQuery_WhitelistReloadWildcard_MixedEntriesSelective(t *testing.T) {
+	c := cache.New(100, 3600, 5, 0)
+
+	qEx := makeQuery("sub.example.com", dns.TypeA)
+	qOther := makeQuery("sub.other.com", dns.TypeA)
+	qThird := makeQuery("sub.third.com", dns.TypeA)
+
+	c.Put(qEx, makeNormalResp(qEx), false, true)        // Whitelisted=true (*.example.com was in WL)
+	c.Put(qOther, makeBlockedResp(qOther), true, false) // Whitelisted=false (was blocked)
+	c.Put(qThird, makeNormalResp(qThird), false, true)  // Whitelisted=true (*.third.com still in WL)
+
+	// New whitelist: *.example.com gone, *.other.com added, *.third.com unchanged.
+	newSet, err := domainlist.ParseReader(strings.NewReader("*.other.com\n*.third.com\n"), domainlist.ModeAllow)
+	if err != nil {
+		t.Fatalf("parse domain set: %v", err)
+	}
+	n := c.InvalidateIf(invalidatePred(newSet))
+	// Expected: sub.example.com (was WL=true, now not in WL) + sub.other.com (was WL=false, now in WL) = 2
+	if n != 2 {
+		t.Errorf("expected 2 invalidated entries, got %d", n)
+	}
+	if entry, _ := c.Get(qEx); entry != nil {
+		t.Error("sub.example.com must be invalidated (removed from whitelist)")
+	}
+	if entry, _ := c.Get(qOther); entry != nil {
+		t.Error("sub.other.com must be invalidated (added to whitelist)")
+	}
+	if entry, _ := c.Get(qThird); entry == nil {
+		t.Error("sub.third.com must be preserved (still whitelisted)")
+	}
+}
+
+// TestHandleQuery_WhitelistCache_CorruptedEntryFallsThrough verifies that
+// when the wire bytes for a Whitelisted=true cache entry are corrupted and
+// MakeCachedResponse returns nil, the handler re-queries the whitelist
+// resolver instead of falling through to the normal (possibly blocking)
+// pipeline. This prevents a whitelisted domain from being incorrectly blocked.
+func TestHandleQuery_WhitelistCache_CorruptedEntryFallsThrough(t *testing.T) {
+	query := makeQuery("safe.example.com", dns.TypeA)
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+	cfg.Cache.MaxEntries = 100
+	cfg.Whitelist = config.WhitelistConfig{Enabled: true}
+
+	c := cache.New(100, 3600, 5, 0)
+	wlResp := makeNormalResp(query)
+	wlList := testDomainList(t, []string{"safe.example.com"})
+	wlClient := &mockUpstreamClient{name: "wl", response: wlResp}
+	wlRes := upstream.NewWhitelistResolverFromClient(wlClient, &cfg.Whitelist, wlList)
+	blockedClient := &mockUpstreamClient{name: "up", response: makeBlockedResp(query)}
+	resolver := upstream.NewResolverFromClients([]upstream.Client{blockedClient}, 2*time.Second, 50*time.Millisecond, logger)
+	handler := NewHandler(resolver, wlRes, nil, c, logger, cfg)
+
+	// Seed the cache with a Whitelisted=true entry.
+	c.Put(query, makeNormalResp(query), false, true)
+
+	// Corrupt the stored wire bytes so MakeCachedResponse will fail to unpack.
+	entry, _ := c.Get(query)
+	if entry == nil {
+		t.Fatal("precondition: entry must be in cache")
+	}
+	entry.Data = []byte{0xFF, 0xFF, 0xFF, 0xFF} // invalid DNS wire format
+
+	// HandleQuery must re-query the whitelist resolver and return the correct
+	// (non-blocked) response -- NOT the blocked upstream response.
+	resp := handler.HandleQuery(context.Background(), query)
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("expected NOERROR from whitelist resolver fallback, got %s", dns.RcodeToString[resp.Rcode])
+	}
+	// Ensure the wl resolver was queried (not the blocking upstream).
+	if len(resp.Answer) == 0 {
+		t.Error("expected answer from whitelist resolver, got empty response (may have been blocked)")
+	}
+}
+
+// TestHandleQuery_WhitelistCache_NonWhitelistEntryIgnored verifies that when
+// a Whitelisted=false entry (e.g. stale blocked entry not yet invalidated)
+// is in the cache for a currently-whitelisted domain, the handler ignores it
+// and queries the whitelist resolver, returning the correct non-blocked result.
+func TestHandleQuery_WhitelistCache_NonWhitelistEntryIgnored(t *testing.T) {
+	query := makeQuery("safe.example.com", dns.TypeA)
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+	cfg.Cache.MaxEntries = 100
+	cfg.Whitelist = config.WhitelistConfig{Enabled: true}
+
+	c := cache.New(100, 3600, 5, 0)
+
+	// Seed a BLOCKED (non-whitelist) entry for the domain.
+	c.Put(query, makeBlockedResp(query), true, false) // Whitelisted=false, Blocked=true
+
+	wlResp := makeNormalResp(query)
+	wlList := testDomainList(t, []string{"safe.example.com"})
+	wlClient := &mockUpstreamClient{name: "wl", response: wlResp}
+	wlRes := upstream.NewWhitelistResolverFromClient(wlClient, &cfg.Whitelist, wlList)
+	blockedUpClient := &mockUpstreamClient{name: "up", response: makeBlockedResp(query)}
+	resolver := upstream.NewResolverFromClients([]upstream.Client{blockedUpClient}, 2*time.Second, 50*time.Millisecond, logger)
+	handler := NewHandler(resolver, wlRes, nil, c, logger, cfg)
+
+	resp := handler.HandleQuery(context.Background(), query)
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	// The whitelisted domain must resolve through the whitelist resolver (NOERROR),
+	// NOT return the stale blocked entry from cache.
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Errorf("expected NOERROR from whitelist resolver, got %s (stale blocked entry was served)", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) == 0 || resp.Answer[0].(*dns.A).A.Addr == (netip.Addr{}) {
+		t.Error("expected real address from whitelist resolver, got empty or null address")
+	}
+}
+
+// =============================================================================
+// Scoped wildcard precision tests
+//
+// These tests verify that *.abc.example.com (stored as wildcard["abc.example.com"])
+// does NOT match www.example.com or example.com, while correctly matching
+// direct subdomains and deep subdomains of abc.example.com.
+//
+// The matchWildcard walk for "www.example.com":
+//   "www.example.com" -> "example.com" -> no further labels -> false
+//
+// The matchWildcard walk for "example.com":
+//   "example.com" -> no further labels -> false
+//
+// Neither "www.example.com" nor "example.com" equals "abc.example.com", so
+// the wildcard entry for abc.example.com does not match them.
+// =============================================================================
+
+// TestHandleQuery_WhitelistReloadScopedWildcard_NoEffectOnParentDomain
+// verifies that removing *.abc.example.com from the whitelist does NOT
+// invalidate a cached entry for example.com (the parent domain).
+func TestHandleQuery_WhitelistReloadScopedWildcard_NoEffectOnParentDomain(t *testing.T) {
+	c := cache.New(100, 3600, 5, 0)
+
+	qParent := makeQuery("example.com", dns.TypeA)
+	qScoped := makeQuery("sub.abc.example.com", dns.TypeA)
+
+	// Both were cached as whitelisted via *.example.com AND *.abc.example.com
+	// respectively (simulated -- we just tag both as whitelisted).
+	c.Put(qParent, makeNormalResp(qParent), false, true)
+	c.Put(qScoped, makeNormalResp(qScoped), false, true)
+
+	// New set: *.abc.example.com removed, but *.example.com is still present
+	// so example.com remains whitelisted.
+	newSet, err := domainlist.ParseReader(strings.NewReader("*.example.com\n"), domainlist.ModeAllow)
+	if err != nil {
+		t.Fatalf("parse domain set: %v", err)
+	}
+
+	n := c.InvalidateIf(invalidatePred(newSet))
+	// sub.abc.example.com is still covered by *.example.com -> no change.
+	// example.com is covered by *.example.com -> no change.
+	if n != 0 {
+		t.Errorf("expected 0 invalidations (both still covered by *.example.com), got %d", n)
+	}
+	if entry, _ := c.Get(qParent); entry == nil {
+		t.Error("example.com must be preserved -- covered by *.example.com")
+	}
+	if entry, _ := c.Get(qScoped); entry == nil {
+		t.Error("sub.abc.example.com must be preserved -- covered by *.example.com")
+	}
+}
+
+// TestHandleQuery_WhitelistReloadScopedWildcard_ParentNotInvalidatedWhenScopedRemoved
+// verifies the primary edge case: *.abc.example.com is removed from whitelist,
+// www.example.com and example.com (which were never under abc.example.com)
+// must NOT be invalidated.
+func TestHandleQuery_WhitelistReloadScopedWildcard_ParentNotInvalidatedWhenScopedRemoved(t *testing.T) {
+	c := cache.New(100, 3600, 5, 0)
+
+	// These were whitelisted because *.example.com was in the whitelist.
+	qWWW := makeQuery("www.example.com", dns.TypeA)
+	qApex := makeQuery("example.com", dns.TypeA)
+	// This was whitelisted because *.abc.example.com was in the whitelist.
+	qScoped := makeQuery("app.abc.example.com", dns.TypeA)
+	// This sibling is also under abc.example.com.
+	qSibling := makeQuery("deep.abc.example.com", dns.TypeA)
+
+	for _, q := range []*dns.Msg{qWWW, qApex, qScoped, qSibling} {
+		c.Put(q, makeNormalResp(q), false, true) // all Whitelisted=true
+	}
+
+	// New whitelist: *.abc.example.com removed; *.example.com still present.
+	// www.example.com and example.com are still under *.example.com -> keep.
+	// app.abc.example.com and deep.abc.example.com are still under *.example.com -> keep.
+	// (Because *.example.com covers all subdomains at any depth.)
+	newSet, err := domainlist.ParseReader(strings.NewReader("*.example.com\n"), domainlist.ModeAllow)
+	if err != nil {
+		t.Fatalf("parse domain set: %v", err)
+	}
+
+	n := c.InvalidateIf(invalidatePred(newSet))
+	if n != 0 {
+		t.Errorf("expected 0 invalidations (all still covered by *.example.com), got %d", n)
+	}
+	for _, q := range []*dns.Msg{qWWW, qApex, qScoped, qSibling} {
+		name := q.Question[0].Header().Name
+		if entry, _ := c.Get(q); entry == nil {
+			t.Errorf("%s must be preserved", name)
+		}
+	}
+}
+
+// TestHandleQuery_WhitelistReloadScopedWildcard_ScopedRemovedOnlyWhenParentAlsoGone
+// verifies that when BOTH *.example.com and *.abc.example.com are removed,
+// all entries (www.example.com, example.com, sub.abc.example.com) are invalidated.
+func TestHandleQuery_WhitelistReloadScopedWildcard_ScopedRemovedOnlyWhenParentAlsoGone(t *testing.T) {
+	c := cache.New(100, 3600, 5, 0)
+
+	qWWW := makeQuery("www.example.com", dns.TypeA)
+	qApex := makeQuery("example.com", dns.TypeA)
+	qScoped := makeQuery("sub.abc.example.com", dns.TypeA)
+
+	for _, q := range []*dns.Msg{qWWW, qApex, qScoped} {
+		c.Put(q, makeNormalResp(q), false, true)
+	}
+
+	// New whitelist: empty. Everything should be invalidated.
+	emptySet := domainlist.EmptySet()
+	n := c.InvalidateIf(invalidatePred(emptySet))
+	if n != 3 {
+		t.Errorf("expected 3 invalidations, got %d", n)
+	}
+	for _, q := range []*dns.Msg{qWWW, qApex, qScoped} {
+		name := q.Question[0].Header().Name
+		if entry, _ := c.Get(q); entry != nil {
+			t.Errorf("%s must be invalidated", name)
+		}
+	}
+}
+
+// TestHandleQuery_WhitelistReloadScopedWildcard_OnlyScopedSubdomainInvalidated
+// is the key precision test: *.abc.example.com is removed, but a plain
+// *.example.com is NOT present. Only entries under abc.example.com are
+// invalidated. www.example.com and example.com (not subdomains of
+// abc.example.com) must be preserved.
+func TestHandleQuery_WhitelistReloadScopedWildcard_OnlyScopedSubdomainInvalidated(t *testing.T) {
+	c := cache.New(100, 3600, 5, 0)
+
+	// These entries were whitelisted via some different, now-removed entry.
+	// We simulate that scenario: all start as Whitelisted=true.
+	qWWW := makeQuery("www.example.com", dns.TypeA)
+	qApex := makeQuery("example.com", dns.TypeA)
+	qScoped := makeQuery("app.abc.example.com", dns.TypeA)
+	qDeepScoped := makeQuery("x.y.abc.example.com", dns.TypeA)
+	qOtherSub := makeQuery("other.example.com", dns.TypeA)
+
+	for _, q := range []*dns.Msg{qWWW, qApex, qScoped, qDeepScoped, qOtherSub} {
+		c.Put(q, makeNormalResp(q), false, true)
+	}
+
+	// New whitelist has only exact "www.example.com", "example.com", and
+	// "other.example.com" -- no *.example.com, no *.abc.example.com.
+	// So only www.example.com, example.com, other.example.com match.
+	// app.abc.example.com and x.y.abc.example.com do NOT match -> invalidated.
+	content := "www.example.com\nexample.com\nother.example.com\n"
+	newSet, err := domainlist.ParseReader(strings.NewReader(content), domainlist.ModeAllow)
+	if err != nil {
+		t.Fatalf("parse domain set: %v", err)
+	}
+
+	n := c.InvalidateIf(invalidatePred(newSet))
+	if n != 2 {
+		t.Errorf("expected 2 invalidations (scoped entries only), got %d", n)
+	}
+	if entry, _ := c.Get(qWWW); entry == nil {
+		t.Error("www.example.com must be preserved (exact match in new set)")
+	}
+	if entry, _ := c.Get(qApex); entry == nil {
+		t.Error("example.com must be preserved (exact match in new set)")
+	}
+	if entry, _ := c.Get(qOtherSub); entry == nil {
+		t.Error("other.example.com must be preserved (exact match in new set)")
+	}
+	if entry, _ := c.Get(qScoped); entry != nil {
+		t.Error("app.abc.example.com must be invalidated (no longer in whitelist)")
+	}
+	if entry, _ := c.Get(qDeepScoped); entry != nil {
+		t.Error("x.y.abc.example.com must be invalidated (no longer in whitelist)")
+	}
+}
+
+// TestHandleQuery_WhitelistReloadScopedWildcard_AddedScopedDoesNotAffectParent
+// verifies the reverse direction: adding *.abc.example.com to the whitelist
+// does NOT invalidate cached entries for www.example.com or example.com
+// (they were already covered by *.example.com).
+func TestHandleQuery_WhitelistReloadScopedWildcard_AddedScopedDoesNotAffectParent(t *testing.T) {
+	c := cache.New(100, 3600, 5, 0)
+
+	// www.example.com and example.com are cached as whitelisted (via *.example.com).
+	qWWW := makeQuery("www.example.com", dns.TypeA)
+	qApex := makeQuery("example.com", dns.TypeA)
+	// app.abc.example.com was NOT whitelisted (no whitelist entry at all before).
+	qScoped := makeQuery("app.abc.example.com", dns.TypeA)
+
+	c.Put(qWWW, makeNormalResp(qWWW), false, true)        // Whitelisted=true
+	c.Put(qApex, makeNormalResp(qApex), false, true)      // Whitelisted=true
+	c.Put(qScoped, makeBlockedResp(qScoped), true, false) // Whitelisted=false, was blocked
+
+	// New whitelist: *.example.com + *.abc.example.com added.
+	content := "*.example.com\n*.abc.example.com\n"
+	newSet, err := domainlist.ParseReader(strings.NewReader(content), domainlist.ModeAllow)
+	if err != nil {
+		t.Fatalf("parse domain set: %v", err)
+	}
+
+	n := c.InvalidateIf(invalidatePred(newSet))
+	// Only app.abc.example.com changes (was WL=false, now WL=true by *.abc.example.com) -> 1
+	// www.example.com: was WL=true, now still matched by *.example.com -> no change
+	// example.com: was WL=true, now still matched by *.example.com -> no change
+	if n != 1 {
+		t.Errorf("expected 1 invalidation (app.abc.example.com only), got %d", n)
+	}
+	if entry, _ := c.Get(qWWW); entry == nil {
+		t.Error("www.example.com must be preserved (still whitelisted)")
+	}
+	if entry, _ := c.Get(qApex); entry == nil {
+		t.Error("example.com must be preserved (still whitelisted)")
+	}
+	if entry, _ := c.Get(qScoped); entry != nil {
+		t.Error("app.abc.example.com must be invalidated (newly whitelisted)")
+	}
+}

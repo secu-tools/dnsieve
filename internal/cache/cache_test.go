@@ -47,7 +47,7 @@ func TestPutGet_BasicRoundTrip(t *testing.T) {
 	query := makeQuery("example.com", dns.TypeA)
 	resp := makeResp(query, 300)
 
-	c.Put(query, resp, false)
+	c.Put(query, resp, false, false)
 
 	entry, _ := c.Get(query)
 	if entry == nil {
@@ -68,7 +68,7 @@ func TestPutGet_BlockedEntry(t *testing.T) {
 	query := makeQuery("malware.example.com", dns.TypeA)
 	resp := makeResp(query, 300)
 
-	c.Put(query, resp, true)
+	c.Put(query, resp, true, false)
 
 	entry, _ := c.Get(query)
 	if entry == nil {
@@ -84,7 +84,7 @@ func TestPutGet_CaseSensitivity(t *testing.T) {
 
 	query1 := makeQuery("example.com", dns.TypeA)
 	resp := makeResp(query1, 300)
-	c.Put(query1, resp, false)
+	c.Put(query1, resp, false, false)
 
 	query2 := makeQuery("EXAMPLE.COM", dns.TypeA)
 	entry, _ := c.Get(query2)
@@ -98,7 +98,7 @@ func TestPutGet_DifferentTypes(t *testing.T) {
 
 	queryA := makeQuery("example.com", dns.TypeA)
 	respA := makeResp(queryA, 300)
-	c.Put(queryA, respA, false)
+	c.Put(queryA, respA, false, false)
 
 	queryAAAA := makeQuery("example.com", dns.TypeAAAA)
 	if entry, _ := c.Get(queryAAAA); entry != nil {
@@ -120,7 +120,7 @@ func TestGet_Expired(t *testing.T) {
 
 	query := makeQuery("example.com", dns.TypeA)
 	resp := makeResp(query, 1)
-	c.Put(query, resp, false)
+	c.Put(query, resp, false, false)
 
 	time.Sleep(1200 * time.Millisecond)
 
@@ -135,7 +135,7 @@ func TestPut_EmptyQuery(t *testing.T) {
 
 	empty := &dns.Msg{}
 	resp := &dns.Msg{}
-	c.Put(empty, resp, false)
+	c.Put(empty, resp, false, false)
 
 	if c.Len() != 0 {
 		t.Error("empty query should not be cached")
@@ -145,7 +145,7 @@ func TestPut_EmptyQuery(t *testing.T) {
 func TestPut_NilResponse(t *testing.T) {
 	c := New(100, 3600, 5, 0)
 	query := makeQuery("example.com", dns.TypeA)
-	c.Put(query, nil, false)
+	c.Put(query, nil, false, false)
 
 	if c.Len() != 0 {
 		t.Error("nil response should not be cached")
@@ -158,7 +158,7 @@ func TestPut_Eviction(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		query := makeQuery(fmt.Sprintf("test%d.example.com", i), dns.TypeA)
 		resp := makeResp(query, 300)
-		c.Put(query, resp, false)
+		c.Put(query, resp, false, false)
 	}
 
 	if c.Len() > 3 {
@@ -172,7 +172,7 @@ func TestFlush(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		query := makeQuery(fmt.Sprintf("test%d.example.com", i), dns.TypeA)
 		resp := makeResp(query, 300)
-		c.Put(query, resp, false)
+		c.Put(query, resp, false, false)
 	}
 
 	if c.Len() != 10 {
@@ -191,10 +191,10 @@ func TestPut_Overwrite(t *testing.T) {
 
 	query := makeQuery("example.com", dns.TypeA)
 	resp1 := makeResp(query, 100)
-	c.Put(query, resp1, false)
+	c.Put(query, resp1, false, false)
 
 	resp2 := makeResp(query, 500)
-	c.Put(query, resp2, true)
+	c.Put(query, resp2, true, false)
 
 	entry, _ := c.Get(query)
 	if entry == nil {
@@ -210,7 +210,7 @@ func TestPut_DeepCopy(t *testing.T) {
 
 	query := makeQuery("example.com", dns.TypeA)
 	resp := makeResp(query, 300)
-	c.Put(query, resp, false)
+	c.Put(query, resp, false, false)
 
 	// Modify the original response (change IP via the embedded rdata field)
 	resp.Answer[0].(*dns.A).A = rdata.A{Addr: netip.MustParseAddr("1.1.1.1")}
@@ -234,7 +234,7 @@ func TestMakeCachedResponse(t *testing.T) {
 
 	query := makeQuery("example.com", dns.TypeA)
 	resp := makeResp(query, 300)
-	c.Put(query, resp, false)
+	c.Put(query, resp, false, false)
 
 	entry, _ := c.Get(query)
 	if entry == nil {
@@ -258,7 +258,7 @@ func TestMakeCachedResponse_TTLDecrement(t *testing.T) {
 
 	query := makeQuery("ttl.example.com", dns.TypeA)
 	resp := makeResp(query, 300)
-	c.Put(query, resp, false)
+	c.Put(query, resp, false, false)
 
 	// Wait a moment to allow some time to elapse.
 	time.Sleep(1100 * time.Millisecond)
@@ -291,7 +291,7 @@ func TestConcurrentAccess(t *testing.T) {
 			for j := 0; j < 100; j++ {
 				query := makeQuery(fmt.Sprintf("test%d-%d.example.com", n, j), dns.TypeA)
 				resp := makeResp(query, 300)
-				c.Put(query, resp, false)
+				c.Put(query, resp, false, false)
 			}
 		}(i)
 	}
@@ -324,7 +324,7 @@ func TestMakeCachedResponse_WireFormatIDMatchesQuery(t *testing.T) {
 	q1.ID = 1111
 	resp := makeResp(q1, 300)
 	resp.ID = 1111
-	c.Put(q1, resp, false)
+	c.Put(q1, resp, false, false)
 
 	entry, _ := c.Get(q1)
 	if entry == nil {
@@ -384,7 +384,7 @@ func TestGet_RefreshNotTriggeredWhenDisabled(t *testing.T) {
 	// Insert with very short TTL so it's within any threshold
 	query := makeQuery("test.example.com", dns.TypeA)
 	resp := makeResp(query, 1)
-	c.Put(query, resp, false)
+	c.Put(query, resp, false, false)
 
 	c.Get(query)
 	// Give goroutine time to potentially run (it should not)
@@ -413,7 +413,7 @@ func TestGet_RefreshTriggeredForBlockedEntry(t *testing.T) {
 
 	query := makeQuery("blocked.example.com", dns.TypeA)
 	resp := makeResp(query, 300)
-	c.Put(query, resp, true) // blocked=true; TTL comes from blockedTTL=1s
+	c.Put(query, resp, true, false) // blocked=true; TTL comes from blockedTTL=1s
 
 	time.Sleep(950 * time.Millisecond) // ~0.05s remaining, below 0.9s threshold
 	c.Get(query)
@@ -436,7 +436,7 @@ func TestGet_RefreshBoolReturnValues(t *testing.T) {
 
 	query := makeQuery("bool-check.example.com", dns.TypeA)
 	resp := makeResp(query, 2) // 2s TTL, threshold = 1.8s
-	c.Put(query, resp, false)
+	c.Put(query, resp, false, false)
 
 	// Immediately after insertion: well above threshold, no refresh.
 	_, triggered := c.Get(query)
@@ -463,7 +463,7 @@ func TestGet_RefreshAlreadyInFlightReturnsFalse(t *testing.T) {
 
 	query := makeQuery("inflight.example.com", dns.TypeA)
 	resp := makeResp(query, 1)
-	c.Put(query, resp, false)
+	c.Put(query, resp, false, false)
 	time.Sleep(600 * time.Millisecond) // past threshold
 
 	// First Get launches the goroutine.
@@ -497,7 +497,7 @@ func TestGet_RefreshTriggeredAtThreshold(t *testing.T) {
 
 	query := makeQuery("threshold.example.com", dns.TypeA)
 	resp := makeResp(query, 2)
-	c.Put(query, resp, false)
+	c.Put(query, resp, false, false)
 
 	time.Sleep(1900 * time.Millisecond) // 0.1s remaining, should be below 90% threshold
 
@@ -520,7 +520,7 @@ func TestGet_RefreshNotTriggeredWhenAboveThreshold(t *testing.T) {
 
 	query := makeQuery("above.example.com", dns.TypeA)
 	resp := makeResp(query, 300) // 300s TTL, 30s threshold
-	c.Put(query, resp, false)
+	c.Put(query, resp, false, false)
 
 	c.Get(query) // well above threshold, no refresh
 	time.Sleep(50 * time.Millisecond)
@@ -543,7 +543,7 @@ func TestGet_RefreshDeduplication(t *testing.T) {
 
 	query := makeQuery("dedup.example.com", dns.TypeA)
 	resp := makeResp(query, 1)
-	c.Put(query, resp, false)
+	c.Put(query, resp, false, false)
 	time.Sleep(600 * time.Millisecond) // let entry get close to expiry
 
 	// Fire multiple concurrent Gets
@@ -576,7 +576,7 @@ func TestGet_RefreshRetriggeredAfterCompletion(t *testing.T) {
 
 	query := makeQuery("retrigger.example.com", dns.TypeA)
 	resp := makeResp(query, 1)
-	c.Put(query, resp, false)
+	c.Put(query, resp, false, false)
 	time.Sleep(600 * time.Millisecond)
 
 	// First trigger
@@ -607,7 +607,7 @@ func TestGet_RefreshNonCacheableKeepsOldEntry(t *testing.T) {
 
 	query := makeQuery("noncacheable.example.com", dns.TypeA)
 	resp := makeResp(query, 2)
-	c.Put(query, resp, false)
+	c.Put(query, resp, false, false)
 
 	// Refresh func does nothing (simulates non-cacheable upstream response)
 	done := make(chan struct{}, 1)
@@ -643,12 +643,12 @@ func TestGet_RefreshSuccessUpdatesEntry(t *testing.T) {
 
 	query := makeQuery("refresh-success.example.com", dns.TypeA)
 	oldResp := makeResp(query, 2)
-	c.Put(query, oldResp, false)
+	c.Put(query, oldResp, false, false)
 
 	done := make(chan struct{}, 1)
 	c.SetRefreshFunc(func(q *dns.Msg) {
 		newResp := makeResp(q, 300) // fresh long TTL
-		c.Put(q, newResp, false)
+		c.Put(q, newResp, false, false)
 		done <- struct{}{}
 	})
 
@@ -726,7 +726,7 @@ func TestCacheKey_DOBitSegregation(t *testing.T) {
 
 	queryNoDO := makeQuery("dnssec.example.com", dns.TypeA)
 	respNoDO := makeResp(queryNoDO, 300)
-	c.Put(queryNoDO, respNoDO, false)
+	c.Put(queryNoDO, respNoDO, false, false)
 
 	// Build the same query but with DO=1.
 	queryDO := makeQuery("dnssec.example.com", dns.TypeA)
@@ -743,7 +743,7 @@ func TestCacheKey_DOBitSegregation(t *testing.T) {
 
 	// Cache a response for the DO=1 query and verify DO=0 still gets its own entry.
 	respDO := makeResp(queryDO, 300)
-	c.Put(queryDO, respDO, false)
+	c.Put(queryDO, respDO, false, false)
 
 	if c.Len() != 2 {
 		t.Errorf("expected 2 separate cache entries (DO=0 and DO=1), got %d", c.Len())
@@ -784,7 +784,7 @@ func TestCacheKey_UnknownTypesAreDistinct(t *testing.T) {
 
 	resp1 := new(dns.Msg)
 	dnsutil.SetReply(resp1, q1)
-	c.Put(q1, resp1, false)
+	c.Put(q1, resp1, false, false)
 
 	// q2 should miss; it must not collide with q1.
 	if entry, _ := c.Get(q2); entry != nil {
@@ -793,7 +793,7 @@ func TestCacheKey_UnknownTypesAreDistinct(t *testing.T) {
 
 	resp2 := new(dns.Msg)
 	dnsutil.SetReply(resp2, q2)
-	c.Put(q2, resp2, false)
+	c.Put(q2, resp2, false, false)
 
 	if c.Len() != 2 {
 		t.Errorf("expected 2 entries for distinct unknown types, got %d", c.Len())
@@ -821,7 +821,7 @@ func TestCacheKey_UnknownClassesAreDistinct(t *testing.T) {
 
 	resp1 := new(dns.Msg)
 	dnsutil.SetReply(resp1, q1)
-	c.Put(q1, resp1, false)
+	c.Put(q1, resp1, false, false)
 
 	if entry, _ := c.Get(q2); entry != nil {
 		t.Error("different unknown classes must not share cache entries")
@@ -843,7 +843,7 @@ func TestCacheKey_KnownVsUnknownType(t *testing.T) {
 	}}
 
 	resp := makeResp(qKnown, 300)
-	c.Put(qKnown, resp, false)
+	c.Put(qKnown, resp, false, false)
 
 	if entry, _ := c.Get(qUnknown); entry != nil {
 		t.Error("known vs unknown type must not share cache entries")
@@ -870,7 +870,7 @@ func TestCache_GetPut_UnknownTypeNoCollision(t *testing.T) {
 		q := makeUnknownQuery("rr-test.example.com", qtype)
 		resp := new(dns.Msg)
 		dnsutil.SetReply(resp, q)
-		c.Put(q, resp, false)
+		c.Put(q, resp, false, false)
 	}
 
 	if c.Len() != 4 {
@@ -987,7 +987,7 @@ func TestEvictOldest_PrefersExpired(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		q := makeQuery(fmt.Sprintf("evict%d.example.com", i), dns.TypeA)
 		r := makeResp(q, 1)
-		c.Put(q, r, false)
+		c.Put(q, r, false, false)
 	}
 
 	// Wait for entries to expire
@@ -996,7 +996,7 @@ func TestEvictOldest_PrefersExpired(t *testing.T) {
 	// Insert a new entry; should evict an expired one
 	q := makeQuery("new.example.com", dns.TypeA)
 	r := makeResp(q, 300)
-	c.Put(q, r, false)
+	c.Put(q, r, false, false)
 
 	if c.Len() > 3 {
 		t.Errorf("expected at most 3 entries after eviction, got %d", c.Len())
@@ -1017,7 +1017,7 @@ func TestConcurrentPutGetFlush(t *testing.T) {
 	c := New(100, 3600, 5, 25)
 	c.SetRefreshFunc(func(q *dns.Msg) {
 		resp := makeResp(q, 300)
-		c.Put(q, resp, false)
+		c.Put(q, resp, false, false)
 	})
 
 	done := make(chan struct{})
@@ -1029,7 +1029,7 @@ func TestConcurrentPutGetFlush(t *testing.T) {
 			for j := 0; j < 50; j++ {
 				q := makeQuery(fmt.Sprintf("cc%d-%d.example.com", n, j), dns.TypeA)
 				r := makeResp(q, 300)
-				c.Put(q, r, j%3 == 0)
+				c.Put(q, r, j%3 == 0, false)
 			}
 		}(i)
 	}
@@ -1057,5 +1057,196 @@ func TestConcurrentPutGetFlush(t *testing.T) {
 
 	for i := 0; i < 11; i++ {
 		<-done
+	}
+}
+
+// =============================================================================
+// Whitelisted entry tests
+// =============================================================================
+
+func TestPutGet_WhitelistedEntry(t *testing.T) {
+	c := New(100, 3600, 5, 0)
+
+	query := makeQuery("safe.example.com", dns.TypeA)
+	resp := makeResp(query, 300)
+
+	c.Put(query, resp, false, true) // whitelisted=true
+
+	entry, _ := c.Get(query)
+	if entry == nil {
+		t.Fatal("expected cache hit for whitelisted entry")
+	}
+	if !entry.Whitelisted {
+		t.Error("entry should be flagged as whitelisted")
+	}
+	if entry.Blocked {
+		t.Error("whitelisted entry should not be blocked")
+	}
+}
+
+func TestPutGet_WhitelistedFalseByDefault(t *testing.T) {
+	c := New(100, 3600, 5, 0)
+
+	query := makeQuery("normal.example.com", dns.TypeA)
+	resp := makeResp(query, 300)
+	c.Put(query, resp, false, false)
+
+	entry, _ := c.Get(query)
+	if entry == nil {
+		t.Fatal("expected cache hit")
+	}
+	if entry.Whitelisted {
+		t.Error("non-whitelisted entry should have Whitelisted=false")
+	}
+}
+
+func TestPutGet_WhitelistedOverwritesBlocked(t *testing.T) {
+	// A whitelisted Put overwrites a previously blocked entry.
+	c := New(100, 3600, 5, 0)
+
+	query := makeQuery("flip.example.com", dns.TypeA)
+	resp := makeResp(query, 300)
+
+	c.Put(query, resp, true, false) // blocked
+	entry1, _ := c.Get(query)
+	if entry1 == nil || !entry1.Blocked {
+		t.Fatal("expected blocked entry")
+	}
+
+	c.Put(query, resp, false, true) // now whitelisted
+	entry2, _ := c.Get(query)
+	if entry2 == nil {
+		t.Fatal("expected cache hit after overwrite")
+	}
+	if entry2.Blocked {
+		t.Error("entry should no longer be blocked after whitelist overwrite")
+	}
+	if !entry2.Whitelisted {
+		t.Error("entry should be whitelisted after whitelist overwrite")
+	}
+}
+
+// =============================================================================
+// InvalidateIf tests
+// =============================================================================
+
+func TestInvalidateIf_RemovesMatchingEntries(t *testing.T) {
+	c := New(100, 3600, 5, 0)
+
+	q1 := makeQuery("remove.example.com", dns.TypeA)
+	q2 := makeQuery("keep.example.com", dns.TypeA)
+	q3 := makeQuery("also-remove.example.com", dns.TypeA)
+
+	c.Put(q1, makeResp(q1, 300), false, true)  // whitelisted
+	c.Put(q2, makeResp(q2, 300), false, false) // not whitelisted
+	c.Put(q3, makeResp(q3, 300), false, true)  // whitelisted
+
+	removed := c.InvalidateIf(func(_ string, entry *Entry) bool {
+		return entry.Whitelisted
+	})
+
+	if removed != 2 {
+		t.Errorf("expected 2 entries removed, got %d", removed)
+	}
+	if c.Len() != 1 {
+		t.Errorf("expected 1 entry remaining, got %d", c.Len())
+	}
+	if entry, _ := c.Get(q1); entry != nil {
+		t.Error("whitelisted entry q1 should have been removed")
+	}
+	if entry, _ := c.Get(q3); entry != nil {
+		t.Error("whitelisted entry q3 should have been removed")
+	}
+	if entry, _ := c.Get(q2); entry == nil {
+		t.Error("non-whitelisted entry q2 should be preserved")
+	}
+}
+
+func TestInvalidateIf_PreservesNonMatchingEntries(t *testing.T) {
+	c := New(100, 3600, 5, 0)
+
+	q := makeQuery("normal.example.com", dns.TypeA)
+	c.Put(q, makeResp(q, 300), false, false)
+
+	removed := c.InvalidateIf(func(_ string, entry *Entry) bool {
+		return entry.Whitelisted // nothing is whitelisted
+	})
+
+	if removed != 0 {
+		t.Errorf("expected 0 removals, got %d", removed)
+	}
+	if c.Len() != 1 {
+		t.Errorf("expected 1 entry, got %d", c.Len())
+	}
+}
+
+func TestInvalidateIf_EmptyCache(t *testing.T) {
+	c := New(100, 3600, 5, 0)
+	removed := c.InvalidateIf(func(_ string, _ *Entry) bool { return true })
+	if removed != 0 {
+		t.Errorf("empty cache: expected 0 removals, got %d", removed)
+	}
+}
+
+func TestInvalidateIf_ReturnsCount(t *testing.T) {
+	c := New(100, 3600, 5, 0)
+	for i := 0; i < 10; i++ {
+		q := makeQuery(fmt.Sprintf("d%d.example.com", i), dns.TypeA)
+		c.Put(q, makeResp(q, 300), false, false)
+	}
+	removed := c.InvalidateIf(func(_ string, _ *Entry) bool { return true })
+	if removed != 10 {
+		t.Errorf("expected 10 removals, got %d", removed)
+	}
+	if c.Len() != 0 {
+		t.Errorf("expected empty cache after removing all, got %d", c.Len())
+	}
+}
+
+func TestInvalidateIf_DomainNamePassedToPredicateHasFQDN(t *testing.T) {
+	c := New(100, 3600, 5, 0)
+	q := makeQuery("example.com", dns.TypeA)
+	c.Put(q, makeResp(q, 300), false, false)
+
+	var seenName string
+	c.InvalidateIf(func(name string, _ *Entry) bool {
+		seenName = name
+		return false
+	})
+	// Cache key lowercases and stores the FQDN with trailing dot.
+	if seenName != "example.com." {
+		t.Errorf("expected FQDN 'example.com.' passed to predicate, got %q", seenName)
+	}
+}
+
+func TestInvalidateIf_BlockedEntryRemoval(t *testing.T) {
+	c := New(100, 3600, 5, 0)
+
+	q := makeQuery("blocked.example.com", dns.TypeA)
+	c.Put(q, makeResp(q, 300), true, false) // blocked
+
+	removed := c.InvalidateIf(func(_ string, entry *Entry) bool {
+		return entry.Blocked
+	})
+	if removed != 1 {
+		t.Errorf("expected 1 blocked entry removed, got %d", removed)
+	}
+}
+
+func TestKeyDomain(t *testing.T) {
+	tests := []struct {
+		key  string
+		want string
+	}{
+		{"example.com./A/IN", "example.com."},
+		{"example.com./A/IN/DO", "example.com."},
+		{"example.com.", "example.com."},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got := keyDomain(tt.key)
+		if got != tt.want {
+			t.Errorf("keyDomain(%q) = %q, want %q", tt.key, got, tt.want)
+		}
 	}
 }

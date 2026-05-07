@@ -247,12 +247,3 @@ In `null` mode, the synthesized answer record uses a 10-second TTL.
 Query types other than A and AAAA receive NODATA (NOERROR with empty
 answer), since there is no meaningful null address to return for
 record types like MX, TXT, CNAME, or SRV.
-
-## Cache Behavior
-
-- TTL-priority eviction when capacity is reached (entry closest to expiry is removed first)
-- TTL honored from upstream responses (floored by `min_ttl`)
-- Blocked responses cached with `blocked_ttl`
-- Entries not cached when upstreams disagree or have errors
-- Cache key: question name + question type + DO bit (RFC 3225 segregation)
-- DNSSEC responses (DO=1) are cached separately from non-DNSSEC responses

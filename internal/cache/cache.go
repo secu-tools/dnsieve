@@ -20,11 +20,12 @@ import (
 // Data holds the wire-format packed bytes for space efficiency and to
 // guarantee deep copy independence when serving cached responses.
 type Entry struct {
-	Data       []byte // packed wire-format DNS message
-	Blocked    bool
-	DNSSEC     bool // true if this entry was cached from a DO=1 query
-	ExpiresAt  time.Time
-	InsertedAt time.Time
+	Data        []byte // packed wire-format DNS message
+	Blocked     bool
+	Whitelisted bool // true if this entry was resolved via the whitelist resolver
+	DNSSEC      bool // true if this entry was cached from a DO=1 query
+	ExpiresAt   time.Time
+	InsertedAt  time.Time
 }
 
 // IsExpired reports whether this entry has passed its TTL.
@@ -183,8 +184,10 @@ func (c *Cache) triggerRefresh(key string, query *dns.Msg) bool {
 }
 
 // Put stores a DNS response in the cache.
+// blocked marks entries that represent a block signal from upstream or local rules.
+// whitelisted marks entries that were resolved via the whitelist resolver.
 // The TTL is computed from the response records, clamped by config limits.
-func (c *Cache) Put(query *dns.Msg, resp *dns.Msg, blocked bool) {
+func (c *Cache) Put(query *dns.Msg, resp *dns.Msg, blocked bool, whitelisted bool) {
 	key := cacheKey(query)
 	if key == "" || resp == nil {
 		return
@@ -208,11 +211,12 @@ func (c *Cache) Put(query *dns.Msg, resp *dns.Msg, blocked bool) {
 	copy(data, resp.Data)
 
 	c.entries[key] = &Entry{
-		Data:       data,
-		Blocked:    blocked,
-		DNSSEC:     hasDOBit(query),
-		ExpiresAt:  time.Now().Add(ttl),
-		InsertedAt: time.Now(),
+		Data:        data,
+		Blocked:     blocked,
+		Whitelisted: whitelisted,
+		DNSSEC:      hasDOBit(query),
+		ExpiresAt:   time.Now().Add(ttl),
+		InsertedAt:  time.Now(),
 	}
 }
 
@@ -291,6 +295,35 @@ func (c *Cache) Flush() {
 	c.mu.Unlock()
 	// Clear in-flight refresh tracking so new refreshes can be triggered.
 	c.refreshing.Clear()
+}
+
+// InvalidateIf removes every entry for which pred returns true and returns
+// the count of removed entries. name is the domain FQDN extracted from the
+// cache key (e.g. "example.com."). DomainSet.Contains normalises the trailing
+// dot, so callers can pass the raw name to allowlist/blocklist checks directly.
+// This method acquires the write lock for the full scan; call it from a
+// background goroutine when operating on large caches.
+func (c *Cache) InvalidateIf(pred func(name string, entry *Entry) bool) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	count := 0
+	for key, entry := range c.entries {
+		if pred(keyDomain(key), entry) {
+			delete(c.entries, key)
+			count++
+		}
+	}
+	return count
+}
+
+// keyDomain extracts the domain FQDN from a cache key.
+// Cache keys have the form "lowername/qtype/qclass[/DO]".
+func keyDomain(key string) string {
+	idx := strings.IndexByte(key, '/')
+	if idx < 0 {
+		return key
+	}
+	return key[:idx]
 }
 
 // cloneMsg returns a deep copy of a DNS message by packing to wire format

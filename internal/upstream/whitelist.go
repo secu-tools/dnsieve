@@ -104,6 +104,16 @@ func (w *WhitelistResolver) Stop() {
 	}
 }
 
+// OnListReload registers cb to be called after each successful hot-reload of
+// the whitelist domain list with the newly loaded DomainSet. The callback is
+// invoked in the watcher goroutine; schedule expensive work in its own goroutine.
+// Safe to call before or after the watcher is started.
+func (w *WhitelistResolver) OnListReload(cb func(newSet *domainlist.DomainSet)) {
+	if w != nil && w.list != nil {
+		w.list.OnReload(cb)
+	}
+}
+
 // logListLoadResult logs the outcome of an initial domain list load.
 // prefix is "Whitelist" or "Blacklist".
 func logListLoadResult(prefix string, listFiles []string, count, invalid, dedup int, loadErr error, logger *logging.Logger) {

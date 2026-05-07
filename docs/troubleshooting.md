@@ -392,17 +392,19 @@ is writable by the container's `dnsieve` user (UID varies -- run
 ### Cache is not reducing latency
 
 1. Make sure `cache.enabled = true` in the config (it is enabled by default).
-2. Enable debug logging and look for `-> cached` vs. `-> cache miss` in the logs.
-   If you see cache misses for the same domain repeatedly, the TTL may be very
+2. Enable debug logging and look for `-> cached` vs cache miss in the logs.
+   If you see repeated cache misses for the same domain, the TTL may be very
    short. Increase `min_ttl`:
    ```toml
    [cache]
    min_ttl = 120
    ```
 3. DNSieve caches per query type (A and AAAA are separate entries). A cache hit
-   for `A` does not satisfy an `AAAA` query.
-4. The cache is in-memory only and is lost when DNSieve restarts. This is by
-   design.
+   for an A query does not satisfy an AAAA query.
+4. The cache is in-memory only and is lost on restart. This is by design.
+
+For full details on TTL handling, eviction, and background refresh see
+[docs/caching.md](caching.md).
 
 ---
 

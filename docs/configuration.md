@@ -284,78 +284,26 @@ in this mode. A warning is logged at startup as a reminder.
 
 ## Cache
 
-DNSieve respects the TTL values from upstream DNS responses. The cache
-uses LRU (Least Recently Used) eviction when full.
-
 ```toml
 [cache]
 enabled = true
-max_entries = 10000  # LRU eviction when full
-blocked_ttl = 86400  # 24 hours for blocked domains
-min_ttl = 60         # Floor for upstream TTLs
-renew_percent = 10   # Trigger background refresh at 10% TTL remaining (0 = off)
+max_entries = 10000  # evict closest-to-expiry entry when full
+blocked_ttl = 86400  # TTL for blocked-domain entries (seconds)
+min_ttl = 60         # floor for upstream TTLs (seconds)
+renew_percent = 10   # background refresh when this % of TTL remains (0 = off)
 ```
 
-### How TTL Works
+| Option | Description |
+|--------|-------------|
+| `enabled` | Enable or disable the in-memory response cache. Default: `true`. |
+| `max_entries` | Maximum number of cached entries. When full, the entry closest to expiry is removed first (TTL-priority, not LRU). |
+| `blocked_ttl` | How long to cache blocked responses. Default: 86400 (24 hours). |
+| `min_ttl` | Floor for upstream TTLs. Upstream TTLs shorter than this are raised to `min_ttl`. Prevents short-lived records from flooding the cache. Default: 60. |
+| `renew_percent` | Threshold (0-99) at which a near-expiry entry triggers a background upstream re-query while the cached response is served immediately. `0` disables background refresh. Default: 10. |
 
-- **Upstream TTL**: The TTL from the upstream DNS response is used directly.
-  This means the cache respects what the authoritative server intended.
-- **min_ttl**: If the upstream TTL is shorter than `min_ttl`, the minimum
-  is used instead. Very short TTLs (under 60 seconds) cause frequent
-  re-queries and slow down resolution. Recommended: 60-300 seconds.
-- **blocked_ttl**: Blocked domains use this fixed TTL since block status
-  rarely changes. Default: 86400 (24 hours).
-
-### Background Cache Refresh
-
-When a cached entry's remaining TTL falls below `renew_percent` of its
-original TTL and a client requests that domain, DNSieve returns the cached
-result immediately and re-queries all upstream servers in the background:
-
-- **All upstream rules apply**: block-consensus, `allResponded`, NXDOMAIN
-  disagreement checks all run as normal.
-- **Blocked and non-blocked entries** are both eligible for background
-  refresh. This means that if a domain's block status changes upstream
-  (a previously blocked domain becomes unblocked, or vice versa), the
-  cache reflects the updated state before the entry expires naturally.
-- **Not cacheable**: if upstreams disagree (e.g. only some responded, or
-  NXDOMAIN disagreement), the old cached entry stays valid until it expires
-  naturally. On the next client request for that domain, DNSieve retries the
-  background refresh.
-- **`renew_percent = 0`**: disables background refresh entirely. Entries
-  expire and the next query is a fresh (slower) upstream resolve.
-- When a background refresh is queued, debug logs show the original TTL
-  (`ttl=`) and the remaining time to live (`rtl=`):
-  `Query example.com. A -> stale cache (background-refresh queued, ttl=300s rtl=42s)`
-  or `example.com. is blocked (from cache, background-refresh queued, ttl=86400s rtl=1200s)`.
-  These values are useful for diagnosing when entries are refreshing too
-  early or too late relative to your `renew_percent` setting.
-
-```toml
-[cache]
-renew_percent = 10   # default: refresh when 10% of TTL remains
-# renew_percent = 25  # more aggressive: refresh when 25% of TTL remains
-```
-
-Valid range: 0 to 99. A value of 0 disables background refresh.
-
-This setting also controls when the upstream hostname resolver triggers a
-background re-resolution for `upstream_ttl` modes 0 and N>0 (see
-[Upstream Re-resolution](#upstream-re-resolution-upstream_ttl) above).
-
-### Sizing max_entries
-
-Each cached entry uses approximately 500-1500 bytes depending on DNS
-response size. Memory estimates:
-
-| max_entries | Memory  | Suitable For                           |
-|-------------|---------|----------------------------------------|
-| 10,000      | 5-15 MB | ~20 users, 30 devices (default)        |
-| 50,000      | 25-75 MB| ~100 users, 200 devices                |
-| 100,000     | 50-150 MB| ~500 users, 1000 devices              |
-
-For a business with 100 employees plus ~1900 servers, consider
-50,000-100,000 entries depending on available memory.
+For detailed behavior -- TTL adjustment on serve, eviction algorithm, background
+refresh paths (including how whitelisted entries are refreshed), memory sizing,
+and all edge cases -- see [docs/caching.md](caching.md).
 
 ## Blocking Mode
 
@@ -448,6 +396,9 @@ For most deployments, `"null"` is the best choice:
 Use `"nxdomain"` or `"nodata"` if you have specific client software that
 handles those rcodes better for your use case. Avoid `"refused"` unless
 you understand the DNS fallback risk.
+
+For the exact wire format of each mode (Rcode, Answer, Authority sections,
+EDE option), see [docs/protocol.md -- Blocked Response Format](protocol.md#blocked-response-format).
 
 ## Logging
 
@@ -737,10 +688,20 @@ When both whitelist and blacklist are enabled, queries are processed in
 this order:
 
 1. **DDR** (Discovery of Designated Resolvers) -- handled first
-2. **Whitelist** -- if matched, resolve through whitelist resolver
-3. **Blacklist** -- if matched, return blocked response immediately
-4. **Cache** -- return cached response if available
-5. **Upstream** -- query all configured upstream servers
+2. **Whitelist check** -- if the domain is whitelisted:
+   a. **Whitelist cache check** -- return the cached result immediately if
+      a prior whitelist resolution is still valid (entry tagged Whitelisted).
+   b. **Whitelist resolver** -- query the dedicated non-blocking upstream,
+      store the result in the shared cache (tagged Whitelisted=true), return.
+3. **Blacklist check** -- if matched, return a blocked response immediately.
+   No cache lookup and no cache write occur for locally-blacklisted domains.
+4. **General cache** -- return a cached response if available.
+5. **Upstream** -- query all configured upstream servers; cache the result.
+
+For a detailed explanation of how whitelist results are cached, how the
+shared-cache design works, and how cache entries are selectively invalidated
+on whitelist hot-reload (including wildcard matching semantics), see
+[docs/caching.md](caching.md).
 
 ## Sharing a File Between Whitelist and Blacklist
 
@@ -778,7 +739,7 @@ separate, dedicated blocklist or allowlist files.
 # whitelisted -- they will never be blocked.
 example.com           # plain domain: loaded by both
 *.example.com         # wildcard: loaded by both
-0.0.0.0 example.com  # hosts-file: loaded by both
+0.0.0.0 example.com   # hosts-file: loaded by both
 ```
 
 ```text

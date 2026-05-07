@@ -48,7 +48,7 @@ func FuzzCacheRenewPercent(f *testing.F) {
 				Hdr: dns.Header{Name: "fuzz.example.com.", Class: dns.ClassINET, TTL: 300},
 				A:   rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
 			})
-			c.Put(q, resp, false)
+			c.Put(q, resp, false, false)
 		})
 
 		query := dnsutil.SetQuestion(new(dns.Msg), "fuzz.example.com.", dns.TypeA)
@@ -62,7 +62,7 @@ func FuzzCacheRenewPercent(f *testing.F) {
 		}
 
 		// Should not panic regardless of inputs
-		c.Put(query, resp, blocked)
+		c.Put(query, resp, blocked, false)
 		entry, _ := c.Get(query)
 
 		if entry != nil {
@@ -112,7 +112,7 @@ func FuzzCacheKeys(f *testing.F) {
 		dnsutil.SetReply(resp, q)
 
 		// Should never panic
-		c.Put(q, resp, false)
+		c.Put(q, resp, false, false)
 		entry, _ := c.Get(q)
 		if entry != nil {
 			_ = MakeCachedResponse(q, entry)
@@ -147,7 +147,7 @@ func FuzzCacheConcurrentRefresh(f *testing.F) {
 				Hdr: dns.Header{Name: q.Question[0].Header().Name, Class: dns.ClassINET, TTL: 300},
 				A:   rdata.A{Addr: netip.MustParseAddr("1.1.1.1")},
 			})
-			c.Put(q, resp, false)
+			c.Put(q, resp, false, false)
 		})
 
 		query := dnsutil.SetQuestion(new(dns.Msg), dnsutil.Fqdn(domain), dns.TypeA)
@@ -157,7 +157,7 @@ func FuzzCacheConcurrentRefresh(f *testing.F) {
 			Hdr: dns.Header{Name: query.Question[0].Header().Name, Class: dns.ClassINET, TTL: 1},
 			A:   rdata.A{Addr: netip.MustParseAddr("2.2.2.2")},
 		})
-		c.Put(query, resp, false)
+		c.Put(query, resp, false, false)
 
 		// Multiple concurrent reads with short sleep to hit threshold
 		time.Sleep(900 * time.Millisecond)
