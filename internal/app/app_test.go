@@ -3,6 +3,7 @@
 package app
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -81,4 +82,147 @@ func TestVersionString_Format(t *testing.T) {
 	if !strings.HasPrefix(lines[2], "Github Repository:") {
 		t.Errorf("third line should start with 'Github Repository:': %s", lines[2])
 	}
+}
+
+// ---------------------------------------------------------------------------
+// patchSpeedArg
+// ---------------------------------------------------------------------------
+
+// withArgs temporarily replaces os.Args for the duration of fn.
+func withArgs(args []string, fn func()) {
+	orig := os.Args
+	os.Args = args
+	defer func() { os.Args = orig }()
+	fn()
+}
+
+// TestPatchSpeedArg_BareAtEnd: bare --speed at the end of args gets an empty
+// string injected so the flag package sees a value.
+func TestPatchSpeedArg_BareAtEnd(t *testing.T) {
+	withArgs([]string{"dnsieve", "--speed"}, func() {
+		patchSpeedArg()
+		if len(os.Args) != 3 {
+			t.Fatalf("expected 3 args, got %d: %v", len(os.Args), os.Args)
+		}
+		if os.Args[2] != "" {
+			t.Errorf("expected empty string injected, got %q", os.Args[2])
+		}
+	})
+}
+
+// TestPatchSpeedArg_BareBeforeFlag: bare --speed before another flag also
+// gets an empty string injected; the following flag is preserved.
+func TestPatchSpeedArg_BareBeforeFlag(t *testing.T) {
+	withArgs([]string{"dnsieve", "--speed", "--cfgfile", "x.toml"}, func() {
+		patchSpeedArg()
+		if len(os.Args) != 5 {
+			t.Fatalf("expected 5 args, got %d: %v", len(os.Args), os.Args)
+		}
+		if os.Args[2] != "" {
+			t.Errorf("expected empty string after --speed, got %q", os.Args[2])
+		}
+		if os.Args[3] != "--cfgfile" {
+			t.Errorf("expected --cfgfile preserved, got %q", os.Args[3])
+		}
+	})
+}
+
+// TestPatchSpeedArg_SpaceValue: --speed followed by a plain value (no dash)
+// is left untouched; the value is already present.
+func TestPatchSpeedArg_SpaceValue(t *testing.T) {
+	withArgs([]string{"dnsieve", "--speed", "google.com,github.com"}, func() {
+		patchSpeedArg()
+		if len(os.Args) != 3 {
+			t.Fatalf("expected 3 args (unchanged), got %d: %v", len(os.Args), os.Args)
+		}
+		if os.Args[2] != "google.com,github.com" {
+			t.Errorf("value should be unchanged, got %q", os.Args[2])
+		}
+	})
+}
+
+// TestPatchSpeedArg_InlineEquals: --speed=value already has an inline value;
+// no injection needed.
+func TestPatchSpeedArg_InlineEquals(t *testing.T) {
+	withArgs([]string{"dnsieve", "--speed=google.com"}, func() {
+		patchSpeedArg()
+		if len(os.Args) != 2 {
+			t.Fatalf("expected 2 args (unchanged), got %d: %v", len(os.Args), os.Args)
+		}
+	})
+}
+
+// TestPatchSpeedArg_NoSpeedFlag: unrelated flags are not touched.
+func TestPatchSpeedArg_NoSpeedFlag(t *testing.T) {
+	withArgs([]string{"dnsieve", "--version"}, func() {
+		patchSpeedArg()
+		if len(os.Args) != 2 {
+			t.Fatalf("expected 2 args (unchanged), got %d: %v", len(os.Args), os.Args)
+		}
+	})
+}
+
+// TestPatchSpeedArg_SingleDashBare: -speed (single dash) works the same as
+// --speed.
+func TestPatchSpeedArg_SingleDashBare(t *testing.T) {
+	withArgs([]string{"dnsieve", "-speed"}, func() {
+		patchSpeedArg()
+		if len(os.Args) != 3 {
+			t.Fatalf("expected 3 args, got %d: %v", len(os.Args), os.Args)
+		}
+		if os.Args[2] != "" {
+			t.Errorf("expected empty string injected, got %q", os.Args[2])
+		}
+	})
+}
+
+// TestPatchSpeedArg_SingleDashInlineEquals: -speed=value is left untouched.
+func TestPatchSpeedArg_SingleDashInlineEquals(t *testing.T) {
+	withArgs([]string{"dnsieve", "-speed=example.com"}, func() {
+		patchSpeedArg()
+		if len(os.Args) != 2 {
+			t.Fatalf("expected 2 args (unchanged), got %d: %v", len(os.Args), os.Args)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// isSpeedFlag
+// ---------------------------------------------------------------------------
+
+func TestIsSpeedFlag_DoubleDash(t *testing.T) {
+	withArgs([]string{"dnsieve", "--speed"}, func() {
+		if !isSpeedFlag() {
+			t.Error("expected true for --speed")
+		}
+	})
+}
+
+func TestIsSpeedFlag_SingleDash(t *testing.T) {
+	withArgs([]string{"dnsieve", "-speed"}, func() {
+		if !isSpeedFlag() {
+			t.Error("expected true for -speed")
+		}
+	})
+}
+
+func TestIsSpeedFlag_NotPresent(t *testing.T) {
+	withArgs([]string{"dnsieve", "--version"}, func() {
+		if isSpeedFlag() {
+			t.Error("expected false when --speed is absent")
+		}
+	})
+}
+
+// TestIsSpeedFlag_ValueNotBare: even when --speed has a following value token,
+// isSpeedFlag still returns true because the --speed token is present in
+// os.Args. The flag.Lookup check handles the non-empty value case; isSpeedFlag
+// is the fallback for the empty-value (bare) case, but returning true here is
+// safe because flag.Lookup takes precedence in the conditional.
+func TestIsSpeedFlag_ValueNotBare(t *testing.T) {
+	withArgs([]string{"dnsieve", "--speed", "google.com"}, func() {
+		if !isSpeedFlag() {
+			t.Error("expected true: --speed token is present even when a value follows")
+		}
+	})
 }

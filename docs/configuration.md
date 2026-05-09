@@ -834,7 +834,7 @@ with SVCB records advertising the proxy's enabled encrypted listeners
 | `--version`      | Show version and exit                            |
 | `--install`      | Install as system service (prompts for label)    |
 | `--uninstall`    | Uninstall system service (lists and prompts)     |
-| `--speed`        | Test upstream server speed (optional: domains)   |
+| `--speed`        | Test upstream speed and diagnose resolver behaviour (optional: comma-separated domains) |
 
 Both single-dash (`-cfgfile`) and double-dash (`--cfgfile`) are accepted.
 

@@ -205,8 +205,10 @@ Run the built-in speed test:
 ./dnsieve --speed example.com,example.net,example.org
 ```
 
-Results show average, min, and max latency per upstream so you can pick the
-fastest providers for your network.
+When no domains are supplied, DNSieve queries 10 built-in domains.
+The full list is printed at the start of the test. Results include
+average, min, and max latency per upstream and a per-domain breakdown
+in table form.
 
 **Q: Does DNSieve log which domains are blocked?**
 

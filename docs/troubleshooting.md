@@ -162,8 +162,9 @@ intelligence.
    ```bash
    ./dnsieve --speed
    ```
-   Replace any upstream with average latency above ~300 ms with a geographically
-   closer provider.
+   The output includes per-domain latency, response status (BLOCKED, NXDOMAIN,
+   SERVFAIL, etc.), and DNSSEC detection for each upstream. Replace any upstream
+   with average latency above ~300 ms with a geographically closer provider.
 
 2. **Reduce the number of upstreams.** Each query is fanned out to all upstreams
    concurrently. Using more than three providers increases connection overhead.

@@ -101,18 +101,60 @@ func versionString() string {
 }
 
 // Run is the main entry point called from main.go.
+// patchSpeedArg normalises os.Args before flag.Parse so that a bare
+// --speed (or -speed) with no following value is accepted by the flag
+// package. The stdlib flag package requires string flags to always have a
+// value; without this pre-pass `dnsieve --speed` prints
+// "flag needs an argument: -speed" and exits.
+//
+// The logic is intentionally narrow:
+//   - --speed=value and -speed=value already carry their value inline; skip.
+//   - --speed value and -speed value already have a value as the next token
+//     (next token does not start with '-'); skip.
+//   - Bare --speed / -speed with no following non-flag token: insert an
+//     empty string so the parser sees --speed "".
+//
+// An empty string value is equivalent to "use built-in default domains".
+func patchSpeedArg() {
+	for i := 1; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		if strings.HasPrefix(arg, "--speed=") || strings.HasPrefix(arg, "-speed=") {
+			return // inline value present
+		}
+		if arg != "--speed" && arg != "-speed" {
+			continue
+		}
+		// Bare flag found. Check whether the next token is a plain value.
+		next := i + 1
+		if next < len(os.Args) && !strings.HasPrefix(os.Args[next], "-") {
+			return // next token is the value (e.g. "google.com,example.com")
+		}
+		// Insert an empty string so the flag package sees --speed "".
+		patched := make([]string, 0, len(os.Args)+1)
+		patched = append(patched, os.Args[:next]...)
+		patched = append(patched, "")
+		patched = append(patched, os.Args[next:]...)
+		os.Args = patched
+		return
+	}
+}
+
+// Run is the main entry point called from main.go.
 func Run() {
-	// Define flags (double-dash is default; Go flag package accepts both)
 	cfgFile := flag.String("cfgfile", "", "Custom config file path")
 	logDir := flag.String("logdir", "", "Custom log directory path")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 	installSvc := flag.Bool("install", false, "Install as system service")
 	uninstallSvc := flag.Bool("uninstall", false, "Uninstall system service")
-	speedTest := flag.String("speed", "", "Test upstream DNS speed (optional: comma-separated domains)")
+	speedTest := flag.String("speed", "", "Test upstream DNS speed; omit value for built-in domains or supply `domains` as a comma-separated list")
 	// svcname is an internal flag embedded in the binary path by the Windows
 	// service installer.  It is not shown in --help output but must be
 	// defined here so flag.Parse() does not reject it.
 	svcName := flag.String("svcname", "", "")
+	// patchSpeedArg must run before flag.Parse. The stdlib flag package
+	// requires every string flag to have a value; a bare --speed with no
+	// argument would otherwise cause flag.Parse to exit with an error.
+	patchSpeedArg()
 	flag.Parse()
 
 	// When started by the Windows Service Control Manager, hand off to the
@@ -286,7 +328,10 @@ func logStartupInfo(cfg *config.Config, logr *logging.Logger) {
 	}
 }
 
-// isSpeedFlag checks if --speed was passed (even without a value).
+// isSpeedFlag reports whether --speed or -speed was present in os.Args,
+// including the case where it was bare (no value). After patchSpeedArg runs,
+// a bare --speed becomes --speed "", so flag.Lookup returns an empty string;
+// this function handles that case by scanning the original args.
 func isSpeedFlag() bool {
 	for _, arg := range os.Args[1:] {
 		if arg == "--speed" || arg == "-speed" {
@@ -314,12 +359,10 @@ func handleSpeedTest(cfgFile, domains string) {
 	}
 
 	var domainList []string
-	if domains != "" {
-		for _, d := range strings.Split(domains, ",") {
-			d = strings.TrimSpace(d)
-			if d != "" {
-				domainList = append(domainList, d)
-			}
+	for _, d := range strings.Split(domains, ",") {
+		d = strings.TrimSpace(d)
+		if d != "" {
+			domainList = append(domainList, d)
 		}
 	}
 
