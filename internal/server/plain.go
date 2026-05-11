@@ -51,7 +51,8 @@ func (h *plainHandler) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dn
 	// RFC 7828: add TCP keepalive to TCP/TLS responses.
 	// RFC 9715: advertise the proxy's UDP buffer size in all responses.
 	// RFC 6891: only emit an OPT record when the client sent one.
-	h.handler.edns.PrepareClientResponse(resp, isTCP, edns.ClientHasEDNS(r))
+	// RFC 7830/8467: add padding to TCP responses when client requested it.
+	h.handler.edns.PrepareClientResponse(resp, isTCP, edns.ClientHasEDNS(r), edns.ClientHasPadding(r))
 
 	// RFC 3225: echo back the client's DO bit in the response EDNS OPT.
 	// The proxy always queries upstream with DO=1 for DNSSEC validation, but

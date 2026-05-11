@@ -450,7 +450,7 @@ func TestTCPKeepalive_ClientResponse(t *testing.T) {
 	m := NewMiddleware(cfg)
 
 	resp := new(dns.Msg)
-	m.PrepareClientResponse(resp, true, true)
+	m.PrepareClientResponse(resp, true, true, false)
 
 	ka := findPseudoType[*dns.TCPKEEPALIVE](resp)
 	if ka == nil {
@@ -1134,7 +1134,7 @@ func TestPrepareClientResponse_NonEDNS_NoOPT(t *testing.T) {
 	resp.UDPSize = MaxUDPPayload
 	resp.Pseudo = append(resp.Pseudo, &dns.EDE{InfoCode: 15, ExtraText: "Blocked"})
 
-	m.PrepareClientResponse(resp, false, false) // clientHasEDNS = false
+	m.PrepareClientResponse(resp, false, false, false) // clientHasEDNS = false
 
 	if resp.UDPSize != 0 {
 		t.Errorf("non-EDNS client: UDPSize should be 0, got %d", resp.UDPSize)
@@ -1151,7 +1151,7 @@ func TestPrepareClientResponse_EDNS_HasOPT(t *testing.T) {
 	m := NewMiddleware(cfg)
 
 	resp := new(dns.Msg)
-	m.PrepareClientResponse(resp, false, true) // clientHasEDNS = true
+	m.PrepareClientResponse(resp, false, true, false) // clientHasEDNS = true
 
 	if resp.UDPSize != MaxUDPPayload {
 		t.Errorf("EDNS client: UDPSize = %d, want %d", resp.UDPSize, MaxUDPPayload)
@@ -1166,7 +1166,7 @@ func TestPrepareClientResponse_NonEDNS_NoKeepalive(t *testing.T) {
 	m := NewMiddleware(cfg)
 
 	resp := new(dns.Msg)
-	m.PrepareClientResponse(resp, true, false) // TCP but not EDNS
+	m.PrepareClientResponse(resp, true, false, false) // TCP but not EDNS
 
 	if findPseudoType[*dns.TCPKEEPALIVE](resp) != nil {
 		t.Error("non-EDNS client: TCP keepalive must not be included in response")
@@ -1417,5 +1417,377 @@ func TestNeedsTruncation_TCP_AlwaysFalse(t *testing.T) {
 	}
 	if NeedsTruncation(resp, true, 0) {
 		t.Error("TCP responses must never be truncated (RFC 5966)")
+	}
+}
+
+// --- RFC 7830 / RFC 8467: EDNS(0) Padding ---
+
+func makeQueryWithPadding(name string, qtype uint16) *dns.Msg {
+	q := makeQuery(name, qtype)
+	q.UDPSize = 4096 // must have OPT for PADDING to be carried
+	q.Pseudo = append(q.Pseudo, &dns.PADDING{Padding: ""})
+	return q
+}
+
+// TestClientHasPadding_WithPadding verifies that a query with a PADDING option
+// is detected correctly.
+func TestClientHasPadding_WithPadding(t *testing.T) {
+	q := makeQueryWithPadding("example.com.", dns.TypeA)
+	if !ClientHasPadding(q) {
+		t.Error("query with PADDING option should be detected")
+	}
+}
+
+// TestClientHasPadding_WithoutPadding verifies that a query without a PADDING
+// option is not detected.
+func TestClientHasPadding_WithoutPadding(t *testing.T) {
+	q := makeQuery("example.com.", dns.TypeA)
+	if ClientHasPadding(q) {
+		t.Error("query without PADDING option should not be detected")
+	}
+}
+
+// TestClientHasPadding_Nil verifies that nil is handled safely.
+func TestClientHasPadding_Nil(t *testing.T) {
+	if ClientHasPadding(nil) {
+		t.Error("nil query should return false")
+	}
+}
+
+// TestPadding_UpstreamPadding_NotAddedWhenDisabled verifies that no upstream
+// padding is added when UpstreamPadding is explicitly set to false.
+func TestPadding_UpstreamPadding_NotAddedWhenDisabled(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.Privacy.Padding.UpstreamPadding = false
+	m := NewMiddleware(cfg)
+
+	q := makeQuery("example.com.", dns.TypeA)
+	out := m.PrepareUpstreamQuery(q, "upstream1", true) // isTCP=true
+
+	if findPseudoType[*dns.PADDING](out) != nil {
+		t.Error("upstream padding must not be added when UpstreamPadding=false")
+	}
+}
+
+// TestPadding_UpstreamPadding_NotAddedOnUDP verifies that no upstream padding
+// is added on UDP transports even when UpstreamPadding is enabled (RFC 7830 s3.1).
+func TestPadding_UpstreamPadding_NotAddedOnUDP(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.Privacy.Padding.UpstreamPadding = true
+	m := NewMiddleware(cfg)
+
+	q := makeQuery("example.com.", dns.TypeA)
+	out := m.PrepareUpstreamQuery(q, "upstream1", false) // isTCP=false (UDP)
+
+	if findPseudoType[*dns.PADDING](out) != nil {
+		t.Error("upstream padding must not be added on UDP transport (RFC 7830 s3.1)")
+	}
+}
+
+// TestPadding_UpstreamPadding_AddedOnTCP verifies that upstream padding is
+// added on TCP (encrypted) transports when UpstreamPadding is enabled.
+func TestPadding_UpstreamPadding_AddedOnTCP(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.Privacy.Padding.UpstreamPadding = true
+	m := NewMiddleware(cfg)
+
+	q := makeQuery("example.com.", dns.TypeA)
+	out := m.PrepareUpstreamQuery(q, "upstream1", true) // isTCP=true (DoT/DoH)
+
+	pad := findPseudoType[*dns.PADDING](out)
+	if pad == nil {
+		t.Fatal("upstream padding must be added on TCP transport when UpstreamPadding=true")
+	}
+}
+
+// TestPadding_UpstreamPadding_BlockSize128 verifies that upstream queries are
+// padded to the next multiple of 128 bytes (RFC 8467 s4.1).
+func TestPadding_UpstreamPadding_BlockSize128(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.Privacy.Padding.UpstreamPadding = true
+	m := NewMiddleware(cfg)
+
+	q := makeQuery("example.com.", dns.TypeA)
+	out := m.PrepareUpstreamQuery(q, "upstream1", true)
+
+	if err := out.Pack(); err != nil {
+		t.Fatalf("pack upstream query: %v", err)
+	}
+	size := len(out.Data)
+	if size%128 != 0 {
+		t.Errorf("padded upstream query size = %d, not a multiple of 128", size)
+	}
+}
+
+// TestPadding_UpstreamPadding_ContentIsZeros verifies that the upstream padding
+// bytes are all zeros as recommended by RFC 7830.
+func TestPadding_UpstreamPadding_ContentIsZeros(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.Privacy.Padding.UpstreamPadding = true
+	m := NewMiddleware(cfg)
+
+	q := makeQuery("example.com.", dns.TypeA)
+	out := m.PrepareUpstreamQuery(q, "upstream1", true)
+
+	pad := findPseudoType[*dns.PADDING](out)
+	if pad == nil {
+		t.Fatal("expected PADDING option")
+	}
+	// Padding hex string should only contain "00" pairs
+	for i := 0; i+1 < len(pad.Padding); i += 2 {
+		if pad.Padding[i] != '0' || pad.Padding[i+1] != '0' {
+			t.Errorf("padding byte at position %d is not zero: %q", i/2, pad.Padding[i:i+2])
+		}
+	}
+}
+
+// TestPadding_ClientPaddingStripped verifies that client PADDING is stripped
+// from the upstream query (proxy rebuilds OPT from scratch).
+func TestPadding_ClientPaddingStripped(t *testing.T) {
+	cfg := defaultTestConfig()
+	m := NewMiddleware(cfg)
+
+	q := makeQueryWithPadding("example.com.", dns.TypeA)
+	out := m.PrepareUpstreamQuery(q, "upstream1", false)
+
+	// Client PADDING must not appear in upstream query (OPT is rebuilt from scratch)
+	if findPseudoType[*dns.PADDING](out) != nil {
+		t.Error("client PADDING must be stripped from upstream query")
+	}
+}
+
+// TestPadding_UpstreamPaddingStrippedFromResponse verifies that upstream
+// PADDING is stripped from the response before it is forwarded to clients.
+func TestPadding_UpstreamPaddingStrippedFromResponse(t *testing.T) {
+	cfg := defaultTestConfig()
+	m := NewMiddleware(cfg)
+
+	resp := new(dns.Msg)
+	resp.Pseudo = append(resp.Pseudo, &dns.PADDING{Padding: strings.Repeat("00", 60)})
+	m.ProcessUpstreamResponse(resp, "upstream1")
+
+	if findPseudoType[*dns.PADDING](resp) != nil {
+		t.Error("upstream PADDING must be stripped from the response forwarded to clients")
+	}
+}
+
+// TestPadding_ClientResponsePadded_TCP verifies that a padding option is added
+// to TCP responses when the client included a PADDING option (RFC 7830/8467).
+func TestPadding_ClientResponsePadded_TCP(t *testing.T) {
+	cfg := defaultTestConfig()
+	m := NewMiddleware(cfg)
+
+	resp := new(dns.Msg)
+	resp.Response = true
+	resp.UDPSize = 4096
+	m.PrepareClientResponse(resp, true, true, true) // isTCP=true, clientHasPadding=true
+
+	if findPseudoType[*dns.PADDING](resp) == nil {
+		t.Error("response must contain PADDING when client requested it over TCP")
+	}
+}
+
+// TestPadding_ClientResponseNotPadded_UDP verifies that no padding is added to
+// UDP responses even when the client included a PADDING option (RFC 7830 s3.1).
+func TestPadding_ClientResponseNotPadded_UDP(t *testing.T) {
+	cfg := defaultTestConfig()
+	m := NewMiddleware(cfg)
+
+	resp := new(dns.Msg)
+	resp.Response = true
+	m.PrepareClientResponse(resp, false, true, true) // isTCP=false (UDP), clientHasPadding=true
+
+	if findPseudoType[*dns.PADDING](resp) != nil {
+		t.Error("padding must not be added to UDP responses (RFC 7830 s3.1)")
+	}
+}
+
+// TestPadding_ClientResponseNotPadded_WhenClientDidNotRequest verifies that
+// no padding is added when the client did not include a PADDING option.
+func TestPadding_ClientResponseNotPadded_WhenClientDidNotRequest(t *testing.T) {
+	cfg := defaultTestConfig()
+	m := NewMiddleware(cfg)
+
+	resp := new(dns.Msg)
+	resp.Response = true
+	m.PrepareClientResponse(resp, true, true, false) // isTCP=true, clientHasPadding=false
+
+	if findPseudoType[*dns.PADDING](resp) != nil {
+		t.Error("padding must not be added when client did not request it")
+	}
+}
+
+// TestPadding_ClientResponseBlockSize468 verifies that responses are padded to
+// the next multiple of 468 bytes (RFC 8467 s4.2).
+func TestPadding_ClientResponseBlockSize468(t *testing.T) {
+	cfg := defaultTestConfig()
+	m := NewMiddleware(cfg)
+
+	resp := new(dns.Msg)
+	resp.Response = true
+	m.PrepareClientResponse(resp, true, true, true) // isTCP=true, clientHasPadding=true
+
+	if err := resp.Pack(); err != nil {
+		t.Fatalf("pack response: %v", err)
+	}
+	size := len(resp.Data)
+	if size%468 != 0 {
+		t.Errorf("padded response size = %d, not a multiple of 468", size)
+	}
+}
+
+// TestPadding_ClientResponseContentIsZeros verifies that response padding bytes
+// are all zeros as recommended by RFC 7830.
+func TestPadding_ClientResponseContentIsZeros(t *testing.T) {
+	cfg := defaultTestConfig()
+	m := NewMiddleware(cfg)
+
+	resp := new(dns.Msg)
+	resp.Response = true
+	m.PrepareClientResponse(resp, true, true, true) // isTCP=true, clientHasPadding=true
+
+	pad := findPseudoType[*dns.PADDING](resp)
+	if pad == nil {
+		t.Fatal("expected PADDING option in response")
+	}
+	for i := 0; i+1 < len(pad.Padding); i += 2 {
+		if pad.Padding[i] != '0' || pad.Padding[i+1] != '0' {
+			t.Errorf("response padding byte at position %d is not zero: %q", i/2, pad.Padding[i:i+2])
+		}
+	}
+}
+
+// TestPadding_NonEDNSClient_NoPadding verifies that no padding is added when
+// the client did not send an EDNS OPT record (RFC 6891).
+func TestPadding_NonEDNSClient_NoPadding(t *testing.T) {
+	cfg := defaultTestConfig()
+	m := NewMiddleware(cfg)
+
+	resp := new(dns.Msg)
+	resp.Response = true
+	m.PrepareClientResponse(resp, true, false, false) // clientHasEDNS=false
+
+	if findPseudoType[*dns.PADDING](resp) != nil {
+		t.Error("non-EDNS client must not receive a PADDING option")
+	}
+}
+
+// TestPadding_UpstreamPadding_MultipleBlockSizes verifies that padding keeps
+// the message at exactly 128-byte multiples regardless of the initial size.
+func TestPadding_UpstreamPadding_MultipleBlockSizes(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.Privacy.Padding.UpstreamPadding = true
+	m := NewMiddleware(cfg)
+
+	queries := []struct {
+		name  string
+		qtype uint16
+	}{
+		{"a.example.com.", dns.TypeA},
+		{"somewhat.longer.domain.name.example.com.", dns.TypeA},
+		{"example.com.", dns.TypeAAAA},
+		{"example.com.", dns.TypeMX},
+	}
+	for _, tc := range queries {
+		q := makeQuery(tc.name, tc.qtype)
+		out := m.PrepareUpstreamQuery(q, "upstream1", true)
+		if err := out.Pack(); err != nil {
+			t.Fatalf("pack %s %s: %v", tc.name, dns.TypeToString[tc.qtype], err)
+		}
+		size := len(out.Data)
+		if size%128 != 0 {
+			t.Errorf("query %s %s: padded size = %d, not a multiple of 128",
+				tc.name, dns.TypeToString[tc.qtype], size)
+		}
+	}
+}
+
+// TestPadding_ClientResponse_MultipleBlockSizes verifies that response padding
+// keeps the message at exactly 468-byte multiples for different response sizes.
+func TestPadding_ClientResponse_MultipleBlockSizes(t *testing.T) {
+	cfg := defaultTestConfig()
+	m := NewMiddleware(cfg)
+
+	for _, answerCount := range []int{0, 1, 3, 5} {
+		resp := new(dns.Msg)
+		resp.Response = true
+		for i := 0; i < answerCount; i++ {
+			a := &dns.A{
+				Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300},
+			}
+			a.Addr = netip.MustParseAddr("192.0.2.1")
+			resp.Answer = append(resp.Answer, a)
+		}
+		m.PrepareClientResponse(resp, true, true, true)
+		if err := resp.Pack(); err != nil {
+			t.Fatalf("pack response with %d answers: %v", answerCount, err)
+		}
+		size := len(resp.Data)
+		if size%468 != 0 {
+			t.Errorf("response with %d answers: padded size = %d, not a multiple of 468",
+				answerCount, size)
+		}
+	}
+}
+
+// TestPadding_UpstreamPadding_EnabledByDefault verifies that upstream padding
+// is enabled in the default configuration.
+func TestPadding_UpstreamPadding_EnabledByDefault(t *testing.T) {
+	cfg := defaultTestConfig()
+	if !cfg.Privacy.Padding.UpstreamPadding {
+		t.Error("upstream padding should be enabled by default")
+	}
+	m := NewMiddleware(cfg)
+
+	q := makeQuery("example.com.", dns.TypeA)
+	out := m.PrepareUpstreamQuery(q, "upstream1", true)
+
+	if findPseudoType[*dns.PADDING](out) == nil {
+		t.Error("upstream padding must be present in default config on TCP")
+	}
+}
+
+// TestPadding_UpstreamPadding_IsNonDeterministic verifies that repeated calls
+// with the same message produce at least two distinct padded sizes, demonstrating
+// the random jitter recommended by RFC 8467 s3. The probability of all 100
+// iterations landing in the same bucket is astronomically small (<2^-49).
+func TestPadding_UpstreamPadding_IsNonDeterministic(t *testing.T) {
+	cfg := defaultTestConfig()
+	cfg.Privacy.Padding.UpstreamPadding = true
+	m := NewMiddleware(cfg)
+
+	sizes := make(map[int]bool)
+	for i := 0; i < 100; i++ {
+		q := makeQuery("example.com.", dns.TypeA)
+		out := m.PrepareUpstreamQuery(q, "upstream1", true)
+		if err := out.Pack(); err != nil {
+			t.Fatalf("pack (iteration %d): %v", i, err)
+		}
+		sizes[len(out.Data)] = true
+	}
+	if len(sizes) < 2 {
+		t.Errorf("RFC 8467 s3: upstream padding should be non-deterministic, got only %d distinct size(s) in 100 iterations", len(sizes))
+	}
+}
+
+// TestPadding_ClientResponse_IsNonDeterministic verifies that repeated calls
+// with the same response produce at least two distinct padded sizes (RFC 8467 s3).
+func TestPadding_ClientResponse_IsNonDeterministic(t *testing.T) {
+	cfg := defaultTestConfig()
+	m := NewMiddleware(cfg)
+
+	sizes := make(map[int]bool)
+	for i := 0; i < 100; i++ {
+		resp := new(dns.Msg)
+		resp.Response = true
+		m.PrepareClientResponse(resp, true, true, true)
+		if err := resp.Pack(); err != nil {
+			t.Fatalf("pack (iteration %d): %v", i, err)
+		}
+		sizes[len(resp.Data)] = true
+		// Reset for next iteration
+	}
+	if len(sizes) < 2 {
+		t.Errorf("RFC 8467 s3: response padding should be non-deterministic, got only %d distinct size(s) in 100 iterations", len(sizes))
 	}
 }

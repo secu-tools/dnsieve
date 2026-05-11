@@ -172,11 +172,23 @@ type BlacklistConfig struct {
 	ListTTL   int      `toml:"list_ttl"`
 }
 
+// PaddingConfig controls EDNS(0) Padding option handling (RFC 7830 / RFC 8467).
+// The server always accepts and strips incoming client padding from queries
+// regardless of this setting, and echoes padding back to clients that request
+// it over TCP-based (encrypted) transports.
+type PaddingConfig struct {
+	// UpstreamPadding, when true, adds RFC 8467 block-length padding (128-byte
+	// blocks) to queries forwarded to encrypted upstreams (DoT, DoH). Padding
+	// is never added to plain UDP upstreams per RFC 7830. Enabled by default.
+	UpstreamPadding bool `toml:"upstream_padding"`
+}
+
 // PrivacyConfig holds privacy-related settings for EDNS0 option handling.
 type PrivacyConfig struct {
 	ECS     ECSConfig     `toml:"ecs"`
 	Cookies CookiesConfig `toml:"cookies"`
 	NSID    NSIDConfig    `toml:"nsid"`
+	Padding PaddingConfig `toml:"padding"`
 }
 
 // ECSConfig controls EDNS Client Subnet (RFC 7871) handling.
@@ -330,6 +342,9 @@ func DefaultConfig() *Config {
 			},
 			NSID: NSIDConfig{
 				Mode: "strip",
+			},
+			Padding: PaddingConfig{
+				UpstreamPadding: true,
 			},
 		},
 		TCPKeepalive: TCPKeepaliveConfig{
@@ -1277,6 +1292,27 @@ mode = "strip"
 
 # Only used when mode = "substitute". The identifier string to return.
 # value = "dnsieve-proxy-01"
+
+[privacy.padding]
+# EDNS(0) Padding (RFC 7830 / RFC 8467) for upstream queries.
+#
+# When enabled, queries forwarded to encrypted upstreams (DoT, DoH) are
+# padded to a multiple of 128 bytes using a random jitter before alignment
+# (RFC 8467 s4.1). The random jitter prevents identical queries from always
+# producing the same wire size, defeating cross-query size fingerprinting
+# (RFC 8467 s3). Padding is never added to plain UDP upstreams (RFC 7830
+# s3.1).
+#
+# When a client sends a PADDING option over TCP/DoT/DoH, the proxy always
+# echoes padding back in the response (468-byte blocks, RFC 8467 s4.2),
+# regardless of this setting.
+#
+# RFC 6891 s6.1.2 requires DNS servers to silently ignore unrecognised
+# EDNS options, so padded queries are safe to send to any RFC-compliant
+# upstream.
+#
+# Default: true
+upstream_padding = true
 
 
 # =============================================================================

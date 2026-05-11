@@ -229,3 +229,104 @@ func TestE2E_EDNS_TCPKeepalive_NotOnUDP(t *testing.T) {
 		t.Error("RFC 7828: TCP keepalive must not appear in UDP responses")
 	}
 }
+
+// ============================================================
+// EDNS: Padding (RFC 7830 / RFC 8467)
+// ============================================================
+
+// TestE2E_EDNS_Padding_ResponsePadded_TCP verifies that when a client sends a
+// PADDING option over TCP the proxy echoes padding back in the response
+// (RFC 7830 / RFC 8467 s4.2).
+func TestE2E_EDNS_Padding_ResponsePadded_TCP(t *testing.T) {
+	port := findFreePort(t)
+	cfg := plainConfig(port)
+	cancel := startServerReachable(t, cfg)
+	defer cancel()
+
+	resp := queryWithPaddingTCP(t, port, "example.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("padding TCP: rcode=%s", dns.RcodeToString[resp.Rcode])
+	}
+	if findPadding(resp) == nil {
+		t.Error("RFC 7830: response must contain PADDING when client sent PADDING over TCP")
+	}
+	t.Logf("padding TCP: PADDING present in response")
+}
+
+// TestE2E_EDNS_Padding_ResponseBlockSize468 verifies that the padded TCP
+// response is aligned to 468-byte blocks (RFC 8467 s4.2).
+func TestE2E_EDNS_Padding_ResponseBlockSize468(t *testing.T) {
+	port := findFreePort(t)
+	cfg := plainConfig(port)
+	cancel := startServerReachable(t, cfg)
+	defer cancel()
+
+	resp := queryWithPaddingTCP(t, port, "example.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("padding block size: rcode=%s", dns.RcodeToString[resp.Rcode])
+	}
+	if err := resp.Pack(); err != nil {
+		t.Fatalf("pack response: %v", err)
+	}
+	size := len(resp.Data)
+	if size%468 != 0 {
+		t.Errorf("RFC 8467: padded response size = %d, not a multiple of 468 bytes", size)
+	}
+	t.Logf("padding block size: response = %d bytes (%d blocks of 468)", size, size/468)
+}
+
+// TestE2E_EDNS_Padding_NoPaddingOnUDP verifies that no PADDING is added to
+// UDP responses even when the client included a PADDING option (RFC 7830 s3.1).
+func TestE2E_EDNS_Padding_NoPaddingOnUDP(t *testing.T) {
+	port := findFreePort(t)
+	cfg := plainConfig(port)
+	cancel := startServerReachable(t, cfg)
+	defer cancel()
+
+	resp := queryWithPaddingUDP(t, port, "example.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("padding UDP: rcode=%s", dns.RcodeToString[resp.Rcode])
+	}
+	if findPadding(resp) != nil {
+		t.Error("RFC 7830 s3.1: padding must not be added to UDP responses")
+	}
+	t.Logf("padding UDP: no PADDING in response (correct)")
+}
+
+// TestE2E_EDNS_Padding_NoPaddingWhenClientDidNotRequest verifies that no
+// padding is added when the client did not include a PADDING option.
+func TestE2E_EDNS_Padding_NoPaddingWhenClientDidNotRequest(t *testing.T) {
+	port := findFreePort(t)
+	cfg := plainConfig(port)
+	cancel := startServerReachable(t, cfg)
+	defer cancel()
+
+	// Regular TCP query without PADDING option
+	resp := queryTCP(t, port, "example.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("no-padding TCP: rcode=%s", dns.RcodeToString[resp.Rcode])
+	}
+	if findPadding(resp) != nil {
+		t.Error("padding must not be added when client did not request it")
+	}
+}
+
+// TestE2E_EDNS_Padding_UpstreamEnabled verifies that the proxy resolves
+// correctly when upstream padding is enabled (functional check only; the
+// upstream padding cannot easily be verified in an e2e test).
+func TestE2E_EDNS_Padding_UpstreamEnabled(t *testing.T) {
+	port := findFreePort(t)
+	cfg := plainConfig(port)
+	cfg.Privacy.Padding.UpstreamPadding = true
+	cancel := startServerReachable(t, cfg)
+	defer cancel()
+
+	resp := queryUDP(t, port, "example.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("upstream padding enabled: rcode=%s", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) == 0 {
+		t.Error("upstream padding enabled: expected at least one answer record")
+	}
+	t.Logf("upstream padding enabled: rcode=%s answers=%d", dns.RcodeToString[resp.Rcode], len(resp.Answer))
+}

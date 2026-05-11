@@ -295,7 +295,8 @@ func dohHandler(w http.ResponseWriter, r *http.Request, handler *Handler, logger
 	// RFC 7828: TCP keepalive for DoH (always TCP-based)
 	// RFC 6891: DoH queries arrive over HTTP; treat as EDNS-capable when
 	// the wire query contained an OPT record (or always for JSON-API path).
-	handler.edns.PrepareClientResponse(resp, true, edns.ClientHasEDNS(query))
+	// RFC 7830/8467: add padding to DoH responses when client requested it.
+	handler.edns.PrepareClientResponse(resp, true, edns.ClientHasEDNS(query), edns.ClientHasPadding(query))
 
 	// RFC 3225: echo back the client's DO bit in the response EDNS OPT.
 	resp.Security = edns.ClientRequestsDNSSEC(query)

@@ -6,7 +6,8 @@
 // upstream servers (RFC 6891), handles ECS stripping/substitution
 // (RFC 7871), cookie management (RFC 7873), NSID (RFC 5001), TCP
 // keepalive (RFC 7828), buffer size limits (RFC 9715), DO bit
-// forwarding (RFC 3225), and EDE pass-through (RFC 8914).
+// forwarding (RFC 3225), EDE pass-through (RFC 8914), and padding
+// (RFC 7830 / RFC 8467).
 package edns
 
 import (
@@ -100,6 +101,12 @@ func (m *Middleware) PrepareUpstreamQuery(query *dns.Msg, upstreamAddr string, i
 		m.addKeepaliveOption(out, true)
 	}
 
+	// RFC 7830/8467: add block-length padding to encrypted upstream queries
+	// when enabled. Padding MUST NOT be added to UDP upstreams (RFC 7830 s3.1).
+	if isTCP && m.cfg.Privacy.Padding.UpstreamPadding {
+		addUpstreamPadding(out)
+	}
+
 	return out
 }
 
@@ -120,6 +127,10 @@ func (m *Middleware) ProcessUpstreamResponse(resp *dns.Msg, upstreamAddr string)
 			// Strip cookies from the response sent to clients. Per-upstream
 			// cookie state is updated at the resolver layer via
 			// ProcessResponseCookieOnly, which uses the correct upstream address.
+			continue
+		case *dns.PADDING:
+			// RFC 7830: strip upstream padding; the proxy manages its own
+			// padding for client responses independently.
 			continue
 		case *dns.NSID:
 			if m.cfg.Privacy.NSID.Mode == "strip" {
@@ -153,12 +164,16 @@ func (m *Middleware) ProcessUpstreamResponse(resp *dns.Msg, upstreamAddr string)
 }
 
 // PrepareClientResponse adds proxy-specific EDNS0 options to a response
-// being sent to a client (e.g., TCP keepalive, buffer size).
+// being sent to a client (e.g., TCP keepalive, buffer size, padding).
 // clientHasEDNS must be true when the originating query contained an OPT
 // record; per RFC 6891, an OPT RR must not be added to the response if the
 // client did not send one. When false, any EDNS0 options already present on
 // resp (such as EDE from MakeBlockedResponse) are cleared before sending.
-func (m *Middleware) PrepareClientResponse(resp *dns.Msg, isTCP bool, clientHasEDNS bool) {
+// clientHasPadding must be true when the originating query contained a PADDING
+// option; per RFC 7830/8467 the proxy then adds padding to the response when
+// the transport is TCP-based (isTCP true). Padding is never added to UDP
+// responses (RFC 7830 s3.1).
+func (m *Middleware) PrepareClientResponse(resp *dns.Msg, isTCP bool, clientHasEDNS bool, clientHasPadding bool) {
 	if resp == nil {
 		return
 	}
@@ -180,6 +195,13 @@ func (m *Middleware) PrepareClientResponse(resp *dns.Msg, isTCP bool, clientHasE
 	if isTCP {
 		m.addKeepaliveOption(resp, false)
 	}
+
+	// RFC 7830/8467: add block-length response padding (468-byte blocks) when
+	// the client included a Padding option and the transport is TCP-based.
+	// Padding MUST NOT be added to UDP responses (RFC 7830 s3.1).
+	if isTCP && clientHasPadding {
+		addResponsePadding(resp)
+	}
 }
 
 // ClientHasEDNS reports whether the client query contained an OPT record.
@@ -189,6 +211,93 @@ func ClientHasEDNS(query *dns.Msg) bool {
 		return false
 	}
 	return query.UDPSize > 0
+}
+
+// ClientHasPadding reports whether the client query contained a PADDING option
+// (RFC 7830). The server uses this to decide whether to add padding to the
+// response over TCP-based transports (RFC 8467).
+func ClientHasPadding(query *dns.Msg) bool {
+	if query == nil {
+		return false
+	}
+	for _, rr := range query.Pseudo {
+		if _, ok := rr.(*dns.PADDING); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// --- Padding Helpers (RFC 7830 / RFC 8467) ---
+
+// randomJitter returns a cryptographically random integer in [0, maxExclusive).
+// It uses 2 random bytes (0-65535) reduced via modulo. The distribution is
+// perfectly uniform for power-of-two divisors (block=128: 65536 = 512*128)
+// and has negligible bias (<0.001%) for non-power-of-two divisors (block=468).
+// Returns 0 on crypto/rand failure so callers degrade gracefully to
+// deterministic block-aligned padding.
+func randomJitter(maxExclusive int) int {
+	b := make([]byte, 2)
+	if _, err := rand.Read(b); err != nil {
+		return 0
+	}
+	return (int(b[0])<<8 | int(b[1])) % maxExclusive
+}
+
+// addUpstreamPadding packs the message to measure its current wire size, then
+// appends a PADDING option so the total is a multiple of 128 bytes (RFC 8467
+// s4.1). A random jitter of 0-(block-1) bytes is added before alignment so
+// the same query content lands in different 128-byte buckets across requests,
+// preventing cross-query size fingerprinting (RFC 8467 s3). The packed data is
+// cleared so the message is repacked on send with the new option included.
+//
+// The 4-byte PADDING option header (type + length) is included in the size
+// calculation so the final wire size is an exact multiple of 128.
+//
+// This function is a no-op if packing fails (the query is still sent without
+// padding).
+func addUpstreamPadding(out *dns.Msg) {
+	if err := out.Pack(); err != nil {
+		out.Data = nil
+		return
+	}
+	size := len(out.Data)
+	out.Data = nil
+	const block = 128
+	// Add a random jitter before aligning so repeated identical queries land in
+	// different buckets. The final invariant is:
+	//   (size + 4 + jitter + paddingData) % block == 0
+	jitter := randomJitter(block)
+	paddingData := (block - (size+4+jitter)%block) % block
+	out.Pseudo = append(out.Pseudo, &dns.PADDING{Padding: strings.Repeat("00", jitter+paddingData)})
+}
+
+// addResponsePadding packs the response to measure its current wire size, then
+// appends a PADDING option so the total is a multiple of 468 bytes (RFC 8467
+// s4.2). A random jitter of 0-(block-1) bytes is added before alignment so
+// the same response content varies in wire size across requests, preventing
+// cross-query size fingerprinting (RFC 8467 s3). The packed data is cleared so
+// the response is repacked by the caller with the new option included.
+//
+// The 4-byte PADDING option header (type + length) is included in the size
+// calculation so the final wire size is an exact multiple of 468.
+//
+// This function is a no-op if packing fails (the response is still sent without
+// padding).
+func addResponsePadding(resp *dns.Msg) {
+	if err := resp.Pack(); err != nil {
+		resp.Data = nil
+		return
+	}
+	size := len(resp.Data)
+	resp.Data = nil
+	const block = 468
+	// Add a random jitter before aligning so repeated identical responses vary
+	// in wire size. The final invariant is:
+	//   (size + 4 + jitter + paddingData) % block == 0
+	jitter := randomJitter(block)
+	paddingData := (block - (size+4+jitter)%block) % block
+	resp.Pseudo = append(resp.Pseudo, &dns.PADDING{Padding: strings.Repeat("00", jitter+paddingData)})
 }
 
 // --- DO Bit Helpers ---

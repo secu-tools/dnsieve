@@ -812,6 +812,60 @@ func findTCPKeepalive(msg *dns.Msg) *dns.TCPKEEPALIVE {
 	return nil
 }
 
+// findPadding searches a message for a PADDING option (RFC 7830).
+func findPadding(msg *dns.Msg) *dns.PADDING {
+	for _, rr := range msg.Pseudo {
+		if p, ok := rr.(*dns.PADDING); ok {
+			return p
+		}
+	}
+	return nil
+}
+
+// queryWithPaddingTCP sends a DNS query with an EDNS(0) PADDING option over TCP.
+// The PADDING option signals to the proxy that padding should be echoed back in
+// the response (RFC 7830 / RFC 8467).
+func queryWithPaddingTCP(t *testing.T, port int, name string, qtype uint16) *dns.Msg {
+	t.Helper()
+	query := makePlainQuery(name, qtype)
+	query.UDPSize = 4096 // must be non-zero for OPT record to be emitted
+	query.Pseudo = append(query.Pseudo, &dns.PADDING{Padding: ""})
+
+	c := dns.NewClient()
+	c.Transport.ReadTimeout = 20 * time.Second
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
+	resp, _, err := c.Exchange(ctx, query, "tcp", addr)
+	if err != nil {
+		t.Fatalf("query %s %s with PADDING over TCP: %v", name, dns.TypeToString[qtype], err)
+	}
+	return resp
+}
+
+// queryWithPaddingUDP sends a DNS query with an EDNS(0) PADDING option over UDP.
+func queryWithPaddingUDP(t *testing.T, port int, name string, qtype uint16) *dns.Msg {
+	t.Helper()
+	query := makePlainQuery(name, qtype)
+	query.UDPSize = 4096
+	query.Pseudo = append(query.Pseudo, &dns.PADDING{Padding: ""})
+
+	c := dns.NewClient()
+	c.Transport.ReadTimeout = 20 * time.Second
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
+	resp, _, err := c.Exchange(ctx, query, "udp", addr)
+	if err != nil {
+		t.Fatalf("query %s %s with PADDING over UDP: %v", name, dns.TypeToString[qtype], err)
+	}
+	return resp
+}
+
 // isBlockedIPv4 returns true if the response represents a blocked A query.
 // In default "null" mode: NOERROR with 0.0.0.0 answer and EDE Blocked.
 // In other modes: EDE Blocked is the primary signal regardless of rcode.

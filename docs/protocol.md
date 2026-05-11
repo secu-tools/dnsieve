@@ -171,6 +171,50 @@ server cookie), and normal operation resumes.
 ### NSID (RFC 5001)
 - Configurable: strip (default), forward, or substitute with proxy's own ID
 
+### Padding (RFC 7830 / RFC 8467)
+
+The proxy handles EDNS(0) Padding in two directions:
+
+**Client padding (inbound)**
+
+The proxy always accepts the PADDING option from clients, regardless of any
+configuration. Client padding is stripped from queries forwarded to upstream
+servers (the proxy rebuilds the OPT record from scratch). When the client
+included a PADDING option and the transport is TCP-based (plain TCP, DoT, or
+DoH), the proxy adds padding to the response (RFC 8467 s4.2). Padding is never
+added to UDP responses (RFC 7830 s3.1).
+
+| Condition                              | Server response padding          |
+|----------------------------------------|----------------------------------|
+| Client sent PADDING over TCP/DoT/DoH   | Added (468-byte blocks, random)  |
+| Client sent PADDING over UDP           | Not added (RFC 7830 s3.1)        |
+| Client did not send PADDING            | Not added                        |
+
+**Upstream padding (outbound)**
+
+Controlled by `privacy.padding.upstream_padding` (default: `true`). When
+enabled, the proxy pads queries forwarded to encrypted upstreams (DoT, DoH)
+to a multiple of 128 bytes (RFC 8467 s4.1). Plain UDP upstreams are never
+padded (RFC 7830 s3.1).
+
+**Randomisation (RFC 8467 s3)**
+
+Both upstream queries and client responses use a random jitter of 0 to
+(block-1) bytes added before block alignment. This means the same DNS message
+produces a different wire size on each request, preventing cross-query size
+correlation even between messages that would otherwise land in the same
+block bucket. The jitter is generated with `crypto/rand`; a failure in
+`crypto/rand` degrades gracefully to deterministic block-aligned padding.
+
+Padding bytes are all zeros (RFC 7830 recommendation).
+
+**Upstream compatibility**
+
+RFC 6891 section 6.1.2 requires that DNS servers silently ignore unrecognised
+EDNS options. Sending a padded query to any RFC-compliant upstream is
+equivalent to sending an unpadded one from the server's perspective; there is
+no risk of resolution failure.
+
 ### TCP Keepalive (RFC 7828)
 - Proxy advertises keepalive timeout to TCP clients
 - Configurable client and upstream timeout values

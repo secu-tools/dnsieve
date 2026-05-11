@@ -772,6 +772,9 @@ mode = "reoriginate"        # "strip" or "reoriginate"
 [privacy.nsid]
 mode = "strip"              # "strip", "forward", or "substitute"
 # value = "dnsieve-01"      # Required when mode = "substitute"
+
+[privacy.padding]
+upstream_padding = true     # Add RFC 8467 block-length padding to encrypted upstream queries
 ```
 
 ### EDNS Client Subnet (RFC 7871)
@@ -796,6 +799,13 @@ mode = "strip"              # "strip", "forward", or "substitute"
 | `"strip"`     | Remove NSID from forwarded queries (default)              |
 | `"forward"`   | Forward NSID requests to upstreams verbatim               |
 | `"substitute"`| Return proxy's own NSID `value` to clients                |
+
+### Padding (RFC 7830 / RFC 8467)
+
+| Setting                      | Behaviour                                                                             |
+|------------------------------|---------------------------------------------------------------------------------------|
+| `upstream_padding = false`   | No padding added to upstream queries                                                  |
+| `upstream_padding = true`    | Pad upstream queries to 128-byte blocks with random jitter (RFC 8467 s4.1) (default) |
 
 ## TCP Keepalive (RFC 7828)
 
