@@ -11,6 +11,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Set to "false" to skip uploading build artifacts after each run (default).
+  # Set to "true" to keep artifacts.
+  KEEP_ARTIFACTS: "false"
+
 jobs:
   build:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
@@ -65,6 +70,7 @@ jobs:
             ./
 
       - name: Upload artifact
+        if: env.KEEP_ARTIFACTS == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: dnsieve-${{ matrix.goos }}-${{ matrix.goarch }}

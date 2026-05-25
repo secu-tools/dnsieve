@@ -41,7 +41,10 @@ permissions:
   packages: write
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # Set to "false" to delete intermediate build artifacts after the release is
+  # published successfully. Does not affect files on the GitHub release page.
+  # Set to "true" to keep artifacts on the runner after release.
+  KEEP_ARTIFACTS: "false"
 
 # Prevent concurrent release runs to avoid version file race conditions.
 concurrency:
@@ -809,3 +812,22 @@ jobs:
           else
             echo "  No GHCR image found for version ${FULL_VERSION} -- nothing to delete"
           fi
+
+  # ---------------------------------------------------------------
+  # Cleanup: delete intermediate build artifacts from the runner
+  # after the release has been published successfully.
+  # Does not affect files uploaded to the GitHub release page.
+  # Set KEEP_ARTIFACTS: "true" to retain artifacts after release.
+  # ---------------------------------------------------------------
+  cleanup:
+    needs: [publish]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete intermediate build artifacts
+        if: env.KEEP_ARTIFACTS == 'false'
+        uses: actions/delete-artifact@v4
+        with:
+          pattern: build-*
