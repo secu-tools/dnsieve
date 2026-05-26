@@ -72,6 +72,22 @@ type ResponseInfo struct {
 	// Truncated is true when the TC (Truncated) bit was set in the response,
 	// indicating the client should retry over TCP to retrieve the full answer.
 	Truncated bool `json:"truncated,omitempty"`
+	// AD is true when the Authentic Data bit was set in the response sent to
+	// the client, indicating that DNSSEC validation succeeded (RFC 4035).
+	AD bool `json:"ad,omitempty"`
+	// HasRRSIG is true when the response sent to the client contains at least
+	// one RRSIG record in the Answer or Authority section.
+	HasRRSIG bool `json:"rrsig,omitempty"`
+	// EDECode is the Extended DNS Error info code (RFC 8914) included in the
+	// response sent to the client. Nil when no EDE option was present.
+	// Common codes: 0=Other, 2=SERVFAIL error, 15=Blocked, 22=No Reachable Authority.
+	EDECode *int `json:"ede_code,omitempty"`
+	// EDEText is the optional extra text that accompanied the EDE code sent
+	// to the client. Empty when no text was provided.
+	EDEText string `json:"ede_text,omitempty"`
+	// AuthorityCount is the number of records in the Authority section of the
+	// response. Non-zero for NXDOMAIN responses that include a SOA record.
+	AuthorityCount int `json:"authority_count,omitempty"`
 }
 
 // ClientInfo describes the DNS client that sent the query.
@@ -147,6 +163,17 @@ type UpstreamInfo struct {
 	ResolvedIPs []string `json:"resolved_ips,omitempty"`
 	// AnswerCount is the total number of records in the upstream Answer section.
 	AnswerCount int `json:"answer_count,omitempty"`
+	// EDECode is the Extended DNS Error info code (RFC 8914) returned by this
+	// upstream. Nil when no EDE option was present in the upstream response.
+	// Common codes: 0=Other, 2=SERVFAIL error, 15=Blocked, 22=No Reachable Authority.
+	EDECode *int `json:"ede_code,omitempty"`
+	// EDEText is the optional extra text that accompanied the EDE code.
+	// Empty when the upstream provided no extra text.
+	EDEText string `json:"ede_text,omitempty"`
+	// NSID is the Name Server Identifier returned by this upstream (RFC 5001).
+	// Reported as UTF-8 when the raw bytes decode cleanly, otherwise as
+	// lowercase hex as received. Empty when the upstream sent no NSID option.
+	NSID string `json:"nsid,omitempty"`
 	// Error contains the upstream error message when the query failed.
 	// Empty on success.
 	Error string `json:"error,omitempty"`

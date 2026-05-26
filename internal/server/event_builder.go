@@ -4,8 +4,10 @@
 package server
 
 import (
+	"encoding/hex"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"codeberg.org/miekg/dns"
 	"golang.org/x/net/idna"
@@ -139,6 +141,17 @@ func buildUpstreamInfos(results []*upstream.Result, slowThreshold time.Duration)
 			info.HasDNSSEC = res.Inspect.HasDNSSEC
 			info.ResolvedIPs = extractResolvedIPs(res.Msg)
 			info.AnswerCount = len(res.Msg.Answer)
+			// Extract EDNS options from the upstream response pseudo-section.
+			for _, rr := range res.Msg.Pseudo {
+				switch o := rr.(type) {
+				case *dns.EDE:
+					code := int(o.InfoCode)
+					info.EDECode = &code
+					info.EDEText = o.ExtraText
+				case *dns.NSID:
+					info.NSID = decodeNSID(o.Nsid)
+				}
+			}
 		}
 		infos = append(infos, info)
 	}
@@ -180,8 +193,10 @@ func buildResponseInfo(resp *dns.Msg) *logging.ResponseInfo {
 		return nil
 	}
 	ri := &logging.ResponseInfo{
-		AnswerCount: len(resp.Answer),
-		Truncated:   resp.Truncated,
+		AnswerCount:    len(resp.Answer),
+		Truncated:      resp.Truncated,
+		AD:             resp.AuthenticatedData,
+		AuthorityCount: len(resp.Ns),
 	}
 	if rcode, ok := dns.RcodeToString[uint16(resp.Rcode)]; ok {
 		ri.RCode = rcode
@@ -189,7 +204,42 @@ func buildResponseInfo(resp *dns.Msg) *logging.ResponseInfo {
 		ri.RCode = "UNKNOWN"
 	}
 	ri.IPs = extractResolvedIPs(resp)
+	// Check for RRSIG records in Answer and Authority sections.
+	for _, rr := range resp.Answer {
+		if _, ok := rr.(*dns.RRSIG); ok {
+			ri.HasRRSIG = true
+			break
+		}
+	}
+	if !ri.HasRRSIG {
+		for _, rr := range resp.Ns {
+			if _, ok := rr.(*dns.RRSIG); ok {
+				ri.HasRRSIG = true
+				break
+			}
+		}
+	}
+	// Extract EDE from the pseudo-section of the response.
+	for _, rr := range resp.Pseudo {
+		if ede, ok := rr.(*dns.EDE); ok {
+			code := int(ede.InfoCode)
+			ri.EDECode = &code
+			ri.EDEText = ede.ExtraText
+			break
+		}
+	}
 	return ri
+}
+
+// decodeNSID decodes a hex-encoded NSID value to its UTF-8 text form.
+// If the raw bytes are valid UTF-8, the decoded string is returned; otherwise
+// the original lowercase hex string is returned unchanged.
+func decodeNSID(hexStr string) string {
+	b, err := hex.DecodeString(hexStr)
+	if err != nil || !utf8.Valid(b) {
+		return hexStr
+	}
+	return string(b)
 }
 
 // buildCacheInfo builds a CacheInfo from a cache entry and the refresh flag.

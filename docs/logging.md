@@ -108,12 +108,15 @@ One element per upstream server that was queried.
 | `protocol`      | string  | `plain`, `doh`, `dot`                                |
 | `duration_ms`   | number  | Query round-trip time in milliseconds                |
 | `slow`          | boolean | `true` when `duration_ms` exceeds `slow_upstream_ms` |
-| `rcode`         | string  | DNS response code (`NOERROR`, `NXDOMAIN`, …)         |
+| `rcode`         | string  | DNS response code (`NOERROR`, `NXDOMAIN`, ...)       |
 | `blocked`       | boolean | Upstream returned a blocked/sink-hole response       |
 | `servfail`      | boolean | Upstream returned SERVFAIL or timed out              |
-| `dnssec`        | boolean | DNSSEC validation was requested                      |
+| `dnssec`        | boolean | Response carries DNSSEC data (RRSIG records or AD=1) |
 | `resolved_ips`  | array   | Resolved IP addresses in the answer section          |
 | `answer_count`  | number  | Number of records in the answer section              |
+| `ede_code`      | number  | Extended DNS Error info code (RFC 8914) -- omitted when absent. Common codes: 0=Other, 2=SERVFAIL error, 15=Blocked, 22=No Reachable Authority |
+| `ede_text`      | string  | Optional human-readable extra text accompanying the EDE code (omitted when empty) |
+| `nsid`          | string  | Name Server Identifier (RFC 5001) -- UTF-8 when decodable, otherwise lowercase hex. Omitted when absent |
 | `error`         | string  | Error message when the upstream query failed         |
 
 #### `dns.decision`
@@ -145,12 +148,17 @@ One element per upstream server that was queried.
 The authoritative record of what was returned to the client. Present for all
 `dns_query` events regardless of how the answer was produced.
 
-| Field          | Type    | Description                                                         |
-|----------------|---------|---------------------------------------------------------------------|
-| `rcode`        | string  | DNS response code sent to the client (`NOERROR`, `NXDOMAIN`, …)    |
-| `answer_count` | number  | Number of records in the answer section (omitted when 0)            |
-| `ips`          | array   | IP addresses from A/AAAA records in the answer — present only for address queries with at least one resolved address |
-| `truncated`    | boolean | `true` when the TC bit was set — client should retry over TCP (omitted when false) |
+| Field             | Type    | Description                                                         |
+|-------------------|---------|---------------------------------------------------------------------|
+| `rcode`           | string  | DNS response code sent to the client (`NOERROR`, `NXDOMAIN`, ...)  |
+| `answer_count`    | number  | Number of records in the answer section (omitted when 0)            |
+| `ips`             | array   | IP addresses from A/AAAA records in the answer -- present only for address queries with at least one resolved address |
+| `truncated`       | boolean | `true` when the TC bit was set -- client should retry over TCP (omitted when false) |
+| `ad`              | boolean | Authentic Data bit -- DNSSEC validation succeeded (RFC 4035); omitted when false |
+| `rrsig`           | boolean | Response contains at least one RRSIG record in Answer or Authority; omitted when false |
+| `ede_code`        | number  | Extended DNS Error info code (RFC 8914) in the response to the client -- omitted when absent |
+| `ede_text`        | string  | Optional extra text accompanying the EDE code (omitted when empty)  |
+| `authority_count` | number  | Number of records in the Authority section (omitted when 0) -- non-zero for NXDOMAIN responses that include a SOA record |
 
 **Why `response` alongside `upstream[].resolved_ips`?**
 
@@ -184,8 +192,10 @@ fan-out. `dns.response.ips` shows what the client received. These differ when:
 
 ### Blocked domain (upstream block)
 
+EDE code 15 (Blocked, RFC 8914) is included in both the upstream result and the response sent to the client.
+
 ```json
-{"timestamp":"2025-07-01T14:30:14.000000001Z","level":"INFO","type":"dns_query","module":"server","message":"evil.example.com. A -> blocked","dns":{"client":{"ip":"192.168.1.10","port":54323,"protocol":"plain","domain":"evil.example.com.","qtype":"A","qclass":"IN","do_bit":false,"edns":{"present":false}},"upstream":[{"index":0,"address":"https://dns.quad9.net/dns-query","protocol":"doh","duration_ms":38,"slow":false,"rcode":"NOERROR","blocked":true,"servfail":false,"dnssec":false,"answer_count":1}],"decision":{"blocked":true,"blocked_by":"https://dns.quad9.net/dns-query","block_source":"upstream","cacheable":true,"all_responded":true,"rcode":"NOERROR"},"response":{"rcode":"NOERROR"}}}
+{"timestamp":"2025-07-01T14:30:14.000000001Z","level":"INFO","type":"dns_query","module":"server","message":"evil.example.com. A -> blocked","dns":{"client":{"ip":"192.168.1.10","port":54323,"protocol":"plain","domain":"evil.example.com.","qtype":"A","qclass":"IN","do_bit":false,"edns":{"present":false}},"upstream":[{"index":0,"address":"https://dns.quad9.net/dns-query","protocol":"doh","duration_ms":38,"rcode":"NOERROR","blocked":true,"dnssec":false,"answer_count":1,"ede_code":15,"ede_text":"Blocked"}],"decision":{"blocked":true,"blocked_by":"https://dns.quad9.net/dns-query","block_source":"upstream","cacheable":true,"all_responded":true,"rcode":"NOERROR"},"response":{"rcode":"NOERROR","ede_code":15,"ede_text":"Blocked (dns.quad9.net)"}}}
 ```
 
 ### Blocked domain (local blacklist)
@@ -204,6 +214,18 @@ fan-out. `dns.response.ips` shows what the client received. These differ when:
 
 ```json
 {"timestamp":"2025-07-01T14:30:17.000000001Z","level":"WARN","type":"dns_query","module":"server","message":"fail.example.com. A -> SERVFAIL","dns":{"client":{"ip":"192.168.1.10","port":54326,"protocol":"plain","domain":"fail.example.com.","qtype":"A","qclass":"IN","do_bit":false,"edns":{"present":false}},"upstream":[{"index":0,"address":"https://dns.quad9.net/dns-query","protocol":"doh","duration_ms":5001,"slow":true,"rcode":"SERVFAIL","blocked":false,"servfail":true,"dnssec":false,"error":"context deadline exceeded"}],"decision":{"blocked":false,"cacheable":false,"all_responded":false,"rcode":"SERVFAIL"},"response":{"rcode":"SERVFAIL"}}}
+```
+
+### DNSSEC-validated response
+
+When the upstream returns a DNSSEC-validated response, `ad` is set in
+`dns.response`. `rrsig` is set when RRSIG records are present in the
+answer or authority section. The client must have set the DO bit to receive
+RRSIG records. NSID is included when the upstream returns a Name Server
+Identifier option (RFC 5001).
+
+```json
+{"timestamp":"2025-07-01T14:30:19.000000001Z","level":"DEBUG","type":"dns_query","module":"server","message":"secure.example.com. A -> rcode=NOERROR","dns":{"client":{"ip":"192.168.1.10","port":54328,"protocol":"plain","domain":"secure.example.com.","qtype":"A","qclass":"IN","do_bit":true,"edns":{"present":true,"udp_size":4096}},"upstream":[{"index":0,"address":"https://dns.quad9.net/dns-query","protocol":"doh","duration_ms":52,"rcode":"NOERROR","dnssec":true,"resolved_ips":["93.184.216.34"],"answer_count":2,"nsid":"ns1.quad9.net"}],"decision":{"blocked":false,"cacheable":true,"all_responded":true,"rcode":"NOERROR"},"response":{"rcode":"NOERROR","answer_count":2,"ips":["93.184.216.34"],"ad":true,"rrsig":true}}}
 ```
 
 ### Internationalized domain name (IDN)
