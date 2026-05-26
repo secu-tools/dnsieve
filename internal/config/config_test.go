@@ -63,8 +63,8 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("expected default max_entries 10000, got %d", cfg.Cache.MaxEntries)
 	}
 
-	if cfg.Logging.LogLevel != "info" {
-		t.Errorf("expected default log level 'info', got %q", cfg.Logging.LogLevel)
+	if cfg.Logging.LogLevelStdout != "info" {
+		t.Errorf("expected default log level 'info', got %q", cfg.Logging.LogLevelStdout)
 	}
 }
 
@@ -105,7 +105,7 @@ blocked_ttl = 43200
 min_ttl = 5
 
 [logging]
-log_level = "debug"
+log_level_stdout = "debug"
 log_max_size_mb = 20
 `
 	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
@@ -149,8 +149,8 @@ log_max_size_mb = 20
 		t.Errorf("expected 5000 max entries, got %d", cfg.Cache.MaxEntries)
 	}
 
-	if cfg.Logging.LogLevel != "debug" {
-		t.Errorf("expected debug log level, got %s", cfg.Logging.LogLevel)
+	if cfg.Logging.LogLevelStdout != "debug" {
+		t.Errorf("expected debug log level, got %s", cfg.Logging.LogLevelStdout)
 	}
 }
 
@@ -202,8 +202,8 @@ protocol = "doh"
 		t.Errorf("max_entries should default to 10000, got %d", cfg.Cache.MaxEntries)
 	}
 
-	if cfg.Logging.LogLevel != "info" {
-		t.Errorf("log_level should default to info, got %q", cfg.Logging.LogLevel)
+	if cfg.Logging.LogLevelStdout != "info" {
+		t.Errorf("log_level_stdout should default to info, got %q", cfg.Logging.LogLevelStdout)
 	}
 }
 
@@ -397,10 +397,10 @@ func TestValidate_CacheNegativeMinTTL(t *testing.T) {
 
 func TestValidate_LogLevel_Invalid(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Logging.LogLevel = "verbose"
+	cfg.Logging.LogLevelStdout = "verbose"
 	_, errs := cfg.Validate()
-	if !hasError(errs, "log_level") {
-		t.Errorf("expected log_level error for 'verbose', got: %v", errs)
+	if !hasError(errs, "log_level_stdout") {
+		t.Errorf("expected log_level_stdout error for 'verbose', got: %v", errs)
 	}
 }
 
@@ -425,12 +425,12 @@ func TestValidate_BootstrapIPFamily_Valid(t *testing.T) {
 }
 
 func TestValidate_LogLevel_Valid(t *testing.T) {
-	for _, level := range []string{"debug", "info", "warn", "error"} {
+	for _, level := range []string{"json", "debug", "info", "warn", "error", "off"} {
 		cfg := DefaultConfig()
-		cfg.Logging.LogLevel = level
+		cfg.Logging.LogLevelStdout = level
 		_, errs := cfg.Validate()
-		if hasError(errs, "log_level") {
-			t.Errorf("log_level=%q should be valid, got errors: %v", level, errs)
+		if hasError(errs, "log_level_stdout") {
+			t.Errorf("log_level_stdout=%q should be valid, got errors: %v", level, errs)
 		}
 	}
 }

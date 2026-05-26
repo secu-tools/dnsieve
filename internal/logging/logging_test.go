@@ -249,9 +249,6 @@ func TestDefaultConfigValues(t *testing.T) {
 	if cfg.MaxAgeDays != 30 {
 		t.Errorf("expected MaxAgeDays 30, got %d", cfg.MaxAgeDays)
 	}
-	if cfg.FloodLimitPS != 100 {
-		t.Errorf("expected FloodLimitPS 100, got %d", cfg.FloodLimitPS)
-	}
 }
 
 func TestLogger_Rotation(t *testing.T) {
@@ -262,10 +259,9 @@ func TestLogger_Rotation(t *testing.T) {
 
 	// Very small max size to trigger rotation
 	cfg := Config{
-		MaxSizeMB:    0, // Will be set to default (10), let's use 1 for testing
-		MaxBackups:   3,
-		MaxAgeDays:   30,
-		FloodLimitPS: 0, // Unlimited
+		MaxSizeMB:  0, // Will be set to default (10), let's use 1 for testing
+		MaxBackups: 3,
+		MaxAgeDays: 30,
 	}
 
 	logger, err := New("rotate.log", cfg, "test")

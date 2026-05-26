@@ -326,7 +326,7 @@ func TestHandleQuery_BlockedLogsInfo(t *testing.T) {
 	query := makeQuery("blocked.example.com", dns.TypeA)
 
 	var buf bytes.Buffer
-	logger := logging.NewWriterLogger(&buf, logging.DefaultConfig(), "test")
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "info", Synchronous: true}, "test")
 
 	handler := newTestHandlerWithLogger(t, []*dns.Msg{makeBlockedResp(query)}, logger)
 	handler.HandleQuery(context.Background(), query)
@@ -344,7 +344,7 @@ func TestHandleQuery_BlockedFromCacheLogsInfo(t *testing.T) {
 	query := makeQuery("cached-block.example.com", dns.TypeA)
 
 	var buf bytes.Buffer
-	logger := logging.NewWriterLogger(&buf, logging.DefaultConfig(), "test")
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "info", Synchronous: true}, "test")
 
 	handler := newTestHandlerWithLogger(t, []*dns.Msg{makeBlockedResp(query)}, logger)
 
@@ -1131,8 +1131,8 @@ func TestHandleQuery_CacheHitLogsContainTTLandRTL(t *testing.T) {
 	query := makeQuery("ttllog.example.com", dns.TypeA)
 
 	var buf bytes.Buffer
-	// NewWriterLogger uses LevelDebug, so debug messages are captured.
-	logger := logging.NewWriterLogger(&buf, logging.DefaultConfig(), "test")
+	// Use debug mode to capture all messages including debug-level output.
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "debug", Synchronous: true}, "test")
 
 	handler := newTestHandlerWithLogger(t, []*dns.Msg{makeNormalResp(query)}, logger)
 
@@ -1159,8 +1159,8 @@ func TestHandleQuery_FinalResultLogged_SERVFAIL(t *testing.T) {
 	query := makeQuery("faillog.example.com", dns.TypeA)
 
 	var buf bytes.Buffer
-	// NewWriterLogger uses LevelDebug, so debug messages are captured.
-	logger := logging.NewWriterLogger(&buf, logging.DefaultConfig(), "test")
+	// Use debug mode to capture all messages including debug-level output.
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "debug", Synchronous: true}, "test")
 
 	cfg := config.DefaultConfig()
 	cfg.Cache.Enabled = false
@@ -1183,8 +1183,8 @@ func TestHandleQuery_FinalResultLogged_Blocked(t *testing.T) {
 	query := makeQuery("blocked.example.com", dns.TypeA)
 
 	var buf bytes.Buffer
-	// NewWriterLogger uses LevelDebug, so debug messages are captured.
-	logger := logging.NewWriterLogger(&buf, logging.DefaultConfig(), "test")
+	// Use debug mode to capture all messages including debug-level output.
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "debug", Synchronous: true}, "test")
 
 	handler := newTestHandlerWithLogger(t, []*dns.Msg{makeBlockedResp(query)}, logger)
 	handler.HandleQuery(context.Background(), query)
@@ -2004,7 +2004,7 @@ func TestHandleQuery_LocalBlacklistLogsInfo(t *testing.T) {
 	query := makeQuery("logged.blacklisted.example.com", dns.TypeA)
 
 	var buf bytes.Buffer
-	logger := logging.NewWriterLogger(&buf, logging.DefaultConfig(), "test")
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "info", Synchronous: true}, "test")
 
 	cfg := config.DefaultConfig()
 	cfg.Cache.Enabled = false

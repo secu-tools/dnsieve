@@ -48,7 +48,7 @@ func serveDoTAddresses(ctx context.Context, handler *Handler, addrs []string, po
 		return fmt.Errorf("no listen addresses configured")
 	}
 
-	ph := &plainHandler{handler: handler}
+	ph := &plainHandler{handler: handler, protocol: "dot"}
 	portStr := fmt.Sprintf("%d", port)
 	servers := make([]*dns.Server, 0, len(addrs))
 

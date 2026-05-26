@@ -404,35 +404,27 @@ EDE option), see [docs/protocol.md -- Blocked Response Format](protocol.md#block
 
 ```toml
 [logging]
-log_level = "info"           # debug, info, warn, error
-log_max_size_mb = 10         # Max file size before rotation
-log_max_backups = 5          # Rotated files to keep
+log_level_stdout = "info"    # json, debug, info, warn, error, off
+log_level_file   = "info"    # same values -- controls the rotating log file
+log_max_size_mb  = 10        # Max file size before rotation
+log_max_backups  = 5         # Rotated files to keep
 log_max_age_days = 30        # Max age of rotated files
-log_flood_limit_ps = 100     # Lines per second (flood protection)
 slow_upstream_ms = 200       # Warn when upstream exceeds this (0 = disabled)
 ```
+
+See [docs/logging.md](logging.md) for full documentation on text and JSON log
+formats, output modes, the complete JSON schema, and configuration examples.
 
 ### slow_upstream_ms
 
 When an upstream takes longer than `slow_upstream_ms` milliseconds to respond,
-a warning is logged. Default: 200. Set to `0` to disable.
+a warning is logged (text mode) or the `upstream[].slow` field is set to `true`
+in the JSON event. Default: 200. Set to `0` to disable.
 
-Setting `log_level = "debug"` enables detailed logging of:
-- Each client DNS query received (`Query example.com. A from client`)
-- Cache hit/miss status with TTL and remaining TTL:
-  `Query example.com. A -> cached (ttl=300s rtl=247s)`
-- Background refresh triggers with TTL/RTL values
-- Per-upstream query and response details (rcode, blocked/servfail status)
-- Block detection decisions
-- Final result for each query:
-  `Query example.com. A -> final: rcode=NOERROR blocked=false cached=true`
-  `malware.example.com. A -> final: rcode=NOERROR blocked=true cached=true`
-  `fail.example.com. A -> final: rcode=SERVFAIL blocked=false cached=false`
+Setting `log_level_stdout` (or `log_level_file`) to `debug` enables detailed
+logging of each DNS query, cache hit/miss status with TTL and remaining TTL,
+per-upstream response details, and final query results.
 
-The `ttl=` value is the original cache entry lifetime; `rtl=` (remaining
-time to live) is how many seconds remain before expiry at the time the
-entry was served. Comparing these two values shows how much of the TTL
-has been consumed.
 
 ## Whitelist
 
@@ -573,7 +565,7 @@ Every `list_ttl` seconds a background goroutine wakes up and:
 | A file is **modified** | Reload triggered |
 | A new file **appears** matching a glob | Reload triggered |
 | A file is **deleted** | Reload triggered; the deleted file is excluded and the remaining files are loaded normally - no error, no interruption |
-| An **unrecognised line** in a file | Line is skipped; if any lines were skipped a warning is logged with the count after each load or reload; with `log_level = "debug"` each invalid line is logged individually |
+| An **unrecognised line** in a file | Line is skipped; if any lines were skipped a warning is logged with the count after each load or reload; with `log_level_stdout = "debug"` each invalid line is logged individually |
 | A file **fails to read** (permissions, I/O error) | Reload aborted; previous list kept; warning logged |
 | Reload takes a long time | DNS queries are **never blocked** -- they read the old set from the atomic pointer until the swap completes |
 | New list is very large and causes OOM | The Go runtime panics and the process crashes; there is no guard against this -- keep list sizes reasonable (see the 100,000-domain warning threshold) |
@@ -878,7 +870,7 @@ Cache:
 - `cache.max_entries`, `cache.blocked_ttl`, or `cache.min_ttl` < 0
 
 Logging:
-- `logging.log_level` not one of `debug`, `info`, `warn`, `error`
+- `logging.log_level_stdout` / `logging.log_level_file` not one of `json`, `debug`, `info`, `warn`, `error`, `off`
 - `logging.log_max_size_mb` < 0
 
 Blocking:
@@ -931,7 +923,7 @@ These occur after config validation passes, as the server loads list files into 
 - A glob pattern in `list_files` matches no files -- warning logged, that entry is skipped
 - A list file fails to open or read -- warning logged, that file is skipped
 - All `list_files` loaded but no valid domain entries found -- warning logged
-- A line that is not a comment, not blank, not an Adblock format header (`[Adblock Plus]`), and not a valid plain/hosts/AdGuard domain entry is counted as invalid. A warning is logged with the total invalid count after each load or reload. With `log_level = "debug"`, each invalid line is logged individually with its line number and content. Silently-skipped lines (mode-crossing rules such as `||` in an allowlist or `@@||` in a blocklist) are **not** counted as invalid. A `@@||` line with an invalid or overlong domain in an allowlist **is** counted as invalid so the user sees a warning.
+- A line that is not a comment, not blank, not an Adblock format header (`[Adblock Plus]`), and not a valid plain/hosts/AdGuard domain entry is counted as invalid. A warning is logged with the total invalid count after each load or reload. With `log_level_stdout = "debug"`, each invalid line is logged individually with its line number and content. Silently-skipped lines (mode-crossing rules such as `||` in an allowlist or `@@||` in a blocklist) are **not** counted as invalid. A `@@||` line with an invalid or overlong domain in an allowlist **is** counted as invalid so the user sees a warning.
 - A domain entry that violates DNS length limits (label > 63 characters or total name > 253 characters per RFC 1035 s2.3.4) is rejected and counted as invalid.
 - Total loaded domain count exceeds 100,000 -- warning logged (large lists are not officially supported)
 

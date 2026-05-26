@@ -130,12 +130,12 @@ type CacheConfig struct {
 
 // LoggingConfig holds logging settings.
 type LoggingConfig struct {
-	LogLevel        string `toml:"log_level"`
-	LogMaxSizeMB    int    `toml:"log_max_size_mb"`
-	LogMaxBackups   int    `toml:"log_max_backups"`
-	LogMaxAgeDays   int    `toml:"log_max_age_days"`
-	LogFloodLimitPS int    `toml:"log_flood_limit_ps"`
-	SlowUpstreamMS  int    `toml:"slow_upstream_ms"`
+	LogLevelStdout string `toml:"log_level_stdout"`
+	LogLevelFile   string `toml:"log_level_file"`
+	LogMaxSizeMB   int    `toml:"log_max_size_mb"`
+	LogMaxBackups  int    `toml:"log_max_backups"`
+	LogMaxAgeDays  int    `toml:"log_max_age_days"`
+	SlowUpstreamMS int    `toml:"slow_upstream_ms"`
 }
 
 // WhitelistConfig holds settings for the domain whitelist, which bypasses
@@ -318,12 +318,12 @@ func DefaultConfig() *Config {
 			Mode: "null",
 		},
 		Logging: LoggingConfig{
-			LogLevel:        "info",
-			LogMaxSizeMB:    10,
-			LogMaxBackups:   5,
-			LogMaxAgeDays:   30,
-			LogFloodLimitPS: 100,
-			SlowUpstreamMS:  200,
+			LogLevelStdout: "info",
+			LogLevelFile:   "info",
+			LogMaxSizeMB:   10,
+			LogMaxBackups:  5,
+			LogMaxAgeDays:  30,
+			SlowUpstreamMS: 200,
 		},
 		Whitelist: WhitelistConfig{
 			Enabled:          false,
@@ -608,11 +608,15 @@ func (c *Config) validateCache() (warnings []string, errors []string) {
 
 // validateLogging checks logging configuration for invalid values.
 func (c *Config) validateLogging() (warnings []string, errors []string) {
-	switch c.Logging.LogLevel {
-	case "debug", "info", "warn", "error", "":
-		// valid; empty is corrected by applyDefaults
-	default:
-		errors = append(errors, fmt.Sprintf("logging log_level=%q is invalid, must be debug, info, warn, or error", c.Logging.LogLevel))
+	validModes := map[string]bool{
+		"json": true, "debug": true, "info": true,
+		"warn": true, "error": true, "off": true, "": true,
+	}
+	if !validModes[c.Logging.LogLevelStdout] {
+		errors = append(errors, fmt.Sprintf("logging log_level_stdout=%q is invalid, must be json, debug, info, warn, error, or off", c.Logging.LogLevelStdout))
+	}
+	if !validModes[c.Logging.LogLevelFile] {
+		errors = append(errors, fmt.Sprintf("logging log_level_file=%q is invalid, must be json, debug, info, warn, error, or off", c.Logging.LogLevelFile))
 	}
 	if c.Logging.SlowUpstreamMS < 0 {
 		warnings = append(warnings, fmt.Sprintf("logging slow_upstream_ms=%d is negative, treated as disabled (0)", c.Logging.SlowUpstreamMS))
@@ -807,8 +811,11 @@ func applyLoggingDefaults(cfg *Config) {
 	if cfg.Logging.LogMaxAgeDays <= 0 {
 		cfg.Logging.LogMaxAgeDays = 30
 	}
-	if cfg.Logging.LogLevel == "" {
-		cfg.Logging.LogLevel = "info"
+	if cfg.Logging.LogLevelStdout == "" {
+		cfg.Logging.LogLevelStdout = "info"
+	}
+	if cfg.Logging.LogLevelFile == "" {
+		cfg.Logging.LogLevelFile = "info"
 	}
 }
 
@@ -1134,10 +1141,19 @@ mode = "null"
 # Override with: dnsieve --logdir /path/to/logs/
 
 [logging]
-# Log level: "debug", "info", "warn", "error"
-# "debug" logs individual queries, cache hits/misses, upstream responses,
-# block detection details, and protocol-level events.
-log_level = "info"
+# Format and minimum level for stdout output.
+# Valid values: json, debug, info, warn, error, off
+#   json   - structured JSON output at debug level (see docs/logging.md)
+#   debug  - plain text, all messages
+#   info   - plain text, info and above (default)
+#   warn   - plain text, warnings and errors only
+#   error  - plain text, errors only
+#   off    - no stdout output
+log_level_stdout = "info"
+
+# Format and minimum level for the log file.
+# Same values as log_level_stdout.
+log_level_file = "info"
 
 # Maximum log file size in MB before rotation.
 log_max_size_mb = 10
@@ -1148,12 +1164,9 @@ log_max_backups = 5
 # Maximum age of rotated log files in days.
 log_max_age_days = 30
 
-# Maximum log lines per second (flood protection, 0 = unlimited).
-log_flood_limit_ps = 100
-
-# Threshold in milliseconds for logging slow upstream responses.
+# Threshold in milliseconds for logging slow upstream responses (text mode only).
 # Upstream queries exceeding this duration are logged as warnings.
-# Set to 0 to disable slow upstream warnings.
+# Set to 0 to disable. In JSON mode this information is in the upstream object.
 slow_upstream_ms = 200
 
 

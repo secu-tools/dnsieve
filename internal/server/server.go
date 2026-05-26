@@ -64,40 +64,72 @@ func (h *Handler) handleWhitelistedQuery(ctx context.Context, query *dns.Msg, qn
 		return nil
 	}
 	h.logger.Debugf("Query %s %s -> whitelisted", qname, qtype)
-
-	// Check the cache before hitting the whitelist upstream.
-	// Only serve entries that were themselves stored via the whitelist path
-	// (Whitelisted=true) to avoid accidentally returning a stale blocked or
-	// general entry under the whitelist label.
-	if h.cfg.Cache.Enabled {
-		entry, refreshTriggered := h.cache.Get(query)
-		if entry != nil && entry.Whitelisted {
-			ttlSec := int64(entry.ExpiresAt.Sub(entry.InsertedAt).Seconds())
-			rtlSec := int64(time.Until(entry.ExpiresAt).Seconds())
-			if rtlSec < 0 {
-				rtlSec = 0
-			}
-			if refreshTriggered {
-				h.logger.Debugf("Query %s %s -> whitelisted (cached, background-refresh queued, ttl=%ds rtl=%ds)", qname, qtype, ttlSec, rtlSec)
-			} else {
-				h.logger.Debugf("Query %s %s -> whitelisted (cached, ttl=%ds rtl=%ds)", qname, qtype, ttlSec, rtlSec)
-			}
-			if resp := cache.MakeCachedResponse(query, entry); resp != nil {
-				return resp
-			}
-			// MakeCachedResponse failed (corrupted wire bytes in stored entry);
-			// re-query the whitelist resolver rather than falling through to the
-			// normal pipeline which could block a whitelisted domain.
-			h.logger.Warnf("Whitelist cache entry for %s %s could not be unpacked, re-querying whitelist resolver", qname, qtype)
-		} else if entry != nil {
-			// A non-whitelist entry exists (e.g. stale blocked entry not yet
-			// invalidated after a whitelist reload). The whitelist always wins,
-			// so we ignore it and re-query the resolver.
-			h.logger.Debugf("Query %s %s -> whitelisted (non-whitelist cache entry present, querying resolver)", qname, qtype)
-		}
+	if resp := h.checkWhitelistCache(ctx, query, qname, qtype); resp != nil {
+		return resp
 	}
+	return h.resolveWhitelistUpstream(ctx, query, qname, qtype)
+}
 
-	// Cache miss, cache disabled, or cache unusable: resolve via whitelist resolver.
+// checkWhitelistCache looks for a whitelisted cache entry and returns it if
+// found. Returns nil on a miss, when the cache is disabled, or when
+// MakeCachedResponse fails (caller must fall through to the resolver).
+func (h *Handler) checkWhitelistCache(ctx context.Context, query *dns.Msg, qname, qtype string) *dns.Msg {
+	if !h.cfg.Cache.Enabled {
+		return nil
+	}
+	entry, refreshTriggered := h.cache.Get(query)
+	if entry == nil {
+		return nil
+	}
+	if !entry.Whitelisted {
+		// A non-whitelist entry exists (e.g. stale blocked entry not yet
+		// invalidated after a whitelist reload). The whitelist always wins,
+		// so we ignore it and re-query the resolver.
+		h.logger.Debugf("Query %s %s -> whitelisted (non-whitelist cache entry present, querying resolver)", qname, qtype)
+		return nil
+	}
+	ttlSec := int64(entry.ExpiresAt.Sub(entry.InsertedAt).Seconds())
+	rtlSec := int64(time.Until(entry.ExpiresAt).Seconds())
+	if rtlSec < 0 {
+		rtlSec = 0
+	}
+	if refreshTriggered {
+		h.logger.Debugf("Query %s %s -> whitelisted (cached, background-refresh queued, ttl=%ds rtl=%ds)", qname, qtype, ttlSec, rtlSec)
+	} else {
+		h.logger.Debugf("Query %s %s -> whitelisted (cached, ttl=%ds rtl=%ds)", qname, qtype, ttlSec, rtlSec)
+	}
+	resp := cache.MakeCachedResponse(query, entry)
+	if resp == nil {
+		// Corrupted wire bytes in stored entry; caller will re-query the
+		// whitelist resolver.
+		h.logger.Warnf("Whitelist cache entry for %s %s could not be unpacked, re-querying whitelist resolver", qname, qtype)
+		return nil
+	}
+	if h.logger.IsJSONEnabled() {
+		ttlPct := 0.0
+		if ttlSec > 0 {
+			ttlPct = float64(rtlSec) / float64(ttlSec) * 100
+		}
+		ev := logging.NewDNSQueryEvent(logging.LevelDebug, "server",
+			qname+" "+qtype+" -> whitelisted (cached)")
+		ev.DNS.Client = buildClientInfo(query, ClientMetaFrom(ctx))
+		ev.DNS.Cache = &logging.CacheInfo{
+			Hit:                        true,
+			TTLSec:                     ttlSec,
+			TTLRemainingSec:            rtlSec,
+			TTLRemainingPct:            ttlPct,
+			Whitelisted:                true,
+			BackgroundRefreshTriggered: refreshTriggered,
+		}
+		ev.DNS.Response = buildResponseInfo(resp)
+		h.logger.LogEvent(logging.LevelDebug, ev)
+	}
+	return resp
+}
+
+// resolveWhitelistUpstream queries the whitelist resolver, stores the result
+// in the cache (if enabled), and returns the response.
+func (h *Handler) resolveWhitelistUpstream(ctx context.Context, query *dns.Msg, qname, qtype string) *dns.Msg {
 	h.logger.Debugf("Query %s %s -> whitelisted (querying resolver)", qname, qtype)
 	resp, err := h.whitelistResolver.Query(ctx, query)
 	if err != nil {
@@ -109,11 +141,28 @@ func (h *Handler) handleWhitelistedQuery(ctx context.Context, query *dns.Msg, qn
 	}
 	resp.ID = query.ID
 	resp.RecursionAvailable = true
+	cached := false
 	if h.cfg.Cache.Enabled {
 		h.cache.Put(query, resp, false, true) // whitelisted=true
+		cached = true
 		h.logger.Debugf("Query %s %s -> final: rcode=%s blocked=false cached=true (whitelist resolver)", qname, qtype, dns.RcodeToString[resp.Rcode])
 	} else {
 		h.logger.Debugf("Query %s %s -> final: rcode=%s blocked=false cached=false (whitelist resolver)", qname, qtype, dns.RcodeToString[resp.Rcode])
+	}
+	if h.logger.IsJSONEnabled() {
+		rcode := dns.RcodeToString[resp.Rcode]
+		ev := logging.NewDNSQueryEvent(logging.LevelDebug, "server",
+			qname+" "+qtype+" -> rcode="+rcode+" (whitelist resolver)")
+		ev.DNS.Client = buildClientInfo(query, ClientMetaFrom(ctx))
+		ev.DNS.Decision = &logging.DecisionInfo{
+			Blocked:      false,
+			BlockSource:  "whitelist",
+			Cacheable:    cached,
+			AllResponded: true,
+			RCode:        rcode,
+		}
+		ev.DNS.Response = buildResponseInfo(resp)
+		h.logger.LogEvent(logging.LevelDebug, ev)
 	}
 	return resp
 }
@@ -121,20 +170,29 @@ func (h *Handler) handleWhitelistedQuery(ctx context.Context, query *dns.Msg, qn
 // handleBlacklistedQuery checks whether qname is blacklisted and, if so,
 // returns a blocked response immediately without querying upstream.
 // Returns nil when the query is not blacklisted (normal path continues).
-func (h *Handler) handleBlacklistedQuery(query *dns.Msg, qname, qtype string) *dns.Msg {
+func (h *Handler) handleBlacklistedQuery(ctx context.Context, query *dns.Msg, qname, qtype string) *dns.Msg {
 	if h.blacklist == nil || !h.blacklist.Contains(qname) {
 		return nil
 	}
-	h.logger.Infof("%s is blocked by local blacklist", qname)
+	h.logger.InfofText("%s is blocked by local blacklist", qname)
 	resp := dnsmsg.MakeBlockedResponse(query, h.cfg.Blocking.Mode, "local-blacklist")
 	h.logger.Debugf("Query %s %s -> final: rcode=%s blocked=true (blacklist)",
 		qname, qtype, dns.RcodeToString[resp.Rcode])
+	if h.logger.IsJSONEnabled() {
+		rcode := dns.RcodeToString[resp.Rcode]
+		ev := logging.NewDNSQueryEvent(logging.LevelInfo, "server",
+			qname+" "+qtype+" -> blocked by local blacklist")
+		ev.DNS.Client = buildClientInfo(query, ClientMetaFrom(ctx))
+		ev.DNS.Decision = buildBlacklistDecisionInfo(rcode)
+		ev.DNS.Response = buildResponseInfo(resp)
+		h.logger.LogEvent(logging.LevelInfo, ev)
+	}
 	return resp
 }
 
 // handleCacheHit looks up the query in the cache and returns a cached
 // response if available. Returns nil on a cache miss or when disabled.
-func (h *Handler) handleCacheHit(query *dns.Msg, qname, qtype string) *dns.Msg {
+func (h *Handler) handleCacheHit(ctx context.Context, query *dns.Msg, qname, qtype string) *dns.Msg {
 	if !h.cfg.Cache.Enabled {
 		return nil
 	}
@@ -151,9 +209,9 @@ func (h *Handler) handleCacheHit(query *dns.Msg, qname, qtype string) *dns.Msg {
 
 	if entry.Blocked {
 		if refreshTriggered {
-			h.logger.Infof("%s is blocked (from cache, background-refresh queued, ttl=%ds rtl=%ds)", qname, ttlSec, rtlSec)
+			h.logger.InfofText("%s is blocked (from cache, background-refresh queued, ttl=%ds rtl=%ds)", qname, ttlSec, rtlSec)
 		} else {
-			h.logger.Infof("%s is blocked (from cache, ttl=%ds rtl=%ds)", qname, ttlSec, rtlSec)
+			h.logger.InfofText("%s is blocked (from cache, ttl=%ds rtl=%ds)", qname, ttlSec, rtlSec)
 		}
 	} else {
 		if refreshTriggered {
@@ -162,7 +220,28 @@ func (h *Handler) handleCacheHit(query *dns.Msg, qname, qtype string) *dns.Msg {
 			h.logger.Debugf("Query %s %s -> cached (ttl=%ds rtl=%ds)", qname, qtype, ttlSec, rtlSec)
 		}
 	}
-	return cache.MakeCachedResponse(query, entry)
+	resp := cache.MakeCachedResponse(query, entry)
+	if resp != nil && h.logger.IsJSONEnabled() {
+		h.emitCacheHitEvent(ctx, query, qname, qtype, entry, refreshTriggered, resp)
+	}
+	return resp
+}
+
+// emitCacheHitEvent builds and logs a structured JSON event for a cache hit.
+func (h *Handler) emitCacheHitEvent(ctx context.Context, query *dns.Msg, qname, qtype string, entry *cache.Entry, refreshTriggered bool, resp *dns.Msg) {
+	level := logging.LevelDebug
+	if entry.Blocked {
+		level = logging.LevelInfo
+	}
+	msg := qname + " " + qtype + " -> cache hit"
+	if entry.Blocked {
+		msg = qname + " " + qtype + " -> blocked (cached)"
+	}
+	ev := logging.NewDNSQueryEvent(level, "server", msg)
+	ev.DNS.Client = buildClientInfo(query, ClientMetaFrom(ctx))
+	ev.DNS.Cache = buildCacheInfo(entry, refreshTriggered)
+	ev.DNS.Response = buildResponseInfo(resp)
+	h.logger.LogEvent(level, ev)
 }
 
 // HandleQuery processes a single DNS query and returns the response.
@@ -218,13 +297,13 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 	}
 
 	// Step 2: Blacklist check -- block immediately without upstream query
-	if resp := h.handleBlacklistedQuery(query, qname, qtype); resp != nil {
+	if resp := h.handleBlacklistedQuery(ctx, query, qname, qtype); resp != nil {
 		h.edns.HandleNSIDSubstitute(query, resp)
 		return resp
 	}
 
 	// Step 3: Cache lookup
-	if resp := h.handleCacheHit(query, qname, qtype); resp != nil {
+	if resp := h.handleCacheHit(ctx, query, qname, qtype); resp != nil {
 		// RFC 5001: inject proxy NSID for substitute mode even on cache hits.
 		// NSID is per-client-request and must not be baked into the cached entry.
 		h.edns.HandleNSIDSubstitute(query, resp)
@@ -241,21 +320,38 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 		resp.Rcode = dns.RcodeServerFailure
 		resp.RecursionAvailable = true
 		h.logger.Debugf("Query %s %s -> final: rcode=SERVFAIL blocked=false cached=false", qname, qtype)
+		if h.logger.IsJSONEnabled() {
+			ev := logging.NewDNSQueryEvent(logging.LevelWarn, "server",
+				qname+" "+qtype+" -> SERVFAIL (all upstreams failed)")
+			ev.DNS.Client = buildClientInfo(query, ClientMetaFrom(ctx))
+			ev.DNS.Upstream = buildUpstreamInfos(result.Results, h.resolver.SlowThreshold())
+			ev.DNS.Decision = &logging.DecisionInfo{
+				Blocked:      false,
+				Cacheable:    false,
+				AllResponded: false,
+				RCode:        "SERVFAIL",
+			}
+			ev.DNS.Response = buildResponseInfo(resp)
+			h.logger.LogEvent(logging.LevelWarn, ev)
+		}
 		return resp
 	}
 
 	// Step 5: If blocked, return blocked response
 	if result.Blocked {
-		h.logger.Infof("%s is blocked by %s", qname, result.BlockedBy)
+		h.logger.InfofText("%s is blocked by %s", qname, result.BlockedBy)
 
 		blockedResp := dnsmsg.MakeBlockedResponse(query, h.cfg.Blocking.Mode, result.BlockedBy)
-
-		if h.cfg.Cache.Enabled && result.Cacheable {
+		cached := h.cfg.Cache.Enabled && result.Cacheable
+		if cached {
 			h.cache.Put(query, blockedResp, true, false)
 		}
 
 		h.logger.Debugf("Query %s %s -> final: rcode=%s blocked=true cached=%v",
-			qname, qtype, dns.RcodeToString[blockedResp.Rcode], h.cfg.Cache.Enabled && result.Cacheable)
+			qname, qtype, dns.RcodeToString[blockedResp.Rcode], cached)
+		if h.logger.IsJSONEnabled() {
+			h.emitUpstreamQueryEvent(ctx, query, qname, qtype, result, dns.RcodeToString[blockedResp.Rcode], cached, blockedResp)
+		}
 		return blockedResp
 	}
 
@@ -272,8 +368,13 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 	h.logger.Debugf("Query %s %s -> rcode=%s cacheable=%v allResponded=%v",
 		qname, qtype, dns.RcodeToString[result.BestResponse.Rcode], result.Cacheable, result.AllResponded)
 
-	if h.cfg.Cache.Enabled && result.Cacheable {
+	cached := h.cfg.Cache.Enabled && result.Cacheable
+	if cached {
 		h.cache.Put(query, result.BestResponse, false, false)
+	}
+	if h.logger.IsJSONEnabled() {
+		rcode := dns.RcodeToString[result.BestResponse.Rcode]
+		h.emitUpstreamQueryEvent(ctx, query, qname, qtype, result, rcode, cached, result.BestResponse)
 	}
 	result.BestResponse.ID = query.ID
 	// Set RA (Recursion Available) since we perform recursive resolution for
@@ -289,8 +390,25 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 		result.BestResponse.RecursionAvailable = true
 	}
 	h.logger.Debugf("Query %s %s -> final: rcode=%s blocked=false cached=%v",
-		qname, qtype, dns.RcodeToString[result.BestResponse.Rcode], h.cfg.Cache.Enabled && result.Cacheable)
+		qname, qtype, dns.RcodeToString[result.BestResponse.Rcode], cached)
 	return result.BestResponse
+}
+
+// emitUpstreamQueryEvent builds and logs a structured JSON event for a query
+// resolved via upstream servers. resp is the response that was sent to the client.
+func (h *Handler) emitUpstreamQueryEvent(ctx context.Context, query *dns.Msg, qname, qtype string, result *upstream.FanOutResult, rcode string, cached bool, resp *dns.Msg) {
+	level := logging.LevelDebug
+	msg := qname + " " + qtype + " -> rcode=" + rcode
+	if result.Blocked {
+		level = logging.LevelInfo
+		msg = qname + " " + qtype + " -> blocked by " + result.BlockedBy
+	}
+	ev := logging.NewDNSQueryEvent(level, "server", msg)
+	ev.DNS.Client = buildClientInfo(query, ClientMetaFrom(ctx))
+	ev.DNS.Upstream = buildUpstreamInfos(result.Results, h.resolver.SlowThreshold())
+	ev.DNS.Decision = buildDecisionInfo(result, rcode, cached)
+	ev.DNS.Response = buildResponseInfo(resp)
+	h.logger.LogEvent(level, ev)
 }
 
 // makeRefreshFunc returns the background-refresh callback for the cache.

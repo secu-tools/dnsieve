@@ -5,8 +5,8 @@ go 1.25.10
 require (
 	codeberg.org/miekg/dns v0.6.75
 	github.com/BurntSushi/toml v1.6.0
-	golang.org/x/net v0.54.0
-	golang.org/x/sys v0.44.0
+	golang.org/x/net v0.55.0
+	golang.org/x/sys v0.45.0
 )
 
 require (

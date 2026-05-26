@@ -21,11 +21,13 @@ import (
 
 // Result holds the outcome of a single upstream query.
 type Result struct {
-	Index   int
-	Client  string
-	Msg     *dns.Msg
-	Inspect dnsmsg.InspectResult
-	Err     error
+	Index      int
+	Client     string
+	Msg        *dns.Msg
+	Inspect    dnsmsg.InspectResult
+	Err        error
+	DurationMS int64  // wall-clock time for the upstream query in milliseconds
+	Protocol   string // "doh", "dot", or "udp"
 }
 
 // OK reports whether the upstream responded without error and without
@@ -96,6 +98,12 @@ func NewResolverFromClients(clients []Client, timeout, minWait time.Duration, lo
 	}
 }
 
+// SlowThreshold returns the duration above which an upstream query is
+// considered slow and logged as a warning.
+func (r *Resolver) SlowThreshold() time.Duration {
+	return r.slowThreshold
+}
+
 // isClientTCP returns true if the upstream client uses TCP-based transport.
 func isClientTCP(c Client) bool {
 	switch c.(type) {
@@ -103,6 +111,19 @@ func isClientTCP(c Client) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// clientProtocol returns the short protocol label for a Client.
+// Returns "doh" for DoHClient, "dot" for DoTClient, "udp" for PlainClient.
+func clientProtocol(c Client) string {
+	switch c.(type) {
+	case *DoHClient:
+		return "doh"
+	case *DoTClient:
+		return "dot"
+	default:
+		return "udp"
 	}
 }
 
@@ -160,7 +181,7 @@ func (r *Resolver) resolveUpstream(ctx context.Context, idx int, c Client, query
 			r.logger.Warnf("Upstream[%d] %s error resolving %s: %v", idx, c, qname, err)
 		}
 	} else if r.slowThreshold > 0 && elapsed > r.slowThreshold {
-		r.logger.Warnf("Slow upstream[%d] %s took %dms to resolve %s", idx, c, elapsed.Milliseconds(), qname)
+		r.logger.WarnfText("Slow upstream[%d] %s took %dms to resolve %s", idx, c, elapsed.Milliseconds(), qname)
 	}
 
 	// RFC 7873: update per-upstream cookie state immediately after receiving
@@ -181,11 +202,13 @@ func (r *Resolver) resolveUpstream(ctx context.Context, idx int, c Client, query
 		idx, c, inspect.Blocked, inspect.ServFail, inspect.Rcode, err)
 
 	res := &Result{
-		Index:   idx,
-		Client:  c.String(),
-		Msg:     resp,
-		Inspect: inspect,
-		Err:     err,
+		Index:      idx,
+		Client:     c.String(),
+		Msg:        resp,
+		Inspect:    inspect,
+		Err:        err,
+		DurationMS: elapsed.Milliseconds(),
+		Protocol:   clientProtocol(c),
 	}
 
 	mu.Lock()

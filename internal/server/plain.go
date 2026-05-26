@@ -17,7 +17,8 @@ import (
 
 // plainHandler adapts our Handler to the dns.Handler interface.
 type plainHandler struct {
-	handler *Handler
+	handler  *Handler
+	protocol string // "plain" or "dot"
 }
 
 func (h *plainHandler) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
@@ -43,6 +44,14 @@ func (h *plainHandler) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dn
 	if err := r.Unpack(); err != nil {
 		h.handler.logger.Warnf("Failed to complete DNS message unpack: %v", err)
 	}
+
+	// Attach client metadata to the context for structured logging.
+	ip, port := parseRemoteAddr(w.RemoteAddr())
+	proto := h.protocol
+	if proto == "" {
+		proto = "plain"
+	}
+	ctx = WithClientMeta(ctx, &ClientMeta{IP: ip, Port: port, Protocol: proto})
 
 	isTCP := isTransportTCP(w)
 
@@ -114,7 +123,7 @@ func servePlainAddresses(ctx context.Context, handler *Handler, addrs []string, 
 		return fmt.Errorf("no listen addresses configured")
 	}
 
-	ph := &plainHandler{handler: handler}
+	ph := &plainHandler{handler: handler, protocol: "plain"}
 
 	type serverPair struct {
 		udp *dns.Server

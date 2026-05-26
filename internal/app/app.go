@@ -277,10 +277,11 @@ func loadAndValidateConfig(cfgFile string) (*config.Config, string, []string) {
 
 func setupLogging(cfg *config.Config) *logging.Logger {
 	logCfg := logging.Config{
-		MaxSizeMB:    cfg.Logging.LogMaxSizeMB,
-		MaxBackups:   cfg.Logging.LogMaxBackups,
-		MaxAgeDays:   cfg.Logging.LogMaxAgeDays,
-		FloodLimitPS: cfg.Logging.LogFloodLimitPS,
+		MaxSizeMB:  cfg.Logging.LogMaxSizeMB,
+		MaxBackups: cfg.Logging.LogMaxBackups,
+		MaxAgeDays: cfg.Logging.LogMaxAgeDays,
+		StdoutMode: cfg.Logging.LogLevelStdout,
+		FileMode:   cfg.Logging.LogLevelFile,
 	}
 
 	logr, err := logging.New("dnsieve.log", logCfg, "server")
@@ -289,7 +290,6 @@ func setupLogging(cfg *config.Config) *logging.Logger {
 		fmt.Fprintln(os.Stderr, "       Specify --logdir to set a writable log directory.")
 		logr = logging.NewStdoutOnly(logCfg, "server")
 	}
-	logr.SetLevelFromString(cfg.Logging.LogLevel)
 	if logr.FilePath() != "" {
 		logr.Infof("Logging to: %s", logr.FilePath())
 	}

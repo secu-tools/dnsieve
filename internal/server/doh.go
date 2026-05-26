@@ -289,7 +289,10 @@ func dohHandler(w http.ResponseWriter, r *http.Request, handler *Handler, logger
 	clientID := query.ID
 	query.ID = 0
 
-	resp := handler.HandleQuery(r.Context(), query)
+	// Attach client metadata to the context for structured logging.
+	ip, port := parseRemoteAddrString(r.RemoteAddr)
+	ctx := WithClientMeta(r.Context(), &ClientMeta{IP: ip, Port: port, Protocol: "doh"})
+	resp := handler.HandleQuery(ctx, query)
 	resp.ID = clientID
 
 	// RFC 7828: TCP keepalive for DoH (always TCP-based)

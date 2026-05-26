@@ -140,7 +140,7 @@ func TestNewResolver_ValidConfig(t *testing.T) {
 			MinWaitMS:          200,
 			VerifyCertificates: true,
 		},
-		Logging: config.LoggingConfig{LogLevel: "info"},
+		Logging: config.LoggingConfig{LogLevelStdout: "info"},
 	}
 	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
 
@@ -162,7 +162,7 @@ func TestNewResolver_UnsupportedProtocol(t *testing.T) {
 			TimeoutMS: 2000,
 			MinWaitMS: 200,
 		},
-		Logging: config.LoggingConfig{LogLevel: "info"},
+		Logging: config.LoggingConfig{LogLevelStdout: "info"},
 	}
 	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
 
@@ -391,7 +391,7 @@ func TestResolve_SlowUpstreamWarning(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	logger := logging.NewWriterLogger(&buf, logging.DefaultConfig(), "test")
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "info", Synchronous: true}, "test")
 	r := newTestResolverWithLogger(clients, logger)
 	r.minWait = 5 * time.Millisecond
 	r.slowThreshold = 50 * time.Millisecond
@@ -414,7 +414,7 @@ func TestResolve_UpstreamErrorWarning(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	logger := logging.NewWriterLogger(&buf, logging.DefaultConfig(), "test")
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "info", Synchronous: true}, "test")
 	r := newTestResolverWithLogger(clients, logger)
 
 	r.Resolve(context.Background(), query)
@@ -436,7 +436,7 @@ func TestResolve_UpstreamTimeoutWarning(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	logger := logging.NewWriterLogger(&buf, logging.DefaultConfig(), "test")
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "info", Synchronous: true}, "test")
 	r := &Resolver{
 		clients: clients,
 		timeout: 50 * time.Millisecond,
