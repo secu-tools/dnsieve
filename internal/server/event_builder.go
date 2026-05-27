@@ -5,6 +5,10 @@ package server
 
 import (
 	"encoding/hex"
+	"math"
+	"net"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -18,17 +22,63 @@ import (
 	"github.com/secu-tools/dnsieve/internal/upstream"
 )
 
-// aceToUnicode converts an ACE-encoded domain name (e.g. "xn--bcher-kva.example")
-// to its Unicode representation (e.g. "buecher.example"). The trailing DNS dot
-// is stripped before conversion and not re-added. If conversion fails or the
-// label is already ASCII-only, the original value is returned unchanged.
-func aceToUnicode(ace string) string {
-	clean := strings.TrimSuffix(ace, ".")
-	u, err := idna.ToUnicode(clean)
-	if err != nil {
-		return clean
+// toPunycode normalizes a bare domain name (no trailing dot) to its
+// ASCII/Punycode representation. Unicode labels (e.g. those received
+// verbatim in DNS wire bytes from a non-conforming client) are converted
+// to their ACE form. On error the input is returned unchanged.
+func toPunycode(name string) string {
+	if ascii, err := idna.Lookup.ToASCII(name); err == nil {
+		return ascii
 	}
-	return u
+	return name
+}
+
+// normalizeQueryName converts a DNS question name (which may contain
+// non-ASCII labels from non-conforming clients) to its Punycode/ACE form
+// while preserving the trailing dot used in FQDN format.
+func normalizeQueryName(name string) string {
+	bare := strings.TrimSuffix(name, ".")
+	if ascii, err := idna.Lookup.ToASCII(bare); err == nil {
+		return ascii + "."
+	}
+	return name
+}
+
+// splitClientAddress parses an upstream client address string into a
+// normalized address (without port) and port number for structured JSON output.
+//
+//   - DoH: "https://dns.quad9.net/dns-query" -> ("https://dns.quad9.net/dns-query", 443)
+//   - DoH with explicit port: "https://dns.quad9.net:4343/dns-query" -> ("https://dns.quad9.net/dns-query", 4343)
+//   - DoT/plain: "dns.quad9.net:853" -> ("dns.quad9.net", 853)
+//
+// If the address cannot be parsed, the original is returned with port 0.
+func splitClientAddress(address string, protocol string) (string, int) {
+	if protocol == "doh" {
+		u, err := url.Parse(address)
+		if err != nil {
+			return address, 443
+		}
+		portStr := u.Port()
+		port := 443
+		if u.Scheme == "http" {
+			port = 80
+		}
+		if portStr != "" {
+			if p, err := strconv.Atoi(portStr); err == nil {
+				port = p
+			}
+			// Rebuild URL without the explicit port in the host component.
+			u.Host = u.Hostname()
+		}
+		return u.String(), port
+	}
+	// "dot", "udp", or other: address is expected to be host:port.
+	host, portStr, err := net.SplitHostPort(address)
+	if err != nil {
+		return address, 0
+	}
+	port, _ := strconv.Atoi(portStr)
+	return host, port
 }
 
 // extractResolvedIPs returns the IP address strings from A and AAAA records
@@ -54,19 +104,20 @@ func extractResolvedIPs(msg *dns.Msg) []string {
 	return ips
 }
 
-// buildClientInfo constructs a ClientInfo from a DNS query message and the
+// buildRequestInfo constructs a RequestInfo from a DNS query message and the
 // client transport details supplied via ClientMeta. meta may be nil (e.g.
 // for internally generated queries such as cache refresh).
-func buildClientInfo(query *dns.Msg, meta *ClientMeta) *logging.ClientInfo {
+func buildClientInfo(query *dns.Msg, meta *ClientMeta) *logging.RequestInfo {
 	if len(query.Question) == 0 {
 		return nil
 	}
 	q := query.Question[0]
-	ace := strings.TrimSuffix(q.Header().Name, ".")
-	unicode := aceToUnicode(ace)
+	// Always use the wire-format name stripped of trailing dot and normalized
+	// to Punycode/ACE form (some clients send Unicode labels directly).
+	ace := toPunycode(strings.TrimSuffix(q.Header().Name, "."))
 
-	ci := &logging.ClientInfo{
-		Domain: unicode,
+	ci := &logging.RequestInfo{
+		Domain: ace,
 		QType:  dns.TypeToString[dns.RRToType(q)],
 		QClass: dns.ClassToString[q.Header().Class],
 	}
@@ -75,9 +126,6 @@ func buildClientInfo(query *dns.Msg, meta *ClientMeta) *logging.ClientInfo {
 	}
 	if ci.QClass == "" {
 		ci.QClass = "UNKNOWN"
-	}
-	if unicode != ace {
-		ci.DomainACE = ace
 	}
 	if meta != nil {
 		ci.IP = meta.IP
@@ -120,10 +168,12 @@ func buildUpstreamInfos(results []*upstream.Result, slowThreshold time.Duration)
 		}
 		info := &logging.UpstreamInfo{
 			Index:      res.Index,
-			Address:    res.Client,
 			Protocol:   res.Protocol,
 			DurationMS: res.DurationMS,
 		}
+		addr, port := splitClientAddress(res.Client, res.Protocol)
+		info.Address = addr
+		info.Port = port
 		if slowThreshold > 0 && time.Duration(res.DurationMS)*time.Millisecond > slowThreshold {
 			info.Slow = true
 		}
@@ -147,7 +197,7 @@ func buildUpstreamInfos(results []*upstream.Result, slowThreshold time.Duration)
 				case *dns.EDE:
 					code := int(o.InfoCode)
 					info.EDECode = &code
-					info.EDEText = o.ExtraText
+					info.EDEText = strings.TrimRight(o.ExtraText, "\x00")
 				case *dns.NSID:
 					info.NSID = decodeNSID(o.Nsid)
 				}
@@ -169,18 +219,16 @@ func buildDecisionInfo(result *upstream.FanOutResult, rcode string, cached bool)
 		RCode:        rcode,
 	}
 	if result.Blocked {
-		d.BlockedBy = result.BlockedBy
 		d.BlockSource = "upstream"
 	}
 	return d
 }
 
-// buildBlacklistDecisionInfo builds a DecisionInfo for a local-blacklist block.
+// buildBlacklistDecisionInfo builds a DecisionInfo for a local blacklist block.
 func buildBlacklistDecisionInfo(rcode string) *logging.DecisionInfo {
 	return &logging.DecisionInfo{
 		Blocked:     true,
-		BlockedBy:   "local-blacklist",
-		BlockSource: "local-blacklist",
+		BlockSource: "blacklist",
 		Cacheable:   false,
 		RCode:       rcode,
 	}
@@ -224,7 +272,7 @@ func buildResponseInfo(resp *dns.Msg) *logging.ResponseInfo {
 		if ede, ok := rr.(*dns.EDE); ok {
 			code := int(ede.InfoCode)
 			ri.EDECode = &code
-			ri.EDEText = ede.ExtraText
+			ri.EDEText = strings.TrimRight(ede.ExtraText, "\x00")
 			break
 		}
 	}
@@ -254,10 +302,9 @@ func buildCacheInfo(entry *cache.Entry, refreshTriggered bool) *logging.CacheInf
 	}
 	var pct float64
 	if ttlSec > 0 {
-		pct = float64(rtlSec) / float64(ttlSec) * 100.0
+		pct = math.Round(float64(rtlSec)/float64(ttlSec)*100.0*100) / 100
 	}
 	return &logging.CacheInfo{
-		Hit:                        true,
 		TTLSec:                     ttlSec,
 		TTLRemainingSec:            rtlSec,
 		TTLRemainingPct:            pct,

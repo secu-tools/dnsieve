@@ -199,11 +199,11 @@ func TestDoTClient_String(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	s := c.String()
-	if !strings.Contains(s, "1.1.1.1:853") {
-		t.Errorf("String() should contain address, got %q", s)
+	if s != "1.1.1.1:853" {
+		t.Errorf("String() should return configured address, got %q", s)
 	}
-	if !strings.Contains(s, "DoT") {
-		t.Errorf("String() should contain DoT, got %q", s)
+	if strings.Contains(s, "DoT") {
+		t.Errorf("String() must not wrap in DoT(...), got %q", s)
 	}
 }
 

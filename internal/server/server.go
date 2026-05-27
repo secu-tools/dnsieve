@@ -7,6 +7,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"os/signal"
 	"sync"
@@ -108,13 +109,12 @@ func (h *Handler) checkWhitelistCache(ctx context.Context, query *dns.Msg, qname
 	if h.logger.IsJSONEnabled() {
 		ttlPct := 0.0
 		if ttlSec > 0 {
-			ttlPct = float64(rtlSec) / float64(ttlSec) * 100
+			ttlPct = math.Round(float64(rtlSec)/float64(ttlSec)*100*100) / 100
 		}
 		ev := logging.NewDNSQueryEvent(logging.LevelDebug, "server",
 			qname+" "+qtype+" -> whitelisted (cached)")
-		ev.DNS.Client = buildClientInfo(query, ClientMetaFrom(ctx))
+		ev.DNS.Request = buildClientInfo(query, ClientMetaFrom(ctx))
 		ev.DNS.Cache = &logging.CacheInfo{
-			Hit:                        true,
 			TTLSec:                     ttlSec,
 			TTLRemainingSec:            rtlSec,
 			TTLRemainingPct:            ttlPct,
@@ -153,7 +153,7 @@ func (h *Handler) resolveWhitelistUpstream(ctx context.Context, query *dns.Msg, 
 		rcode := dns.RcodeToString[resp.Rcode]
 		ev := logging.NewDNSQueryEvent(logging.LevelInfo, "server",
 			qname+" "+qtype+" -> rcode="+rcode+" (whitelist resolver)")
-		ev.DNS.Client = buildClientInfo(query, ClientMetaFrom(ctx))
+		ev.DNS.Request = buildClientInfo(query, ClientMetaFrom(ctx))
 		ev.DNS.Decision = &logging.DecisionInfo{
 			Blocked:      false,
 			BlockSource:  "whitelist",
@@ -180,8 +180,8 @@ func (h *Handler) handleBlacklistedQuery(ctx context.Context, query *dns.Msg, qn
 	if h.logger.IsJSONEnabled() {
 		rcode := dns.RcodeToString[resp.Rcode]
 		ev := logging.NewDNSQueryEvent(logging.LevelInfo, "server",
-			qname+" "+qtype+" -> blocked by local blacklist")
-		ev.DNS.Client = buildClientInfo(query, ClientMetaFrom(ctx))
+			qname+" "+qtype+" -> blocked by blacklist")
+		ev.DNS.Request = buildClientInfo(query, ClientMetaFrom(ctx))
 		ev.DNS.Decision = buildBlacklistDecisionInfo(rcode)
 		ev.DNS.Response = buildResponseInfo(resp)
 		h.logger.LogEvent(logging.LevelInfo, ev)
@@ -234,7 +234,7 @@ func (h *Handler) emitCacheHitEvent(ctx context.Context, query *dns.Msg, qname, 
 		msg = qname + " " + qtype + " -> blocked (cached)"
 	}
 	ev := logging.NewDNSQueryEvent(level, "server", msg)
-	ev.DNS.Client = buildClientInfo(query, ClientMetaFrom(ctx))
+	ev.DNS.Request = buildClientInfo(query, ClientMetaFrom(ctx))
 	ev.DNS.Cache = buildCacheInfo(entry, refreshTriggered)
 	ev.DNS.Response = buildResponseInfo(resp)
 	h.logger.LogEvent(level, ev)
@@ -274,7 +274,7 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 		return resp
 	}
 
-	qname := query.Question[0].Header().Name
+	qname := normalizeQueryName(query.Question[0].Header().Name)
 	qtype := dns.TypeToString[dns.RRToType(query.Question[0])]
 
 	h.logger.Debugf("Query %s %s from client", qname, qtype)
@@ -319,7 +319,7 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 		if h.logger.IsJSONEnabled() {
 			ev := logging.NewDNSQueryEvent(logging.LevelWarn, "server",
 				qname+" "+qtype+" -> SERVFAIL (all upstreams failed)")
-			ev.DNS.Client = buildClientInfo(query, ClientMetaFrom(ctx))
+			ev.DNS.Request = buildClientInfo(query, ClientMetaFrom(ctx))
 			ev.DNS.Upstream = buildUpstreamInfos(result.Results, h.resolver.SlowThreshold())
 			ev.DNS.Decision = &logging.DecisionInfo{
 				Blocked:      false,
@@ -333,19 +333,21 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 		return resp
 	}
 
-	// Step 5: If blocked, return blocked response
+	// Step 5: If blocked, return blocked response to client.
 	if result.Blocked {
 		blockedResp := dnsmsg.MakeBlockedResponse(query, h.cfg.Blocking.Mode, result.BlockedBy)
-		cached := h.cfg.Cache.Enabled && result.Cacheable
-		if cached {
-			h.cache.Put(query, blockedResp, true, false)
+		rcode := dns.RcodeToString[blockedResp.Rcode]
+		// For an early block (upstreams still pending), one upstream signalling
+		// a block is sufficient to cache. For the normal path, respect result.Cacheable.
+		var cached bool
+		if result.WaitAll != nil {
+			cached = h.cfg.Cache.Enabled
+		} else {
+			cached = h.cfg.Cache.Enabled && result.Cacheable
 		}
-
+		h.emitBlockedQueryEvent(ctx, query, qname, qtype, result, rcode, cached, blockedResp)
 		h.logger.Debugf("Query %s %s -> final: rcode=%s blocked=true cached=%v",
-			qname, qtype, dns.RcodeToString[blockedResp.Rcode], cached)
-		if h.logger.IsJSONEnabled() {
-			h.emitUpstreamQueryEvent(ctx, query, qname, qtype, result, dns.RcodeToString[blockedResp.Rcode], cached, blockedResp)
-		}
+			qname, qtype, rcode, cached)
 		return blockedResp
 	}
 
@@ -358,17 +360,20 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 	// Step 8: NSID substitute (RFC 5001)
 	h.edns.HandleNSIDSubstitute(query, result.BestResponse)
 
-	// Step 9: Return best response, cache if appropriate
+	// Step 9: Return best response, cache if appropriate.
+	// Emit JSON log BEFORE caching to preserve EDE ExtraText — the dns
+	// library's pack mutation corrupts EDE.ExtraText on Pack (triggered
+	// internally by cache.Put).
 	h.logger.Debugf("Query %s %s -> rcode=%s cacheable=%v allResponded=%v",
 		qname, qtype, dns.RcodeToString[result.BestResponse.Rcode], result.Cacheable, result.AllResponded)
 
 	cached := h.cfg.Cache.Enabled && result.Cacheable
-	if cached {
-		h.cache.Put(query, result.BestResponse, false, false)
-	}
 	if h.logger.IsJSONEnabled() {
 		rcode := dns.RcodeToString[result.BestResponse.Rcode]
 		h.emitUpstreamQueryEvent(ctx, query, qname, qtype, result, rcode, cached, result.BestResponse)
+	}
+	if cached {
+		h.cache.Put(query, result.BestResponse, false, false)
 	}
 	result.BestResponse.ID = query.ID
 	// Set RA (Recursion Available) since we perform recursive resolution for
@@ -388,6 +393,68 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 	return result.BestResponse
 }
 
+// emitBlockedQueryEvent handles JSON logging for a blocked upstream result.
+// When result.WaitAll is non-nil (early-block path), it caches immediately
+// and spawns a background goroutine to wait for all upstream results before
+// emitting the dns_query event. When WaitAll is nil all upstreams already
+// responded and the event is logged synchronously before caching.
+func (h *Handler) emitBlockedQueryEvent(ctx context.Context, query *dns.Msg, qname, qtype string, result *upstream.FanOutResult, rcode string, cached bool, blockedResp *dns.Msg) {
+	if !h.logger.IsJSONEnabled() {
+		if cached {
+			h.cache.Put(query, blockedResp, true, false)
+		}
+		return
+	}
+	if result.WaitAll != nil {
+		// Early block: capture response info before cache.Put can corrupt
+		// EDE ExtraText via the dns library's pack mutation.
+		respInfo := buildResponseInfo(blockedResp)
+		if cached {
+			h.cache.Put(query, blockedResp, true, false)
+		}
+		h.logger.Debugf("Query %s %s -> final: rcode=%s blocked=true cached=%v (early, waiting for upstreams)", qname, qtype, rcode, cached)
+		blockedBy := result.BlockedBy
+		slowThr := h.resolver.SlowThreshold()
+		clientInfo := buildClientInfo(query, ClientMetaFrom(ctx))
+		go func() {
+			allResults := result.WaitAll()
+			allResponded := countOKResults(allResults) == len(allResults)
+			ev := logging.NewDNSQueryEvent(logging.LevelInfo, "server",
+				qname+" "+qtype+" -> blocked by "+blockedBy)
+			ev.DNS.Request = clientInfo
+			ev.DNS.Upstream = buildUpstreamInfos(allResults, slowThr)
+			ev.DNS.Decision = &logging.DecisionInfo{
+				Blocked:      true,
+				BlockSource:  "upstream",
+				Cacheable:    cached,
+				AllResponded: allResponded,
+				RCode:        rcode,
+			}
+			ev.DNS.Response = respInfo
+			h.logger.LogEvent(logging.LevelInfo, ev)
+		}()
+		return
+	}
+	// All upstreams already responded: log before caching to preserve EDE
+	// ExtraText (cache.Put triggers Pack which mutates EDE.ExtraText in the
+	// dns v2 library).
+	h.emitUpstreamQueryEvent(ctx, query, qname, qtype, result, rcode, cached, blockedResp)
+	if cached {
+		h.cache.Put(query, blockedResp, true, false)
+	}
+}
+
+// countOKResults returns the number of non-nil OK results.
+func countOKResults(results []*upstream.Result) int {
+	n := 0
+	for _, r := range results {
+		if r != nil && r.OK() {
+			n++
+		}
+	}
+	return n
+}
+
 // emitUpstreamQueryEvent builds and logs a structured JSON event for a query
 // resolved via upstream servers. resp is the response that was sent to the client.
 func (h *Handler) emitUpstreamQueryEvent(ctx context.Context, query *dns.Msg, qname, qtype string, result *upstream.FanOutResult, rcode string, cached bool, resp *dns.Msg) {
@@ -397,7 +464,7 @@ func (h *Handler) emitUpstreamQueryEvent(ctx context.Context, query *dns.Msg, qn
 		msg = qname + " " + qtype + " -> blocked by " + result.BlockedBy
 	}
 	ev := logging.NewDNSQueryEvent(level, "server", msg)
-	ev.DNS.Client = buildClientInfo(query, ClientMetaFrom(ctx))
+	ev.DNS.Request = buildClientInfo(query, ClientMetaFrom(ctx))
 	ev.DNS.Upstream = buildUpstreamInfos(result.Results, h.resolver.SlowThreshold())
 	ev.DNS.Decision = buildDecisionInfo(result, rcode, cached)
 	ev.DNS.Response = buildResponseInfo(resp)
@@ -431,7 +498,21 @@ func makeRefreshFunc(
 			resp.ID = query.ID
 			resp.RecursionAvailable = true
 			c.Put(query, resp, false, true)
-			logger.Debugf("Cache background-refresh (whitelist) success: %s %s", qname, qtype)
+			rcode := dns.RcodeToString[resp.Rcode]
+			logger.Debugf("Cache background-refresh (whitelist) success: %s %s (rcode=%s)", qname, qtype, rcode)
+			if logger.IsJSONEnabled() {
+				ev := logging.NewDNSQueryEvent(logging.LevelInfo, "server",
+					qname+" "+qtype+" -> background-refresh rcode="+rcode+" (whitelist resolver)")
+				ev.DNS.Request = buildClientInfo(query, nil)
+				ev.DNS.Decision = &logging.DecisionInfo{
+					Blocked:      false,
+					BlockSource:  "whitelist",
+					Cacheable:    true,
+					AllResponded: true,
+					RCode:        rcode,
+				}
+				logger.LogEvent(logging.LevelInfo, ev)
+			}
 			return
 		}
 
@@ -444,13 +525,27 @@ func makeRefreshFunc(
 			logger.Debugf("Cache background-refresh skipped (not cacheable): %s %s", qname, qtype)
 			return
 		}
+		var rcode string
 		if result.Blocked {
 			logger.Debugf("Cache background-refresh: %s %s is now blocked, updating cache", qname, qtype)
 			blockedResp := dnsmsg.MakeBlockedResponse(query, cfg.Blocking.Mode, result.BlockedBy)
 			c.Put(query, blockedResp, true, false)
+			rcode = dns.RcodeToString[blockedResp.Rcode]
 		} else {
-			logger.Debugf("Cache background-refresh success: %s %s (rcode=%d)", qname, qtype, result.BestResponse.Rcode)
+			rcode = dns.RcodeToString[result.BestResponse.Rcode]
+			logger.Debugf("Cache background-refresh success: %s %s (rcode=%s)", qname, qtype, rcode)
 			c.Put(query, result.BestResponse, false, false)
+		}
+		if logger.IsJSONEnabled() {
+			msg := qname + " " + qtype + " -> background-refresh rcode=" + rcode
+			if result.Blocked {
+				msg = qname + " " + qtype + " -> background-refresh blocked by " + result.BlockedBy
+			}
+			ev := logging.NewDNSQueryEvent(logging.LevelInfo, "server", msg)
+			ev.DNS.Request = buildClientInfo(query, nil)
+			ev.DNS.Upstream = buildUpstreamInfos(result.Results, resolver.SlowThreshold())
+			ev.DNS.Decision = buildDecisionInfo(result, rcode, true)
+			logger.LogEvent(logging.LevelInfo, ev)
 		}
 	}
 }
@@ -690,6 +785,6 @@ func refreshQueryInfo(query *dns.Msg) (qname, qtype string) {
 	if len(query.Question) == 0 {
 		return "", ""
 	}
-	return query.Question[0].Header().Name,
+	return normalizeQueryName(query.Question[0].Header().Name),
 		dns.TypeToString[dns.RRToType(query.Question[0])]
 }

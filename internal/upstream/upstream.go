@@ -8,10 +8,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"codeberg.org/miekg/dns"
+	"golang.org/x/net/idna"
 
 	"github.com/secu-tools/dnsieve/internal/config"
 	"github.com/secu-tools/dnsieve/internal/dnsmsg"
@@ -104,6 +106,18 @@ func (r *Resolver) SlowThreshold() time.Duration {
 	return r.slowThreshold
 }
 
+// normalizeDomain strips the trailing DNS root dot and converts any
+// non-ASCII (Unicode) labels to their Punycode/ACE equivalent so that
+// log messages always display the standard ASCII DNS form.
+// On conversion failure the name is returned with only the trailing dot stripped.
+func normalizeDomain(name string) string {
+	name = strings.TrimSuffix(name, ".")
+	if ascii, err := idna.Lookup.ToASCII(name); err == nil {
+		return ascii
+	}
+	return name
+}
+
 // isClientTCP returns true if the upstream client uses TCP-based transport.
 func isClientTCP(c Client) bool {
 	switch c.(type) {
@@ -155,6 +169,12 @@ type FanOutResult struct {
 	Cacheable bool
 	// Results holds individual upstream results (indexed by priority).
 	Results []*Result
+	// WaitAll, when non-nil, blocks until all upstream goroutines have
+	// completed (or the query timeout expires) and returns the full per-upstream
+	// Results slice. Present when a block was detected early before all
+	// upstreams responded. Call from a goroutine to avoid blocking the
+	// response path.
+	WaitAll func() []*Result
 }
 
 // resolveUpstream issues a single query to one upstream client, logs
@@ -181,7 +201,7 @@ func (r *Resolver) resolveUpstream(ctx context.Context, idx int, c Client, query
 			r.logger.Warnf("Upstream[%d] %s error resolving %s: %v", idx, c, qname, err)
 		}
 	} else if r.slowThreshold > 0 && elapsed > r.slowThreshold {
-		r.logger.Warnf("Slow upstream[%d] %s took %dms to resolve %s.", idx, c, elapsed.Milliseconds(), qname)
+		r.logger.Warnf("Slow upstream[%d] %s took %dms to resolve %s", idx, c, elapsed.Milliseconds(), qname)
 	}
 
 	// RFC 7873: update per-upstream cookie state immediately after receiving
@@ -231,6 +251,11 @@ func (r *Resolver) resolveUpstream(ctx context.Context, idx int, c Client, query
 //  2. If NOT blocked and ALL responded without server error -> cache from 1st
 //  3. If some have server errors -> don't cache, return best available
 //  4. If servers disagree on NXDOMAIN -> don't cache
+//
+// When a block is detected in Phase 1 (before all upstreams have responded),
+// Resolve returns immediately with a FanOutResult whose WaitAll field is
+// non-nil. The caller should spawn a goroutine that calls WaitAll() to obtain
+// the complete per-upstream results for structured logging.
 func (r *Resolver) Resolve(ctx context.Context, query *dns.Msg) *FanOutResult {
 	n := len(r.clients)
 	results := make([]*Result, n)
@@ -238,12 +263,14 @@ func (r *Resolver) Resolve(ctx context.Context, query *dns.Msg) *FanOutResult {
 	var wg sync.WaitGroup
 	blockDetected := make(chan struct{}, 1)
 
-	queryCtx, cancel := context.WithTimeout(ctx, r.timeout)
-	defer cancel()
+	// Detach from the request context so upstream goroutines and the WaitAll
+	// goroutine in the caller continue running after the HTTP/plain handler
+	// returns the response to the client.
+	queryCtx, cancel := context.WithTimeout(context.Background(), r.timeout)
 
 	qname := ""
 	if len(query.Question) > 0 {
-		qname = query.Question[0].Header().Name
+		qname = normalizeDomain(query.Question[0].Header().Name)
 	}
 
 	// Fan out to all upstreams
@@ -266,26 +293,44 @@ func (r *Resolver) Resolve(ctx context.Context, query *dns.Msg) *FanOutResult {
 	defer minTimer.Stop()
 
 	// Phase 1: Wait for min_wait or block detection
+	earlyBlock := false
 	select {
 	case <-blockDetected:
-		// Early block detected
+		earlyBlock = true
 	case <-minTimer.C:
-		// Min wait elapsed
 	case <-allDone:
-		// All settled
 	case <-queryCtx.Done():
-		// Timeout
 	}
 
-	// Phase 2: If no block yet, wait for all to finish (up to timeout)
+	// Early block: at least one upstream signalled a block before all responded.
+	// Return to the client immediately; provide WaitAll for deferred logging.
+	if earlyBlock {
+		select {
+		case <-allDone:
+			// All upstreams finished before we could return early.
+			// Fall through to the normal aggregation path.
+		default:
+			partialResult := r.selectResult(results)
+			partialResult.WaitAll = func() []*Result {
+				<-allDone
+				cancel()
+				mu.Lock()
+				out := make([]*Result, len(results))
+				copy(out, results)
+				mu.Unlock()
+				return out
+			}
+			return partialResult
+		}
+	}
+
+	// Phase 2: Wait for all to finish (up to timeout)
 	select {
 	case <-allDone:
 	case <-queryCtx.Done():
 	}
 
-	// Ensure all goroutines have finished (including their logging) before
-	// returning. The cancel() below causes any still-running upstream queries
-	// to exit their context-aware select immediately.
+	// Ensure all goroutines have finished before returning.
 	cancel()
 	<-allDone
 

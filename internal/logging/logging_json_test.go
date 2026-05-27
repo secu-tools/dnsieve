@@ -247,7 +247,7 @@ func TestJSONLogger_DNSQueryEvent(t *testing.T) {
 	l := jsonLogger(&buf)
 
 	ev := NewDNSQueryEvent(LevelInfo, "server", "example.com A -> rcode=NOERROR")
-	ev.DNS.Client = &ClientInfo{
+	ev.DNS.Request = &RequestInfo{
 		IP:       "192.168.1.10",
 		Port:     54321,
 		Protocol: "plain",
@@ -285,7 +285,7 @@ func TestJSONLogger_DNSQueryEvent(t *testing.T) {
 	assertJSONString(t, obj, "level", "INFO")
 
 	// Per-query fields must NOT appear at top level.
-	for _, forbidden := range []string{"client", "upstream", "decision", "cache"} {
+	for _, forbidden := range []string{"request", "upstream", "decision", "cache"} {
 		if _, has := obj[forbidden]; has {
 			t.Errorf("%q must not appear at top level; it belongs inside 'dns'", forbidden)
 		}
@@ -293,9 +293,9 @@ func TestJSONLogger_DNSQueryEvent(t *testing.T) {
 
 	dns := dnsSubmap(t, obj)
 
-	clientRaw, ok := dns["client"].(map[string]interface{})
+	clientRaw, ok := dns["request"].(map[string]interface{})
 	if !ok {
-		t.Fatal("expected dns.client to be a JSON object")
+		t.Fatal("expected dns.request to be a JSON object")
 	}
 	assertJSONString(t, clientRaw, "ip", "192.168.1.10")
 	assertJSONString(t, clientRaw, "protocol", "plain")
@@ -304,7 +304,7 @@ func TestJSONLogger_DNSQueryEvent(t *testing.T) {
 
 	ednsRaw, ok := clientRaw["edns"].(map[string]interface{})
 	if !ok {
-		t.Fatal("expected dns.client.edns to be a JSON object")
+		t.Fatal("expected dns.request.edns to be a JSON object")
 	}
 	if ednsRaw["present"] != true {
 		t.Error("expected edns.present=true")
@@ -339,14 +339,14 @@ func TestJSONLogger_CacheHitEvent(t *testing.T) {
 	l.SetLevel(LevelDebug)
 
 	ev := NewDNSQueryEvent(LevelDebug, "server", "example.com A -> cache hit")
-	ev.DNS.Client = &ClientInfo{
+	ev.DNS.Request = &RequestInfo{
 		IP:     "10.0.0.1",
 		Domain: "example.com",
 		QType:  "A",
 		QClass: "IN",
 		EDNS:   &ClientEDNS{Present: false},
 	}
-	ev.DNS.Cache = &CacheInfo{Hit: true, TTLSec: 300, TTLRemainingSec: 247, TTLRemainingPct: 82.33}
+	ev.DNS.Cache = &CacheInfo{TTLSec: 300, TTLRemainingSec: 247, TTLRemainingPct: 82.33}
 	l.LogEvent(LevelDebug, ev)
 
 	lines := readJSONLines(&buf)
@@ -366,8 +366,8 @@ func TestJSONLogger_CacheHitEvent(t *testing.T) {
 	if !ok {
 		t.Fatal("expected dns.cache to be a JSON object")
 	}
-	if cacheRaw["hit"] != true {
-		t.Error("expected dns.cache.hit=true")
+	if _, hasHit := cacheRaw["hit"]; hasHit {
+		t.Error("dns.cache must not have a 'hit' field")
 	}
 	if ttlSec, _ := cacheRaw["ttl_sec"].(float64); ttlSec != 300 {
 		t.Errorf("expected dns.cache.ttl_sec=300, got %v", cacheRaw["ttl_sec"])
@@ -495,7 +495,6 @@ func TestJSONLogger_BlockedDecision(t *testing.T) {
 	ev := NewDNSQueryEvent(LevelInfo, "server", "blocked.example A -> blocked")
 	ev.DNS.Decision = &DecisionInfo{
 		Blocked:     true,
-		BlockedBy:   "https://dns.quad9.net/dns-query",
 		BlockSource: "upstream",
 		Cacheable:   true,
 		RCode:       "NOERROR",
@@ -510,7 +509,9 @@ func TestJSONLogger_BlockedDecision(t *testing.T) {
 	if decRaw["blocked"] != true {
 		t.Error("expected decision.blocked=true")
 	}
-	assertJSONString(t, decRaw, "blocked_by", "https://dns.quad9.net/dns-query")
+	if _, hasBlockedBy := decRaw["blocked_by"]; hasBlockedBy {
+		t.Error("blocked_by field must not be present")
+	}
 	assertJSONString(t, decRaw, "block_source", "upstream")
 }
 
@@ -518,18 +519,17 @@ func TestJSONLogger_LocalBlacklistDecision(t *testing.T) {
 	var buf bytes.Buffer
 	l := jsonLogger(&buf)
 
-	ev := NewDNSQueryEvent(LevelInfo, "server", "evil.example A -> local blacklist")
+	ev := NewDNSQueryEvent(LevelInfo, "server", "evil.example A -> blacklist")
 	ev.DNS.Decision = &DecisionInfo{
 		Blocked:     true,
-		BlockedBy:   "local-blacklist",
-		BlockSource: "local-blacklist",
+		BlockSource: "blacklist",
 		RCode:       "NOERROR",
 	}
 	l.LogEvent(LevelInfo, ev)
 
 	dns := dnsSubmap(t, readJSONLines(&buf)[0])
 	decRaw, _ := dns["decision"].(map[string]interface{})
-	assertJSONString(t, decRaw, "block_source", "local-blacklist")
+	assertJSONString(t, decRaw, "block_source", "blacklist")
 }
 
 // ---------------------------------------------------------------------------
@@ -543,7 +543,6 @@ func TestJSONLogger_BackgroundRefreshFlag(t *testing.T) {
 
 	ev := NewDNSQueryEvent(LevelDebug, "server", "example.com A -> stale (refresh queued)")
 	ev.DNS.Cache = &CacheInfo{
-		Hit:                        true,
 		TTLSec:                     60,
 		TTLRemainingSec:            5,
 		TTLRemainingPct:            8.33,
@@ -563,7 +562,7 @@ func TestJSONLogger_DNSSECFlag(t *testing.T) {
 	l := jsonLogger(&buf)
 
 	ev := NewDNSQueryEvent(LevelInfo, "t", "dnssec test")
-	ev.DNS.Cache = &CacheInfo{Hit: true, TTLSec: 300, TTLRemainingSec: 200, TTLRemainingPct: 66.67, DNSSEC: true}
+	ev.DNS.Cache = &CacheInfo{TTLSec: 300, TTLRemainingSec: 200, TTLRemainingPct: 66.67, DNSSEC: true}
 	l.LogEvent(LevelInfo, ev)
 
 	dns := dnsSubmap(t, readJSONLines(&buf)[0])
@@ -579,7 +578,7 @@ func TestJSONLogger_WhitelistedCacheEntry(t *testing.T) {
 	l.SetLevel(LevelDebug)
 
 	ev := NewDNSQueryEvent(LevelDebug, "t", "whitelist cache test")
-	ev.DNS.Cache = &CacheInfo{Hit: true, TTLSec: 86400, Whitelisted: true}
+	ev.DNS.Cache = &CacheInfo{TTLSec: 86400, Whitelisted: true}
 	l.LogEvent(LevelDebug, ev)
 
 	dns := dnsSubmap(t, readJSONLines(&buf)[0])
@@ -598,24 +597,23 @@ func TestJSONLogger_IDNDomainEncoding(t *testing.T) {
 	l := jsonLogger(&buf)
 
 	ev := NewDNSQueryEvent(LevelInfo, "server", "IDN test")
-	ev.DNS.Client = &ClientInfo{
-		Domain:    "\u4e2d\u6587.example",
-		DomainACE: "xn--fiq228c.example",
-		QType:     "A",
-		QClass:    "IN",
-		EDNS:      &ClientEDNS{Present: false},
+	ev.DNS.Request = &RequestInfo{
+		Domain: "xn--fiq228c.example",
+		QType:  "A",
+		QClass: "IN",
+		EDNS:   &ClientEDNS{Present: false},
 	}
 	l.LogEvent(LevelInfo, ev)
 
 	dns := dnsSubmap(t, readJSONLines(&buf)[0])
-	clientRaw, _ := dns["client"].(map[string]interface{})
-	domainVal, _ := clientRaw["domain"].(string)
-	if domainVal == "" || domainVal == "xn--fiq228c.example" {
-		t.Errorf("expected Unicode domain, got %q", domainVal)
+	requestRaw, _ := dns["request"].(map[string]interface{})
+	domainVal, _ := requestRaw["domain"].(string)
+	// Domain must always be the Punycode/ACE form.
+	if domainVal != "xn--fiq228c.example" {
+		t.Errorf("expected Punycode domain xn--fiq228c.example, got %q", domainVal)
 	}
-	aceVal, _ := clientRaw["domain_ace"].(string)
-	if aceVal != "xn--fiq228c.example" {
-		t.Errorf("expected domain_ace=xn--fiq228c.example, got %q", aceVal)
+	if _, hasDomainACE := requestRaw["domain_ace"]; hasDomainACE {
+		t.Error("domain_ace field must not be present")
 	}
 }
 
@@ -624,17 +622,16 @@ func TestJSONLogger_ASCIIDomainNoDomainACE(t *testing.T) {
 	l := jsonLogger(&buf)
 
 	ev := NewDNSQueryEvent(LevelInfo, "server", "ASCII domain test")
-	ev.DNS.Client = &ClientInfo{
-		Domain:    "example.com",
-		DomainACE: "",
-		QType:     "A",
-		QClass:    "IN",
-		EDNS:      &ClientEDNS{Present: false},
+	ev.DNS.Request = &RequestInfo{
+		Domain: "example.com",
+		QType:  "A",
+		QClass: "IN",
+		EDNS:   &ClientEDNS{Present: false},
 	}
 	l.LogEvent(LevelInfo, ev)
 
 	if strings.Contains(buf.String(), "domain_ace") {
-		t.Errorf("domain_ace must be absent for ASCII-only domains, got: %s", buf.String())
+		t.Errorf("domain_ace must never be present, got: %s", buf.String())
 	}
 }
 
@@ -759,7 +756,7 @@ func TestJSONLogger_NewDNSQueryEvent(t *testing.T) {
 	if ev.DNS == nil {
 		t.Fatal("NewDNSQueryEvent must initialize DNS field")
 	}
-	if ev.DNS.Client != nil || ev.DNS.Upstream != nil || ev.DNS.Decision != nil || ev.DNS.Cache != nil {
+	if ev.DNS.Request != nil || ev.DNS.Upstream != nil || ev.DNS.Decision != nil || ev.DNS.Cache != nil {
 		t.Error("new DNS event must have all dns sub-fields nil by default")
 	}
 }
@@ -793,7 +790,7 @@ func TestJSONLogger_EDNSDetails(t *testing.T) {
 	l := jsonLogger(&buf)
 
 	ev := NewDNSQueryEvent(LevelInfo, "t", "edns test")
-	ev.DNS.Client = &ClientInfo{
+	ev.DNS.Request = &RequestInfo{
 		Protocol: "doh",
 		Domain:   "example.com",
 		QType:    "A",
@@ -804,7 +801,7 @@ func TestJSONLogger_EDNSDetails(t *testing.T) {
 	l.LogEvent(LevelInfo, ev)
 
 	dns := dnsSubmap(t, readJSONLines(&buf)[0])
-	clientRaw, _ := dns["client"].(map[string]interface{})
+	clientRaw, _ := dns["request"].(map[string]interface{})
 	if clientRaw["do_bit"] != true {
 		t.Error("expected do_bit=true")
 	}
@@ -904,7 +901,7 @@ func TestJSONLogger_ResponseInfo_CacheHit(t *testing.T) {
 	l.SetLevel(LevelDebug)
 
 	ev := NewDNSQueryEvent(LevelDebug, "server", "example.com A -> cache hit")
-	ev.DNS.Cache = &CacheInfo{Hit: true, TTLSec: 300, TTLRemainingSec: 200, TTLRemainingPct: 66.67}
+	ev.DNS.Cache = &CacheInfo{TTLSec: 300, TTLRemainingSec: 200, TTLRemainingPct: 66.67}
 	ev.DNS.Response = &ResponseInfo{
 		RCode:       "NOERROR",
 		AnswerCount: 1,
@@ -925,7 +922,7 @@ func TestJSONLogger_ResponseInfo_BlockedNoIPs(t *testing.T) {
 	l := jsonLogger(&buf)
 
 	ev := NewDNSQueryEvent(LevelInfo, "server", "evil.com A -> blocked")
-	ev.DNS.Decision = &DecisionInfo{Blocked: true, BlockedBy: "local-blacklist", BlockSource: "local-blacklist", RCode: "NOERROR"}
+	ev.DNS.Decision = &DecisionInfo{Blocked: true, BlockSource: "blacklist", RCode: "NOERROR"}
 	// Blocked responses have no A/AAAA records (0.0.0.0 sinkhole or NXDOMAIN).
 	ev.DNS.Response = &ResponseInfo{
 		RCode:       "NOERROR",
@@ -1064,7 +1061,7 @@ func TestJSONLogger_ResponseInfo_PresentInAllDNSQueryPaths(t *testing.T) {
 			"cache_hit",
 			func() *Event {
 				e := NewDNSQueryEvent(LevelInfo, "t", "cache")
-				e.DNS.Cache = &CacheInfo{Hit: true, TTLSec: 60}
+				e.DNS.Cache = &CacheInfo{TTLSec: 60}
 				e.DNS.Response = &ResponseInfo{RCode: "NOERROR", AnswerCount: 1, IPs: []string{"2.2.2.2"}}
 				return e
 			}(),
@@ -1073,7 +1070,7 @@ func TestJSONLogger_ResponseInfo_PresentInAllDNSQueryPaths(t *testing.T) {
 			"blocked",
 			func() *Event {
 				e := NewDNSQueryEvent(LevelInfo, "t", "blocked")
-				e.DNS.Decision = &DecisionInfo{Blocked: true, BlockSource: "local-blacklist", RCode: "NOERROR"}
+				e.DNS.Decision = &DecisionInfo{Blocked: true, BlockSource: "blacklist", RCode: "NOERROR"}
 				e.DNS.Response = &ResponseInfo{RCode: "NOERROR"}
 				return e
 			}(),

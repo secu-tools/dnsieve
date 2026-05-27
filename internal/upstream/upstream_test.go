@@ -228,11 +228,27 @@ func TestResolve_AllBlocked(t *testing.T) {
 	if !result.Blocked {
 		t.Error("should be blocked")
 	}
-	if !result.AllResponded {
-		t.Error("all should have responded")
-	}
-	if !result.Cacheable {
-		t.Error("blocked result should be cacheable when all responded")
+	// With early-return optimisation, WaitAll may be non-nil if the block was
+	// detected before all upstreams finished. Retrieve the complete results.
+	if result.WaitAll != nil {
+		allResults := result.WaitAll()
+		okCount := 0
+		for _, r := range allResults {
+			if r != nil && r.OK() {
+				okCount++
+			}
+		}
+		if okCount != len(clients) {
+			t.Errorf("WaitAll: expected %d OK results, got %d", len(clients), okCount)
+		}
+	} else {
+		// Normal path: all responded synchronously before Phase 1 early-exit.
+		if !result.AllResponded {
+			t.Error("all should have responded (non-early path)")
+		}
+		if !result.Cacheable {
+			t.Error("blocked result should be cacheable when all responded")
+		}
 	}
 }
 
@@ -1355,6 +1371,107 @@ func TestWhitelistResolver_IsWhitelisted_IDN_WildcardUnicode(t *testing.T) {
 	}
 	if wl.IsWhitelisted("other.example.com") {
 		t.Error("should not match unrelated domain")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// normalizeDomain helper tests
+// ---------------------------------------------------------------------------
+
+// TestNormalizeDomain_StripsDot verifies that the trailing root dot is removed.
+func TestNormalizeDomain_StripsDot(t *testing.T) {
+	got := normalizeDomain("example.com.")
+	if got != "example.com" {
+		t.Errorf("expected \"example.com\", got %q", got)
+	}
+}
+
+// TestNormalizeDomain_ConvertsToPunycode verifies that Unicode labels are
+// converted to their Punycode/ACE equivalent.
+func TestNormalizeDomain_ConvertsToPunycode(t *testing.T) {
+	// Chinese: xiao-test -> xn--0zwm56d.org
+	got := normalizeDomain("\u6d4b\u8bd5.org.")
+	if got != "xn--0zwm56d.org" {
+		t.Errorf("expected Punycode xn--0zwm56d.org, got %q", got)
+	}
+}
+
+// TestNormalizeDomain_PreservesAlreadyPunycode verifies that a name already
+// in Punycode form is returned unchanged (only the trailing dot is stripped).
+func TestNormalizeDomain_PreservesAlreadyPunycode(t *testing.T) {
+	got := normalizeDomain("xn--0zwm56d.org.")
+	if got != "xn--0zwm56d.org" {
+		t.Errorf("expected xn--0zwm56d.org unchanged, got %q", got)
+	}
+}
+
+// TestNormalizeDomain_PlainASCII verifies plain ASCII domains are unchanged.
+func TestNormalizeDomain_PlainASCII(t *testing.T) {
+	got := normalizeDomain("cloudflare.com.")
+	if got != "cloudflare.com" {
+		t.Errorf("expected cloudflare.com, got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Slow upstream message format tests
+// ---------------------------------------------------------------------------
+
+// TestResolve_SlowUpstreamWarning_NoDoubleDot verifies that the slow upstream
+// warning does not end with ".." (double dot). Previously the format string
+// contained a trailing period which combined with the FQDN dot to produce "..".
+func TestResolve_SlowUpstreamWarning_NoDoubleDot(t *testing.T) {
+	query := makeQuery("cloudflare.com", dns.TypeA)
+	clients := []Client{
+		&mockClient{name: "slow-server", response: makeNormalResp(query), delay: 80 * time.Millisecond},
+	}
+
+	var buf bytes.Buffer
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "info", Synchronous: true}, "test")
+	r := newTestResolverWithLogger(clients, logger)
+	r.minWait = 5 * time.Millisecond
+	r.slowThreshold = 50 * time.Millisecond
+
+	r.Resolve(context.Background(), query)
+
+	output := buf.String()
+	if strings.Contains(output, "cloudflare.com..") {
+		t.Errorf("slow upstream message must not contain double dot, got: %s", output)
+	}
+	if !strings.Contains(output, "cloudflare.com") {
+		t.Errorf("domain must appear in slow upstream message, got: %s", output)
+	}
+}
+
+// TestResolve_SlowUpstreamWarning_IDN_UsesPunycode verifies that when a client
+// queries an internationalized domain using raw Unicode bytes (non-conforming),
+// the slow upstream warning logs the Punycode/ACE form rather than the raw
+// Unicode representation.
+func TestResolve_SlowUpstreamWarning_IDN_UsesPunycode(t *testing.T) {
+	// Build a DNS query manually with a Unicode label in the question section.
+	// dnsutil.Fqdn + SetQuestion preserves the raw bytes as given.
+	unicodeName := "\u6d4b\u8bd5.org." // 测试.org.
+	q := dnsutil.SetQuestion(new(dns.Msg), unicodeName, dns.TypeA)
+	resp := makeNormalResp(q)
+
+	clients := []Client{
+		&mockClient{name: "slow-server", response: resp, delay: 80 * time.Millisecond},
+	}
+
+	var buf bytes.Buffer
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "info", Synchronous: true}, "test")
+	r := newTestResolverWithLogger(clients, logger)
+	r.minWait = 5 * time.Millisecond
+	r.slowThreshold = 50 * time.Millisecond
+
+	r.Resolve(context.Background(), q)
+
+	output := buf.String()
+	if strings.Contains(output, "\u6d4b\u8bd5") {
+		t.Errorf("slow upstream warning must not show Unicode; expected Punycode, got: %s", output)
+	}
+	if !strings.Contains(output, "xn--0zwm56d.org") {
+		t.Errorf("slow upstream warning must show Punycode xn--0zwm56d.org, got: %s", output)
 	}
 }
 

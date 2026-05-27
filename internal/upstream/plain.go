@@ -69,7 +69,7 @@ func (c *PlainClient) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error)
 	return resp, nil
 }
 
-// String returns a description of this client.
+// String returns the upstream address for this plain DNS client.
 func (c *PlainClient) String() string {
-	return fmt.Sprintf("UDP(%s)", c.address)
+	return c.address
 }

@@ -327,7 +327,7 @@ the domain is now in the whitelist. This covers four cases:
   `Contains` normalizes by stripping the trailing dot before matching.
 - Wildcard entries (`*.example.com`) cover the apex AND all subdomains at
   any depth. `matchWildcard` walks up the label hierarchy:
-  `e1.a2.b3.example.com` → `a2.b3.example.com` → `b3.example.com` →
+  `e1.a2.b3.example.com` -> `a2.b3.example.com` -> `b3.example.com` ->
   `example.com` -- if `*.example.com` is in the set, the last step matches.
 - A cached entry for `e1.a2.b3.v4.sub.example.com` (Whitelisted=true) is
   correctly invalidated when `*.example.com` is removed from the whitelist.
@@ -414,8 +414,8 @@ in-flight refresh keys. It is lock-free (compare-and-swap semantics).
 
 ### Query for domain just added to whitelist (race)
 
-The sequence: domain added to whitelist → reload scheduled → client query
-arrives before the reload runs → cache has a non-whitelist entry (or no entry).
+The sequence: domain added to whitelist -> reload scheduled -> client query
+arrives before the reload runs -> cache has a non-whitelist entry (or no entry).
 
 Outcome: the handler sees the domain as whitelisted, finds `entry.Whitelisted=false`
 (or nil), and queries the whitelist resolver. The new entry is stored with
@@ -502,8 +502,8 @@ If the whitelist contains `*` (global wildcard), every domain is whitelisted.
 the global wildcard `*` is stored as `exact["*"]`. The match logic:
 
 1. `exact["e.example.com"]` -- not found
-2. `matchWildcard("e.example.com")` -- walks up: `e.example.com` → `example.com`
-   → `com` → not found
+2. `matchWildcard("e.example.com")` -- walks up: `e.example.com` -> `example.com`
+   -> `com` -> not found
 
 The global wildcard `*` is stored in the exact map, not the wildcard map, and
 the current `matchWildcard` does not check for `"*"` as a catch-all. The
@@ -641,17 +641,27 @@ example.com. is blocked (from cache, ttl=86400s rtl=80000s)
 
 Logged at info level so operators can see blocked-domain cache hits.
 
-### Background refresh logs (debug)
+### Background refresh logs (debug) and JSON events
 
 ```
 Cache background-refresh started: example.com. A
-Cache background-refresh (whitelist) success: example.com. A
+Cache background-refresh (whitelist) success: example.com. A (rcode=NOERROR)
 Cache background-refresh (whitelist) failed: example.com. A: <error>
 Cache background-refresh success: example.com. A (rcode=NOERROR)
 Cache background-refresh failed (no response): example.com. A
 Cache background-refresh skipped (not cacheable): example.com. A
 Cache background-refresh: example.com. A is now blocked, updating cache
 ```
+
+In JSON mode (`log_level_stdout = "json"` or `log_level_file = "json"`), a
+`dns_query` event is also emitted after a background refresh completes
+successfully. This event contains the upstream results and the caching
+decision but **no `response` field** -- the client already received their
+answer from the cache; the background refresh only updates the cache for
+future requests.
+
+See [docs/logging.md](logging.md#background-refresh-upstream-query) for an
+example JSON event.
 
 ### Whitelist reload invalidation (info, only when entries removed)
 

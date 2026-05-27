@@ -38,8 +38,8 @@ type Event struct {
 // DNSInfo groups all structured fields for a single DNS query resolution
 // event. It is always non-nil when Event.Type == TypeDNSQuery.
 type DNSInfo struct {
-	// Client describes the DNS client that sent the query.
-	Client *ClientInfo `json:"client,omitempty"`
+	// Request describes the DNS request and the client that sent it.
+	Request *RequestInfo `json:"request,omitempty"`
 	// Upstream lists per-upstream resolution results (fan-out).
 	// Empty when the response was served entirely from cache.
 	Upstream []*UpstreamInfo `json:"upstream,omitempty"`
@@ -90,8 +90,8 @@ type ResponseInfo struct {
 	AuthorityCount int `json:"authority_count,omitempty"`
 }
 
-// ClientInfo describes the DNS client that sent the query.
-type ClientInfo struct {
+// RequestInfo describes the DNS request and the client that sent it.
+type RequestInfo struct {
 	// IP is the client's remote IP address (IPv4 or IPv6).
 	IP string `json:"ip,omitempty"`
 	// Port is the client's source port number.
@@ -99,15 +99,10 @@ type ClientInfo struct {
 	// Protocol is the downstream transport used by the client:
 	// "plain" (UDP/TCP), "dot" (DNS-over-TLS), or "doh" (DNS-over-HTTPS).
 	Protocol string `json:"protocol,omitempty"`
-	// Domain is the requested name in Unicode form.
-	// Internationalized labels (xn-- ACE) are decoded to their Unicode
-	// representation so that e.g. "xn--bcher-kva.example" appears as
-	// "buecher.example" in the log.
+	// Domain is the queried name in Punycode/ACE wire format (e.g.
+	// "xn--bcher-kva.example." for an internationalized label). The
+	// trailing dot from the DNS FQDN is stripped for readability.
 	Domain string `json:"domain"`
-	// DomainACE is the ACE/Punycode form of the domain name as it appears
-	// in the DNS wire format. Populated only when it differs from Domain
-	// (i.e. when the name contains one or more internationalized labels).
-	DomainACE string `json:"domain_ace,omitempty"`
 	// QType is the DNS query type string, e.g. "A", "AAAA", "MX", "TXT".
 	QType string `json:"qtype"`
 	// QClass is the DNS query class string, e.g. "IN".
@@ -135,9 +130,14 @@ type UpstreamInfo struct {
 	// Index is the zero-based priority position of this upstream in the
 	// configured upstream list (lower = higher priority).
 	Index int `json:"index"`
-	// Address is the configured upstream address, e.g.
-	// "https://dns.quad9.net/dns-query" or "dns.quad9.net:853".
+	// Address is the upstream server address without the port component.
+	// For DoH this is the full URL (explicit port removed if it was the scheme
+	// default), e.g. "https://dns.quad9.net/dns-query". For DoT and plain DNS
+	// it is the hostname or IP only, e.g. "dns.quad9.net" or "9.9.9.9".
 	Address string `json:"address"`
+	// Port is the upstream server port number.
+	// Typical values: 53 (plain DNS), 853 (DoT), 443 (DoH over HTTPS).
+	Port int `json:"port,omitempty"`
 	// Protocol is the transport used to reach this upstream:
 	// "doh", "dot", or "udp".
 	Protocol string `json:"protocol,omitempty"`
@@ -186,13 +186,9 @@ type DecisionInfo struct {
 	// Blocked is true when the domain was blocked, either by an upstream
 	// server or by the local blacklist.
 	Blocked bool `json:"blocked"`
-	// BlockedBy is the upstream address that signalled the block (e.g.
-	// "https://dns.quad9.net/dns-query") or "local-blacklist" for local
-	// blacklist matches. Empty when Blocked is false.
-	BlockedBy string `json:"blocked_by,omitempty"`
 	// BlockSource is "upstream" when a remote server signalled the block,
-	// or "local-blacklist" when the local blacklist triggered the block.
-	// Empty when Blocked is false.
+	// "blacklist" when the local blacklist triggered it, or "whitelist"
+	// for whitelist-resolver paths. Empty when Blocked is false.
 	BlockSource string `json:"block_source,omitempty"`
 	// Cacheable is true when the result was stored in the cache.
 	Cacheable bool `json:"cacheable"`
@@ -207,9 +203,6 @@ type DecisionInfo struct {
 // CacheInfo describes a response that was served from the local cache without
 // querying any upstream server.
 type CacheInfo struct {
-	// Hit is always true for CacheInfo (included for schema clarity in
-	// queries where either cache or upstream may be present).
-	Hit bool `json:"hit"`
 	// TTLSec is the original total TTL of the cached entry in seconds,
 	// measured from the time the entry was first inserted.
 	TTLSec int64 `json:"ttl_sec"`

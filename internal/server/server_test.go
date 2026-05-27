@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/secu-tools/dnsieve/internal/cache"
 	"github.com/secu-tools/dnsieve/internal/config"
+	"github.com/secu-tools/dnsieve/internal/dnsmsg"
 	"github.com/secu-tools/dnsieve/internal/domainlist"
 	"github.com/secu-tools/dnsieve/internal/logging"
 	"github.com/secu-tools/dnsieve/internal/upstream"
@@ -2034,8 +2036,11 @@ func TestHandleQuery_LocalBlacklistLogsInfo(t *testing.T) {
 	if !strings.Contains(out, "logged.blacklisted.example.com") {
 		t.Errorf("expected domain in blacklist JSON event, got: %s", out)
 	}
-	if !strings.Contains(out, "local blacklist") {
-		t.Errorf("expected 'local blacklist' in JSON event, got: %s", out)
+	if !strings.Contains(out, "blacklist") {
+		t.Errorf("expected 'blacklist' in JSON event, got: %s", out)
+	}
+	if strings.Contains(out, "blocked_by") {
+		t.Errorf("blocked_by field must not appear in JSON event, got: %s", out)
 	}
 	if !strings.Contains(out, "dns_query") {
 		t.Errorf("expected dns_query event type in JSON output, got: %s", out)
@@ -3279,5 +3284,846 @@ func TestHandleQuery_WhitelistReloadScopedWildcard_AddedScopedDoesNotAffectParen
 	}
 	if entry, _ := c.Get(qScoped); entry != nil {
 		t.Error("app.abc.example.com must be invalidated (newly whitelisted)")
+	}
+}
+
+// TestMakeRefreshFunc_EmitsJSONEventOnSuccess verifies that a successful
+// background cache refresh emits a dns_query JSON event that includes
+// upstream and decision fields but no response section. The client already
+// received the cached response, so the refresh event must not duplicate it.
+func TestMakeRefreshFunc_EmitsJSONEventOnSuccess(t *testing.T) {
+	query := makeQuery("bgrefresh.example.com", dns.TypeA)
+	resp := makeNormalResp(query)
+
+	var buf bytes.Buffer
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
+
+	client := &mockUpstreamClient{name: "upstream-0", response: resp}
+	resolver := upstream.NewResolverFromClients([]upstream.Client{client}, 2*time.Second, 50*time.Millisecond, logger)
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+	c := cache.New(100, 3600, 5, 0)
+
+	fn := makeRefreshFunc(resolver, nil, c, cfg, logger, 2*time.Second)
+	fn(query)
+
+	output := buf.String()
+	if !strings.Contains(output, "background-refresh") {
+		t.Errorf("expected 'background-refresh' in JSON event, got: %s", output)
+	}
+	if !strings.Contains(output, `"dns_query"`) {
+		t.Errorf("expected dns_query type in JSON event, got: %s", output)
+	}
+	if !strings.Contains(output, `"upstream"`) {
+		t.Errorf("expected 'upstream' field in JSON event, got: %s", output)
+	}
+	if !strings.Contains(output, `"decision"`) {
+		t.Errorf("expected 'decision' field in JSON event, got: %s", output)
+	}
+	// No response section: the client already received the cached response.
+	if strings.Contains(output, `"response"`) {
+		t.Errorf("background-refresh event must not include response section, got: %s", output)
+	}
+	if !strings.Contains(output, "bgrefresh.example.com") {
+		t.Errorf("expected domain name in JSON event, got: %s", output)
+	}
+}
+
+// TestMakeRefreshFunc_BlockedDomainEmitsJSONEvent verifies that when a
+// background refresh discovers the domain is now blocked, a dns_query JSON
+// event is emitted with blocked=true in the decision and no response section.
+func TestMakeRefreshFunc_BlockedDomainEmitsJSONEvent(t *testing.T) {
+	query := makeQuery("now-blocked.example.com", dns.TypeA)
+	blockedUpstreamResp := makeBlockedResp(query)
+
+	var buf bytes.Buffer
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
+
+	client := &mockUpstreamClient{name: "upstream-0", response: blockedUpstreamResp}
+	resolver := upstream.NewResolverFromClients([]upstream.Client{client}, 2*time.Second, 50*time.Millisecond, logger)
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+	c := cache.New(100, 3600, 5, 0)
+
+	fn := makeRefreshFunc(resolver, nil, c, cfg, logger, 2*time.Second)
+	fn(query)
+
+	output := buf.String()
+	if !strings.Contains(output, "background-refresh") {
+		t.Errorf("expected 'background-refresh' in JSON event, got: %s", output)
+	}
+	if !strings.Contains(output, `"blocked":true`) {
+		t.Errorf("expected blocked:true in JSON decision, got: %s", output)
+	}
+	if !strings.Contains(output, `"dns_query"`) {
+		t.Errorf("expected dns_query type in JSON event, got: %s", output)
+	}
+	if strings.Contains(output, `"response"`) {
+		t.Errorf("background-refresh event must not include response section, got: %s", output)
+	}
+}
+
+// TestBuildCacheInfo_TTLRemainingPct_Rounded verifies that ttl_remaining_pct
+// is rounded to at most 2 decimal places and does not produce long floating-
+// point strings such as 8.333333333333332.
+func TestBuildCacheInfo_TTLRemainingPct_Rounded(t *testing.T) {
+	// total=60s, 5s remaining: 5/60*100 = 8.333...% -> must round to 8.33
+	now := time.Now()
+	entry := &cache.Entry{
+		InsertedAt: now.Add(-55 * time.Second),
+		ExpiresAt:  now.Add(5 * time.Second),
+	}
+	info := buildCacheInfo(entry, false)
+	if info == nil {
+		t.Fatal("buildCacheInfo returned nil")
+	}
+	// Format with 10 decimal places, strip trailing zeros, check at most 2 remain.
+	s := fmt.Sprintf("%.10f", info.TTLRemainingPct)
+	parts := strings.SplitN(s, ".", 2)
+	if len(parts) == 2 {
+		dec := strings.TrimRight(parts[1], "0")
+		if len(dec) > 2 {
+			t.Errorf("TTLRemainingPct has more than 2 decimal places: %v (formatted: %s)", info.TTLRemainingPct, s)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Helper: parse a single JSON dns_query event from a buffer.
+// ---------------------------------------------------------------------------
+
+func parseDNSQueryEvent(t *testing.T, buf *bytes.Buffer) map[string]interface{} {
+	t.Helper()
+	dec := json.NewDecoder(buf)
+	var obj map[string]interface{}
+	if err := dec.Decode(&obj); err != nil {
+		t.Fatalf("JSON decode failed: %v\n%s", err, buf.String())
+	}
+	return obj
+}
+
+func dnsSubObj(t *testing.T, obj map[string]interface{}) map[string]interface{} {
+	t.Helper()
+	dns, ok := obj["dns"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected 'dns' field in event: %v", obj)
+	}
+	return dns
+}
+
+// newJSONTestHandler creates a handler that logs to the given buffer in JSON
+// mode, using the provided upstream mock responses.
+func newJSONTestHandler(t *testing.T, buf *bytes.Buffer, responses []*dns.Msg) *Handler {
+	t.Helper()
+	logger := logging.NewWriterLogger(buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
+	return newTestHandlerWithLogger(t, responses, logger)
+}
+
+// ---------------------------------------------------------------------------
+// Rename: client -> request field in dns_query JSON events
+// ---------------------------------------------------------------------------
+
+// TestJSONEvent_RequestFieldPresent verifies that dns_query events use
+// "request" (not "client") as the sub-object key for query metadata.
+func TestJSONEvent_RequestFieldPresent(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	var buf bytes.Buffer
+	handler := newJSONTestHandler(t, &buf, []*dns.Msg{makeNormalResp(query)})
+	handler.HandleQuery(context.Background(), query)
+
+	obj := parseDNSQueryEvent(t, &buf)
+	dns := dnsSubObj(t, obj)
+
+	if _, hasClient := dns["client"]; hasClient {
+		t.Error("dns.client must not be present; field was renamed to dns.request")
+	}
+	if _, hasRequest := dns["request"]; !hasRequest {
+		t.Error("dns.request must be present in dns_query events")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CacheInfo: no "hit" field
+// ---------------------------------------------------------------------------
+
+// TestJSONEvent_CacheInfo_NoHitField verifies that cached responses do not
+// include a "hit" field (it is always implied by the presence of "cache").
+func TestJSONEvent_CacheInfo_NoHitField(t *testing.T) {
+	query := makeQuery("cached.example.com", dns.TypeA)
+	var buf bytes.Buffer
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+	c := cache.New(100, 3600, 5, 0)
+	// Pre-populate the cache.
+	normalResp := makeNormalResp(query)
+	c.Put(query, normalResp, false, false)
+
+	resolver := upstream.NewResolverFromClients(nil, 2*time.Second, 50*time.Millisecond, logger)
+	handler := NewHandler(resolver, nil, nil, c, logger, cfg)
+	handler.HandleQuery(context.Background(), query)
+
+	out := buf.String()
+	if strings.Contains(out, `"hit"`) {
+		t.Errorf("cache event must not have 'hit' field, got: %s", out)
+	}
+	if !strings.Contains(out, `"cache"`) {
+		t.Errorf("cache hit event must have 'cache' field, got: %s", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// IDN: domain always as ACE/Punycode, no domain_ace field
+// ---------------------------------------------------------------------------
+
+// TestJSONEvent_IDN_AlwaysPunycode verifies that when a client queries an
+// internationalized domain (Punycode/ACE wire format), the logged domain
+// value is the ACE form directly. The domain_ace field must not appear.
+func TestJSONEvent_IDN_AlwaysPunycode(t *testing.T) {
+	// "xn--bcher-kva.example" is the ACE encoding of "buecher.example"
+	query := makeQuery("xn--bcher-kva.example", dns.TypeA)
+	var buf bytes.Buffer
+	handler := newJSONTestHandler(t, &buf, []*dns.Msg{makeNormalResp(query)})
+	handler.HandleQuery(context.Background(), query)
+
+	out := buf.String()
+	if strings.Contains(out, "domain_ace") {
+		t.Errorf("domain_ace field must never appear in JSON output, got: %s", out)
+	}
+	if !strings.Contains(out, "xn--bcher-kva.example") {
+		t.Errorf("expected Punycode domain in JSON output, got: %s", out)
+	}
+	// Unicode form must NOT appear in the domain field.
+	if strings.Contains(out, "buecher") {
+		t.Errorf("Unicode form must not appear in JSON domain field, got: %s", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Decision: no blocked_by field; block_source = "blacklist" for local list
+// ---------------------------------------------------------------------------
+
+// TestJSONEvent_LocalBlacklist_NoBlockedBy verifies that local blacklist
+// blocks do not emit a "blocked_by" field.
+func TestJSONEvent_LocalBlacklist_NoBlockedBy(t *testing.T) {
+	query := makeQuery("blocked.example.com", dns.TypeA)
+	var buf bytes.Buffer
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = false
+	bl := testDomainList(t, []string{"||blocked.example.com^"})
+	c := cache.New(100, 3600, 5, 0)
+	resolver := upstream.NewResolverFromClients(nil, 2*time.Second, 50*time.Millisecond, logger)
+	handler := NewHandler(resolver, nil, bl, c, logger, cfg)
+	handler.HandleQuery(context.Background(), query)
+
+	out := buf.String()
+	if strings.Contains(out, `"blocked_by"`) {
+		t.Errorf("blocked_by field must not appear in JSON output, got: %s", out)
+	}
+}
+
+// TestJSONEvent_LocalBlacklist_BlockSourceIsBlacklist verifies that
+// block_source = "blacklist" (not "local-blacklist") for local list blocks.
+func TestJSONEvent_LocalBlacklist_BlockSourceIsBlacklist(t *testing.T) {
+	query := makeQuery("blocked2.example.com", dns.TypeA)
+	var buf bytes.Buffer
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = false
+	bl := testDomainList(t, []string{"||blocked2.example.com^"})
+	c := cache.New(100, 3600, 5, 0)
+	resolver := upstream.NewResolverFromClients(nil, 2*time.Second, 50*time.Millisecond, logger)
+	handler := NewHandler(resolver, nil, bl, c, logger, cfg)
+	handler.HandleQuery(context.Background(), query)
+
+	obj := parseDNSQueryEvent(t, &buf)
+	dns := dnsSubObj(t, obj)
+
+	dec, ok := dns["decision"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected decision object in JSON event")
+	}
+	if dec["block_source"] != "blacklist" {
+		t.Errorf("expected block_source=blacklist, got %v", dec["block_source"])
+	}
+	if dec["block_source"] == "local-blacklist" {
+		t.Error("block_source must not be 'local-blacklist'; expected 'blacklist'")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Upstream address: no DoH/DoT/UDP wrappers
+// ---------------------------------------------------------------------------
+
+// TestJSONEvent_UpstreamAddress_NoProtocolWrapper verifies that upstream
+// address fields in JSON events show raw addresses without protocol wrappers
+// such as DoH(...), DoT(...), or UDP(...).
+func TestJSONEvent_UpstreamAddress_NoProtocolWrapper(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	var buf bytes.Buffer
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = false
+	c := cache.New(100, 3600, 5, 0)
+
+	// mockUpstreamClient.String() returns m.name as the address (host:port).
+	// After the address/port split, "9.9.9.9" and port 53 should appear separately.
+	plainAddr := "9.9.9.9:53"
+	client := &mockUpstreamClient{name: plainAddr, response: makeNormalResp(query)}
+	resolver := upstream.NewResolverFromClients(
+		[]upstream.Client{client},
+		2*time.Second, 50*time.Millisecond, logger,
+	)
+	handler := NewHandler(resolver, nil, nil, c, logger, cfg)
+	handler.HandleQuery(context.Background(), query)
+
+	out := buf.String()
+	for _, wrapper := range []string{"DoH(", "DoT(", "UDP("} {
+		if strings.Contains(out, wrapper) {
+			t.Errorf("upstream address must not be wrapped in %s...), got: %s", wrapper, out)
+		}
+	}
+	// address and port are now split: "9.9.9.9" and 53 must appear separately.
+	if !strings.Contains(out, `"9.9.9.9"`) {
+		t.Errorf("expected host 9.9.9.9 in JSON output, got: %s", out)
+	}
+	if !strings.Contains(out, `"port":53`) {
+		t.Errorf("expected port:53 in JSON output, got: %s", out)
+	}
+	// The combined address:port string must NOT appear as a single value.
+	if strings.Contains(out, `"9.9.9.9:53"`) {
+		t.Errorf("address must not include port in JSON output, got: %s", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// EDE text: no null bytes after caching
+// ---------------------------------------------------------------------------
+
+// makeBlockedRespWithEDE constructs a blocked response carrying an EDE
+// option with a non-empty ExtraText. This is used to exercise the code path
+// where cache.Put can corrupt EDE.ExtraText via the dns library's pack bug.
+func makeBlockedRespWithEDE(query *dns.Msg, ede string) *dns.Msg {
+	resp := new(dns.Msg)
+	dnsutil.SetReply(resp, query)
+	resp.Rcode = dns.RcodeSuccess
+	resp.Answer = append(resp.Answer, &dns.A{
+		Hdr: dns.Header{Name: query.Question[0].Header().Name, Class: dns.ClassINET, TTL: 300},
+		A:   rdata.A{Addr: netip.AddrFrom4([4]byte{})},
+	})
+	resp.Pseudo = append(resp.Pseudo, &dns.EDE{InfoCode: dns.ExtendedErrorBlocked, ExtraText: ede})
+	return resp
+}
+
+// TestJSONEvent_EDEText_NotNullBytes verifies that the EDE text in a blocked
+// upstream event does not contain null bytes even when cache.Put is called.
+// Regression test for the dns library bug where Pack() mutates EDE.ExtraText.
+func TestJSONEvent_EDEText_NotNullBytes(t *testing.T) {
+	query := makeQuery("blocked-ede.example.com", dns.TypeA)
+	var buf bytes.Buffer
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true // ensure cache.Put is called — this triggers the bug
+	c := cache.New(100, 3600, 5, 0)
+
+	// The response EDE text will be set by dnsmsg.MakeBlockedResponse using the
+	// blocker name. Give the client a name that will appear in the EDE text.
+	client := &mockUpstreamClient{name: "blocker-ede", response: makeBlockedRespWithEDE(query, "Blocked (blocker-ede)")}
+	resolver := upstream.NewResolverFromClients(
+		[]upstream.Client{client},
+		2*time.Second, 50*time.Millisecond, logger,
+	)
+	handler := NewHandler(resolver, nil, nil, c, logger, cfg)
+	handler.HandleQuery(context.Background(), query)
+
+	// For the WaitAll path we need to give the goroutine time to finish.
+	time.Sleep(200 * time.Millisecond)
+
+	out := buf.String()
+	if strings.Contains(out, `\u0000`) {
+		t.Errorf("EDE text must not contain null bytes in JSON output, got: %s", out)
+	}
+	// The response-level EDE text comes from MakeBlockedResponse (based on blocker name).
+	if !strings.Contains(out, `"ede_code":15`) {
+		t.Errorf("expected ede_code=15 in JSON output, got: %s", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Slow flag: independent per upstream, including when blocked
+// ---------------------------------------------------------------------------
+
+// slowMockClient is a mock upstream that delays for a specified duration
+// before returning a response. Used to test the slow upstream flag.
+type slowMockClient struct {
+	name     string
+	response *dns.Msg
+	delay    time.Duration
+}
+
+func (c *slowMockClient) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	select {
+	case <-time.After(c.delay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	r := new(dns.Msg)
+	r.ID = msg.ID
+	r.Response = true
+	r.Rcode = c.response.Rcode
+	r.Answer = append(r.Answer, c.response.Answer...)
+	r.Pseudo = append(r.Pseudo, c.response.Pseudo...)
+	return r, nil
+}
+
+func (c *slowMockClient) String() string { return c.name }
+
+// TestJSONEvent_SlowFlag_BlockedDomain verifies that the slow flag is set
+// independently per upstream even when the domain is blocked. An upstream
+// that takes longer than the slow threshold must be flagged even if another
+// upstream signals the block first.
+func TestJSONEvent_SlowFlag_BlockedDomain(t *testing.T) {
+	query := makeQuery("malware-slow.example.com", dns.TypeA)
+	var buf bytes.Buffer
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = false
+	cfg.Logging.SlowUpstreamMS = 50 // 50ms threshold
+	c := cache.New(100, 3600, 5, 0)
+
+	blockedResp := makeBlockedRespWithEDE(query, "Blocked")
+
+	clients := []upstream.Client{
+		// Fast blocker: responds immediately
+		&mockUpstreamClient{name: "fast-blocker", response: blockedResp},
+		// Slow blocker: takes 500ms (well above 200ms default slow threshold)
+		&slowMockClient{name: "slow-blocker", response: blockedResp, delay: 500 * time.Millisecond},
+	}
+	// NewResolverFromClients uses a default slow threshold of 200ms;
+	// slow-blocker takes 500ms so it will exceed the threshold.
+	resolver := upstream.NewResolverFromClients(clients, 5*time.Second, 50*time.Millisecond, logger)
+
+	handler := NewHandler(resolver, nil, nil, c, logger, cfg)
+	handler.HandleQuery(context.Background(), query)
+
+	// Allow WaitAll goroutine to emit the JSON event.
+	time.Sleep(700 * time.Millisecond)
+
+	out := buf.String()
+	if out == "" {
+		t.Fatal("expected JSON output but got none")
+	}
+	// The slow flag should appear in at least one upstream entry.
+	if !strings.Contains(out, `"slow":true`) {
+		t.Logf("JSON: %s", out)
+		t.Error("expected at least one upstream entry with slow=true for slow-blocker")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Early blocked return: WaitAll mechanism
+// ---------------------------------------------------------------------------
+
+// TestJSONEvent_EarlyBlockedReturn_WaitAll verifies that when a block is
+// detected early (before all upstreams respond), the JSON log event is still
+// emitted with complete upstream information once all upstreams finish.
+func TestJSONEvent_EarlyBlockedReturn_WaitAll(t *testing.T) {
+	query := makeQuery("early-block.example.com", dns.TypeA)
+	var buf bytes.Buffer
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = false
+	c := cache.New(100, 3600, 5, 0)
+
+	blockedResp := makeBlockedRespWithEDE(query, "Blocked (early)")
+	normalResp := makeNormalResp(query)
+
+	clients := []upstream.Client{
+		// Fast blocker signals the block immediately.
+		&mockUpstreamClient{name: "fast-blocker", response: blockedResp},
+		// Slow upstream takes time — exercises WaitAll.
+		&slowMockClient{name: "slow-upstream", response: normalResp, delay: 300 * time.Millisecond},
+	}
+	// Use non-zero minWait so Phase 1 properly waits for block detection
+	// rather than exiting immediately on the zero-duration timer.
+	resolver := upstream.NewResolverFromClients(clients, 5*time.Second, 50*time.Millisecond, logger)
+	handler := NewHandler(resolver, nil, nil, c, logger, cfg)
+
+	// HandleQuery must return quickly (before slow-upstream finishes).
+	start := time.Now()
+	resp := handler.HandleQuery(context.Background(), query)
+	elapsed := time.Since(start)
+
+	if resp == nil {
+		t.Fatal("expected response from HandleQuery")
+	}
+	if elapsed > 250*time.Millisecond {
+		t.Errorf("HandleQuery took %v; expected early return (<250ms) for blocked domain", elapsed)
+	}
+
+	// Wait for the WaitAll goroutine to emit the JSON event.
+	time.Sleep(500 * time.Millisecond)
+
+	out := buf.String()
+	if !strings.Contains(out, "dns_query") {
+		t.Errorf("expected dns_query JSON event after WaitAll, got: %s", out)
+	}
+	// Both upstreams should appear in the event.
+	if !strings.Contains(out, "fast-blocker") {
+		t.Errorf("expected fast-blocker in JSON upstream data, got: %s", out)
+	}
+	if !strings.Contains(out, "slow-upstream") {
+		t.Errorf("expected slow-upstream in JSON upstream data, got: %s", out)
+	}
+}
+
+// TestJSONEvent_EarlyBlockedReturn_EDEText_NotCorrupted verifies that when
+// the early-block + WaitAll path is taken, the EDE text is captured before
+// cache.Put and therefore does not contain null bytes.
+func TestJSONEvent_EarlyBlockedReturn_EDEText_NotCorrupted(t *testing.T) {
+	query := makeQuery("ede-early.example.com", dns.TypeA)
+	edeText := "Blocked (early-block-ede-test)"
+	var buf bytes.Buffer
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true // triggers cache.Put which can corrupt EDE
+	c := cache.New(100, 3600, 5, 0)
+
+	blockedResp := makeBlockedRespWithEDE(query, edeText)
+	clients := []upstream.Client{
+		&mockUpstreamClient{name: "blocker", response: blockedResp},
+		&slowMockClient{name: "slow", response: makeNormalResp(query), delay: 300 * time.Millisecond},
+	}
+	resolver := upstream.NewResolverFromClients(clients, 5*time.Second, 50*time.Millisecond, logger)
+	handler := NewHandler(resolver, nil, nil, c, logger, cfg)
+	handler.HandleQuery(context.Background(), query)
+
+	// Wait for WaitAll goroutine.
+	time.Sleep(500 * time.Millisecond)
+
+	out := buf.String()
+	if strings.Contains(out, `\u0000`) {
+		t.Errorf("EDE text must not contain null bytes in early-block path, got: %s", out)
+	}
+	// The response EDE text is set by MakeBlockedResponse with the blocker name;
+	// verify it appears and is not the corrupted form.
+	if !strings.Contains(out, `"ede_code":15`) {
+		t.Errorf("expected ede_code=15 in JSON output after WaitAll, got: %s", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildClientInfo: domain is ACE-only (no unicode conversion)
+// ---------------------------------------------------------------------------
+
+// TestBuildClientInfo_DomainIsPunycode verifies that buildClientInfo sets
+// Domain to the ACE/Punycode form directly (no Unicode conversion).
+func TestBuildClientInfo_DomainIsPunycode(t *testing.T) {
+	query := makeQuery("xn--nxasmq6b.example", dns.TypeA)
+	info := buildClientInfo(query, nil)
+	if info == nil {
+		t.Fatal("expected non-nil RequestInfo")
+	}
+	if info.Domain != "xn--nxasmq6b.example" {
+		t.Errorf("expected Domain=xn--nxasmq6b.example (Punycode), got %q", info.Domain)
+	}
+}
+
+// TestBuildClientInfo_ASCIIDomain verifies that buildClientInfo sets Domain
+// to the plain ASCII domain (unchanged).
+func TestBuildClientInfo_ASCIIDomain(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	info := buildClientInfo(query, nil)
+	if info == nil {
+		t.Fatal("expected non-nil RequestInfo")
+	}
+	if info.Domain != "example.com" {
+		t.Errorf("expected Domain=example.com, got %q", info.Domain)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildCacheInfo: no Hit field
+// ---------------------------------------------------------------------------
+
+// TestBuildCacheInfo_NoHit verifies that buildCacheInfo does not set a Hit
+// field (it was removed since Hit is always true for cache events).
+func TestBuildCacheInfo_NoHit(t *testing.T) {
+	query := makeQuery("cached-nohit.example.com", dns.TypeA)
+	normalResp := makeNormalResp(query)
+	c := cache.New(100, 3600, 5, 0)
+	c.Put(query, normalResp, false, false)
+	entry, _ := c.Get(query)
+	if entry == nil {
+		t.Fatal("expected cache entry")
+	}
+	info := buildCacheInfo(entry, false)
+	if info == nil {
+		t.Fatal("expected non-nil CacheInfo")
+	}
+	// Verify via JSON serialization that "hit" key is absent.
+	data, err := json.Marshal(info)
+	if err != nil {
+		t.Fatalf("json marshal: %v", err)
+	}
+	if strings.Contains(string(data), `"hit"`) {
+		t.Errorf("CacheInfo must not have 'hit' field, got: %s", data)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildBlacklistDecisionInfo: block_source = "blacklist"
+// ---------------------------------------------------------------------------
+
+// TestBuildBlacklistDecisionInfo_BlockSource verifies that the decision info
+// for a local blacklist block uses "blacklist" (not "local-blacklist").
+func TestBuildBlacklistDecisionInfo_BlockSource(t *testing.T) {
+	dec := buildBlacklistDecisionInfo("NOERROR")
+	if dec == nil {
+		t.Fatal("expected non-nil DecisionInfo")
+	}
+	if dec.BlockSource != "blacklist" {
+		t.Errorf("expected BlockSource=blacklist, got %q", dec.BlockSource)
+	}
+	data, err := json.Marshal(dec)
+	if err != nil {
+		t.Fatalf("json marshal: %v", err)
+	}
+	if strings.Contains(string(data), "local-blacklist") {
+		t.Errorf("'local-blacklist' must not appear in DecisionInfo JSON, got: %s", data)
+	}
+	if strings.Contains(string(data), `"blocked_by"`) {
+		t.Errorf("'blocked_by' must not appear in DecisionInfo JSON, got: %s", data)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildUpstreamInfos: EDE null-byte stripping
+// ---------------------------------------------------------------------------
+
+// TestBuildUpstreamInfos_EDENullBytes verifies that null bytes in EDE
+// ExtraText (caused by the dns library's Pack mutation bug) are stripped.
+func TestBuildUpstreamInfos_EDENullBytes(t *testing.T) {
+	msg := new(dns.Msg)
+	// Simulate what happens after Pack() corrupts ExtraText with null bytes.
+	corruptedText := "Blocked\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+	msg.Pseudo = []dns.RR{&dns.EDE{InfoCode: 15, ExtraText: corruptedText}}
+
+	results := []*upstream.Result{
+		{Index: 0, Client: "upstream1", Msg: msg, Inspect: dnsmsg.InspectResult{Blocked: true}},
+	}
+	infos := buildUpstreamInfos(results, 0)
+	if len(infos) != 1 {
+		t.Fatalf("expected 1 info, got %d", len(infos))
+	}
+	if strings.Contains(infos[0].EDEText, "\x00") {
+		t.Errorf("EDEText must not contain null bytes after stripping, got: %q", infos[0].EDEText)
+	}
+	if infos[0].EDEText != "Blocked" {
+		t.Errorf("expected EDEText=\"Blocked\" after null stripping, got: %q", infos[0].EDEText)
+	}
+}
+
+// TestBuildResponseInfo_EDENullBytes verifies that buildResponseInfo strips
+// null bytes from EDE ExtraText.
+func TestBuildResponseInfo_EDENullBytes(t *testing.T) {
+	msg := new(dns.Msg)
+	corruptedText := "Blocked (upstream)\x00\x00\x00\x00\x00"
+	msg.Pseudo = []dns.RR{&dns.EDE{InfoCode: 15, ExtraText: corruptedText}}
+	msg.Rcode = dns.RcodeSuccess
+
+	ri := buildResponseInfo(msg)
+	if ri == nil {
+		t.Fatal("expected non-nil ResponseInfo")
+	}
+	if strings.Contains(ri.EDEText, "\x00") {
+		t.Errorf("EDEText must not contain null bytes, got: %q", ri.EDEText)
+	}
+	if ri.EDEText != "Blocked (upstream)" {
+		t.Errorf("expected stripped EDEText, got: %q", ri.EDEText)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// splitClientAddress unit tests
+// ---------------------------------------------------------------------------
+
+// TestSplitClientAddress_DoH_DefaultPort verifies that a DoH URL without an
+// explicit port returns the unchanged URL and port 443.
+func TestSplitClientAddress_DoH_DefaultPort(t *testing.T) {
+	addr, port := splitClientAddress("https://dns.quad9.net/dns-query", "doh")
+	if addr != "https://dns.quad9.net/dns-query" {
+		t.Errorf("expected unchanged URL, got %q", addr)
+	}
+	if port != 443 {
+		t.Errorf("expected port 443, got %d", port)
+	}
+}
+
+// TestSplitClientAddress_DoH_ExplicitPort verifies that a DoH URL with an
+// explicit port has the port stripped from the URL host and returned separately.
+func TestSplitClientAddress_DoH_ExplicitPort(t *testing.T) {
+	addr, port := splitClientAddress("https://dns.quad9.net:4343/dns-query", "doh")
+	if addr != "https://dns.quad9.net/dns-query" {
+		t.Errorf("expected URL without port, got %q", addr)
+	}
+	if port != 4343 {
+		t.Errorf("expected port 4343, got %d", port)
+	}
+}
+
+// TestSplitClientAddress_DoT verifies that a DoT address is split into host
+// and port components.
+func TestSplitClientAddress_DoT(t *testing.T) {
+	addr, port := splitClientAddress("dns.quad9.net:853", "dot")
+	if addr != "dns.quad9.net" {
+		t.Errorf("expected host dns.quad9.net, got %q", addr)
+	}
+	if port != 853 {
+		t.Errorf("expected port 853, got %d", port)
+	}
+}
+
+// TestSplitClientAddress_Plain verifies that a plain UDP address is split into
+// host and port components.
+func TestSplitClientAddress_Plain(t *testing.T) {
+	addr, port := splitClientAddress("9.9.9.9:53", "udp")
+	if addr != "9.9.9.9" {
+		t.Errorf("expected host 9.9.9.9, got %q", addr)
+	}
+	if port != 53 {
+		t.Errorf("expected port 53, got %d", port)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildClientInfo: Unicode domain → Punycode
+// ---------------------------------------------------------------------------
+
+// TestBuildClientInfo_UnicodeDomain_NormalizedToPunycode verifies that a DNS
+// query containing a non-ASCII Unicode domain (as can happen when a
+// non-conforming client sends raw UTF-8 label bytes) is normalized to its
+// Punycode/ACE form before the domain is stored in ClientInfo.
+func TestBuildClientInfo_UnicodeDomain_NormalizedToPunycode(t *testing.T) {
+	// Build a query manually with a raw Unicode label (non-conforming client).
+	unicodeName := "\u6d4b\u8bd5.org." // 测试.org.
+	query := dnsutil.SetQuestion(new(dns.Msg), unicodeName, dns.TypeA)
+
+	meta := &ClientMeta{IP: "127.0.0.1", Port: 1234, Protocol: "udp"}
+	info := buildClientInfo(query, meta)
+	if info == nil {
+		t.Fatal("buildClientInfo returned nil")
+	}
+	if info.Domain != "xn--0zwm56d.org" {
+		t.Errorf("expected Punycode domain xn--0zwm56d.org, got %q", info.Domain)
+	}
+	// The raw Unicode bytes must not appear.
+	if strings.Contains(info.Domain, "\u6d4b\u8bd5") {
+		t.Errorf("Unicode bytes must not appear in ClientInfo.Domain, got %q", info.Domain)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildUpstreamInfos: address / port split
+// ---------------------------------------------------------------------------
+
+// TestBuildUpstreamInfos_AddressAndPortSplit verifies that plain DNS upstream
+// addresses are split into separate Address and Port fields.
+func TestBuildUpstreamInfos_AddressAndPortSplit(t *testing.T) {
+	results := []*upstream.Result{
+		{
+			Index:      0,
+			Client:     "9.9.9.9:53",
+			Protocol:   "udp",
+			DurationMS: 5,
+		},
+	}
+	infos := buildUpstreamInfos(results, 0)
+	if len(infos) != 1 {
+		t.Fatalf("expected 1 info, got %d", len(infos))
+	}
+	if infos[0].Address != "9.9.9.9" {
+		t.Errorf("expected address 9.9.9.9, got %q", infos[0].Address)
+	}
+	if infos[0].Port != 53 {
+		t.Errorf("expected port 53, got %d", infos[0].Port)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// JSON integration: port field + IDN Punycode in domain
+// ---------------------------------------------------------------------------
+
+// TestJSONEvent_UpstreamPortField verifies that the "port" field is present in
+// the upstream array of a dns_query JSON event.
+func TestJSONEvent_UpstreamPortField(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	var buf bytes.Buffer
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = false
+	c := cache.New(100, 3600, 5, 0)
+
+	client := &mockUpstreamClient{name: "9.9.9.9:53", response: makeNormalResp(query)}
+	resolver := upstream.NewResolverFromClients(
+		[]upstream.Client{client},
+		2*time.Second, 50*time.Millisecond, logger,
+	)
+	handler := NewHandler(resolver, nil, nil, c, logger, cfg)
+	handler.HandleQuery(context.Background(), query)
+
+	out := buf.String()
+	if !strings.Contains(out, `"port"`) {
+		t.Errorf("expected 'port' field in upstream JSON, got: %s", out)
+	}
+	if !strings.Contains(out, `"port":53`) {
+		t.Errorf("expected port:53 in JSON, got: %s", out)
+	}
+}
+
+// TestJSONEvent_IDN_Unicode_NormalizedInDomain verifies that a HandleQuery
+// call with a Unicode domain name (raw UTF-8 label bytes from a non-conforming
+// client) logs the Punycode/ACE form in the "domain" field.
+func TestJSONEvent_IDN_Unicode_NormalizedInDomain(t *testing.T) {
+	unicodeName := "\u6d4b\u8bd5.org." // 测试.org.
+	query := dnsutil.SetQuestion(new(dns.Msg), unicodeName, dns.TypeA)
+
+	var buf bytes.Buffer
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
+
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = false
+	c := cache.New(100, 3600, 5, 0)
+
+	resp := new(dns.Msg)
+	dnsutil.SetReply(resp, query)
+	resp.Rcode = dns.RcodeSuccess
+
+	client := &mockUpstreamClient{name: "9.9.9.9:53", response: resp}
+	resolver := upstream.NewResolverFromClients(
+		[]upstream.Client{client},
+		2*time.Second, 50*time.Millisecond, logger,
+	)
+	handler := NewHandler(resolver, nil, nil, c, logger, cfg)
+	handler.HandleQuery(context.Background(), query)
+
+	out := buf.String()
+	if strings.Contains(out, "\u6d4b\u8bd5") {
+		t.Errorf("Unicode bytes must not appear in JSON domain field, got: %s", out)
+	}
+	if !strings.Contains(out, "xn--0zwm56d.org") {
+		t.Errorf("expected Punycode xn--0zwm56d.org in JSON domain, got: %s", out)
 	}
 }

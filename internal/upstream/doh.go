@@ -228,7 +228,7 @@ func shortHTTPError(err error) error {
 	return err
 }
 
-// String returns a description of this client.
+// String returns the server URL for this DoH client.
 func (c *DoHClient) String() string {
-	return fmt.Sprintf("DoH(%s)", c.url)
+	return c.url
 }

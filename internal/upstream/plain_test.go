@@ -39,11 +39,11 @@ func TestPlainClient_String(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	s := c.String()
-	if !strings.Contains(s, "1.1.1.1:53") {
-		t.Errorf("String() should contain address, got %q", s)
+	if s != "1.1.1.1:53" {
+		t.Errorf("String() should return plain address, got %q", s)
 	}
-	if !strings.Contains(s, "UDP") {
-		t.Errorf("String() should contain UDP, got %q", s)
+	if strings.Contains(s, "UDP") {
+		t.Errorf("String() must not wrap in UDP(...), got %q", s)
 	}
 }
 

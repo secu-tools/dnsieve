@@ -344,19 +344,18 @@ func TestNewDoHClient_VerifyCertFalse(t *testing.T) {
 
 // --- String ---
 
-// TestDoHClient_String verifies the String() output contains the URL and
-// the protocol identifier.
+// TestDoHClient_String verifies the String() output is the plain server URL.
 func TestDoHClient_String(t *testing.T) {
 	c, err := NewDoHClient("https://dns.quad9.net/dns-query", false, "auto", resolveDisabled, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	s := c.String()
-	if !strings.Contains(s, "dns.quad9.net") {
-		t.Errorf("String() should contain URL, got %q", s)
+	if s != "https://dns.quad9.net/dns-query" {
+		t.Errorf("String() should return the plain URL, got %q", s)
 	}
-	if !strings.Contains(s, "DoH") {
-		t.Errorf("String() should contain DoH, got %q", s)
+	if strings.Contains(s, "DoH") {
+		t.Errorf("String() must not wrap in DoH(...), got %q", s)
 	}
 }
 

@@ -1143,7 +1143,7 @@ mode = "null"
 [logging]
 # Format and minimum level for stdout output.
 # Valid values: json, debug, info, warn, error, off
-#   json   - structured JSON output at debug level (see docs/logging.md)
+#   json   - structured JSON output at info level (see docs/logging.md)
 #   debug  - plain text, all messages
 #   info   - plain text, info and above (default)
 #   warn   - plain text, warnings and errors only

@@ -18,8 +18,9 @@ import (
 
 // DoTClient implements DNS-over-TLS (RFC 7858 / RFC 8310).
 type DoTClient struct {
-	address   string
-	tlsConfig *tls.Config
+	address     string
+	displayAddr string
+	tlsConfig   *tls.Config
 	// resolver is non-nil when TTL- or interval-based re-resolution is
 	// configured. Addr() is called before each new connection to obtain the
 	// current resolved IP, which may have been refreshed in the background.
@@ -78,7 +79,7 @@ func NewDoTClient(address string, verifyCert bool, ipFamily string, resolveMode 
 		},
 	}
 
-	client := &DoTClient{address: address, tlsConfig: tlsCfg}
+	client := &DoTClient{address: address, displayAddr: address, tlsConfig: tlsCfg}
 
 	if len(bootstrapIPs) > 0 && net.ParseIP(host) == nil {
 		if resolveMode == resolveDisabled {
@@ -161,7 +162,8 @@ func shortNetError(err error) error {
 	return err
 }
 
-// String returns a description of this client.
+// String returns the configured address for this DoT client (hostname:port as
+// specified in the configuration, not the resolved IP used for dialling).
 func (c *DoTClient) String() string {
-	return fmt.Sprintf("DoT(%s)", c.address)
+	return c.displayAddr
 }

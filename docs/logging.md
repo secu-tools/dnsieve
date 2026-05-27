@@ -59,109 +59,111 @@ a self-contained JSON object followed by a newline (`\n`).
 
 ### Top-level fields (all events)
 
-| Field       | Type   | Description                                      |
-|-------------|--------|--------------------------------------------------|
-| `timestamp` | string | RFC 3339 Nano timestamp (UTC)                    |
-| `level`     | string | `DEBUG`, `INFO`, `WARN`, `ERROR`                 |
-| `type`      | string | `general` or `dns_query`                         |
-| `module`    | string | Internal component (`server`, `upstream`, ...)     |
-| `message`   | string | Human-readable summary                           |
-| `dns`       | object | Present only for `dns_query` events (see below)  |
+> **Presence:** `always` = present in every event of this type; `optional` = omitted when false, zero, empty, or not applicable. For boolean fields, absent means `false`.
+
+| Field       | Type   | Presence | Description                                      |
+|-------------|--------|----------|--------------------------------------------------|
+| `timestamp` | string | always   | RFC 3339 Nano timestamp (UTC)                    |
+| `level`     | string | always   | `DEBUG`, `INFO`, `WARN`, `ERROR`                 |
+| `type`      | string | always   | `general` or `dns_query`                         |
+| `module`    | string | always   | Internal component (`server`, `upstream`, ...)   |
+| `message`   | string | always   | Human-readable summary                           |
+| `dns`       | object | optional | Per-query structured fields; only for `dns_query` events (see below) |
 
 ### `dns` object (`dns_query` events only)
 
 The `dns` object groups all per-query fields. It contains five sub-objects:
-`client`, `upstream`, `decision`, `cache`, and `response`.
+`request`, `upstream`, `decision`, `cache`, and `response`.
 
-`response` is always populated for `dns_query` events and records what the
-client actually received, regardless of whether the answer came from an
-upstream server, the local cache, or a block decision. The other sub-objects
-provide context for *how* that answer was produced.
+`response` is populated for all `dns_query` events **except background refresh
+events** (see below), and records what the client actually received, regardless
+of whether the answer came from an upstream server, the local cache, or a block
+decision. The other sub-objects provide context for *how* that answer was
+produced.
 
-#### `dns.client`
+#### `dns.request`
 
-| Field              | Type    | Description                                           |
-|--------------------|---------|-------------------------------------------------------|
-| `ip`               | string  | Client IP address                                     |
-| `port`             | number  | Client source port                                    |
-| `protocol`         | string  | `plain`, `doh`, `dot`                                 |
-| `domain`           | string  | Queried domain name in Unicode (UTF-8)                |
-| `domain_ace`       | string  | ACE/Punycode form - present **only** when it differs from `domain` |
-| `qtype`            | string  | DNS query type (`A`, `AAAA`, `MX`, ...)                 |
-| `qclass`           | string  | DNS query class (`IN`)                                |
-| `do_bit`           | boolean | EDNS DNSSEC OK bit set by client                      |
-| `edns`             | object  | EDNS0 details (see below)                             |
+| Field              | Type    | Presence | Description                                           |
+|--------------------|---------|----------|-------------------------------------------------------|
+| `ip`               | string  | optional | Client IP address. Absent for background refresh queries. |
+| `port`             | number  | optional | Client source port. Absent for background refresh queries. |
+| `protocol`         | string  | optional | `plain`, `doh`, `dot`. Absent for background refresh queries. |
+| `domain`           | string  | always   | Queried domain name in Punycode/ACE form as it appears in the DNS wire format (e.g. `xn--bcher-kva.example` for an internationalized label). The trailing dot is stripped. |
+| `qtype`            | string  | always   | DNS query type (`A`, `AAAA`, `MX`, ...)               |
+| `qclass`           | string  | always   | DNS query class (`IN`)                                |
+| `do_bit`           | boolean | optional | EDNS DNSSEC OK bit set by client                      |
+| `edns`             | object  | always   | EDNS0 details (see below)                             |
 
-#### `dns.client.edns`
+#### `dns.request.edns`
 
-| Field               | Type    | Description                         |
-|---------------------|---------|-------------------------------------|
-| `present`           | boolean | Client sent an OPT record           |
-| `udp_size`          | number  | Advertised EDNS UDP payload size     |
-| `padding_requested` | boolean | Client requested EDNS padding       |
+| Field               | Type    | Presence | Description                         |
+|---------------------|---------|----------|-------------------------------------|
+| `present`           | boolean | always   | Client sent an OPT record           |
+| `udp_size`          | number  | optional | Advertised EDNS UDP payload size    |
+| `padding_requested` | boolean | optional | Client requested EDNS padding       |
 
 #### `dns.upstream` (array)
 
 One element per upstream server that was queried.
 
-| Field           | Type    | Description                                          |
-|-----------------|---------|------------------------------------------------------|
-| `index`         | number  | Zero-based upstream index                            |
-| `address`       | string  | Upstream address (URL for DoH/DoT, IP:port for plain)|
-| `protocol`      | string  | `plain`, `doh`, `dot`                                |
-| `duration_ms`   | number  | Query round-trip time in milliseconds                |
-| `slow`          | boolean | `true` when `duration_ms` exceeds `slow_upstream_ms` |
-| `rcode`         | string  | DNS response code (`NOERROR`, `NXDOMAIN`, ...)       |
-| `blocked`       | boolean | Upstream returned a blocked/sink-hole response       |
-| `servfail`      | boolean | Upstream returned SERVFAIL or timed out              |
-| `dnssec`        | boolean | Response carries DNSSEC data (RRSIG records or AD=1) |
-| `resolved_ips`  | array   | Resolved IP addresses in the answer section          |
-| `answer_count`  | number  | Number of records in the answer section              |
-| `ede_code`      | number  | Extended DNS Error info code (RFC 8914) -- omitted when absent. Common codes: 0=Other, 2=SERVFAIL error, 15=Blocked, 22=No Reachable Authority |
-| `ede_text`      | string  | Optional human-readable extra text accompanying the EDE code (omitted when empty) |
-| `nsid`          | string  | Name Server Identifier (RFC 5001) -- UTF-8 when decodable, otherwise lowercase hex. Omitted when absent |
-| `error`         | string  | Error message when the upstream query failed         |
+| Field           | Type    | Presence | Description                                          |
+|-----------------|---------|----------|------------------------------------------------------|
+| `index`         | number  | always   | Zero-based upstream index                            |
+| `address`       | string  | always   | Upstream server address without port. For DoH, the full URL (explicit port removed if present). For DoT and plain DNS, the hostname or IP. |
+| `port`          | number  | optional | Upstream server port number. Common values: 53 (plain DNS), 853 (DoT), 443 (DoH). |
+| `protocol`      | string  | optional | `plain`, `doh`, `dot`                                |
+| `duration_ms`   | number  | always   | Query round-trip time in milliseconds                |
+| `slow`          | boolean | optional | `true` when `duration_ms` exceeds `slow_upstream_ms` |
+| `rcode`         | string  | optional | DNS response code (`NOERROR`, `NXDOMAIN`, ...). Absent when the upstream returned an error. |
+| `blocked`       | boolean | optional | Upstream returned a blocked/sink-hole response       |
+| `servfail`      | boolean | optional | Upstream returned SERVFAIL or timed out              |
+| `dnssec`        | boolean | optional | Response carries DNSSEC data (RRSIG records or AD=1) |
+| `resolved_ips`  | array   | optional | Resolved IP addresses in the answer section          |
+| `answer_count`  | number  | optional | Number of records in the answer section              |
+| `ede_code`      | number  | optional | Extended DNS Error info code (RFC 8914). Common codes: 0=Other, 2=SERVFAIL error, 15=Blocked, 22=No Reachable Authority |
+| `ede_text`      | string  | optional | Human-readable extra text accompanying the EDE code  |
+| `nsid`          | string  | optional | Name Server Identifier (RFC 5001) -- UTF-8 when decodable, otherwise lowercase hex |
+| `error`         | string  | optional | Error message when the upstream query failed         |
 
 #### `dns.decision`
 
-| Field           | Type    | Description                                           |
-|-----------------|---------|-------------------------------------------------------|
-| `blocked`       | boolean | Query was blocked                                     |
-| `blocked_by`    | string  | Upstream or list that caused the block                |
-| `block_source`  | string  | `upstream`, `local-blacklist`                         |
-| `cacheable`     | boolean | Response was eligible for caching                     |
-| `all_responded` | boolean | All configured upstreams returned a response          |
-| `rcode`         | string  | Final DNS response code returned to the client        |
+| Field           | Type    | Presence | Description                                           |
+|-----------------|---------|----------|-------------------------------------------------------|
+| `blocked`       | boolean | always   | Query was blocked                                     |
+| `block_source`  | string  | optional | `upstream`, `blacklist`, or `whitelist`. Only when `blocked` is `true`. |
+| `cacheable`     | boolean | always   | Response was eligible for caching                     |
+| `all_responded` | boolean | optional | All configured upstreams returned a response          |
+| `rcode`         | string  | always   | Final DNS response code returned to the client        |
 
 #### `dns.cache`
 
-| Field                          | Type    | Description                                      |
-|--------------------------------|---------|--------------------------------------------------|
-| `hit`                          | boolean | Response served from cache                       |
-| `ttl_sec`                      | number  | Original TTL of the cached entry (seconds)       |
-| `ttl_remaining_sec`            | number  | Remaining TTL at the time of this query          |
-| `ttl_remaining_pct`            | number  | `ttl_remaining_sec / ttl_sec * 100`              |
-| `blocked`                      | boolean | Cached entry is a blocked response               |
-| `whitelisted`                  | boolean | Cached entry was whitelisted                     |
-| `background_refresh_triggered` | boolean | A background re-query was queued (stale-while-revalidate) |
-| `dnssec`                       | boolean | Cached entry includes DNSSEC records             |
+| Field                          | Type    | Presence | Description                                      |
+|--------------------------------|---------|----------|--------------------------------------------------|
+| `ttl_sec`                      | number  | always   | Original TTL of the cached entry (seconds)       |
+| `ttl_remaining_sec`            | number  | always   | Remaining TTL at the time of this query          |
+| `ttl_remaining_pct`            | number  | always   | `ttl_remaining_sec / ttl_sec * 100`, rounded to 2 decimal places |
+| `blocked`                      | boolean | optional | Cached entry is a blocked response               |
+| `whitelisted`                  | boolean | optional | Cached entry was whitelisted                     |
+| `background_refresh_triggered` | boolean | optional | A background re-query was queued (stale-while-revalidate) |
+| `dnssec`                       | boolean | optional | Cached entry includes DNSSEC records             |
 
 #### `dns.response`
 
 The authoritative record of what was returned to the client. Present for all
-`dns_query` events regardless of how the answer was produced.
+`dns_query` events except background refresh queries, regardless of whether the
+answer came from upstream, cache, or a local block decision.
 
-| Field             | Type    | Description                                                         |
-|-------------------|---------|---------------------------------------------------------------------|
-| `rcode`           | string  | DNS response code sent to the client (`NOERROR`, `NXDOMAIN`, ...)  |
-| `answer_count`    | number  | Number of records in the answer section (omitted when 0)            |
-| `ips`             | array   | IP addresses from A/AAAA records in the answer -- present only for address queries with at least one resolved address |
-| `truncated`       | boolean | `true` when the TC bit was set -- client should retry over TCP (omitted when false) |
-| `ad`              | boolean | Authentic Data bit -- DNSSEC validation succeeded (RFC 4035); omitted when false |
-| `rrsig`           | boolean | Response contains at least one RRSIG record in Answer or Authority; omitted when false |
-| `ede_code`        | number  | Extended DNS Error info code (RFC 8914) in the response to the client -- omitted when absent |
-| `ede_text`        | string  | Optional extra text accompanying the EDE code (omitted when empty)  |
-| `authority_count` | number  | Number of records in the Authority section (omitted when 0) -- non-zero for NXDOMAIN responses that include a SOA record |
+| Field             | Type    | Presence | Description                                                         |
+|-------------------|---------|----------|---------------------------------------------------------------------|
+| `rcode`           | string  | always   | DNS response code sent to the client (`NOERROR`, `NXDOMAIN`, ...)  |
+| `answer_count`    | number  | optional | Number of records in the answer section                             |
+| `ips`             | array   | optional | IP addresses from A/AAAA records in the answer -- present only for address queries with at least one resolved address |
+| `truncated`       | boolean | optional | `true` when the TC bit was set -- client should retry over TCP      |
+| `ad`              | boolean | optional | Authentic Data bit -- DNSSEC validation succeeded (RFC 4035)        |
+| `rrsig`           | boolean | optional | Response contains at least one RRSIG record in Answer or Authority  |
+| `ede_code`        | number  | optional | Extended DNS Error info code (RFC 8914) in the response to the client |
+| `ede_text`        | string  | optional | Extra text accompanying the EDE code                                |
+| `authority_count` | number  | optional | Number of records in the Authority section. Non-zero for NXDOMAIN responses that include a SOA record |
 
 **Why `response` alongside `upstream[].resolved_ips`?**
 
@@ -204,11 +206,11 @@ In text mode, the banner is printed to stderr before any log output.
   "module": "server",
   "message": "example.com. A -> rcode=NOERROR",
   "dns": {
-    "client": {
+    "request": {
       "ip": "192.168.1.10",
       "port": 54321,
       "protocol": "plain",
-      "domain": "example.com.",
+      "domain": "example.com",
       "qtype": "A",
       "qclass": "IN",
       "do_bit": false,
@@ -222,14 +224,13 @@ In text mode, the banner is printed to stderr before any log output.
       {
         "index": 0,
         "address": "https://dns.quad9.net/dns-query",
+        "port": 443,
         "protocol": "doh",
         "duration_ms": 45,
-        "slow": false,
         "rcode": "NOERROR",
         "blocked": false,
-        "servfail": false,
         "dnssec": false,
-        "resolved_ips": ["1.2.3.4"],
+        "resolved_ips": ["9.9.9.9"],
         "answer_count": 1
       }
     ],
@@ -242,7 +243,7 @@ In text mode, the banner is printed to stderr before any log output.
     "response": {
       "rcode": "NOERROR",
       "answer_count": 1,
-      "ips": ["1.2.3.4"]
+      "ips": ["9.9.9.9"]
     }
   }
 }
@@ -258,34 +259,27 @@ In text mode, the banner is printed to stderr before any log output.
   "module": "server",
   "message": "example.com. A -> cache hit",
   "dns": {
-    "client": {
+    "request": {
       "ip": "192.168.1.10",
       "port": 54322,
       "protocol": "plain",
-      "domain": "example.com.",
+      "domain": "example.com",
       "qtype": "A",
       "qclass": "IN",
-      "do_bit": false,
       "edns": {
         "present": true,
-        "udp_size": 4096,
-        "padding_requested": false
+        "udp_size": 4096
       }
     },
     "cache": {
-      "hit": true,
       "ttl_sec": 300,
       "ttl_remaining_sec": 247,
-      "ttl_remaining_pct": 82.33,
-      "blocked": false,
-      "whitelisted": false,
-      "background_refresh_triggered": false,
-      "dnssec": false
+      "ttl_remaining_pct": 82.33
     },
     "response": {
       "rcode": "NOERROR",
       "answer_count": 1,
-      "ips": ["1.2.3.4"]
+      "ips": ["9.9.9.9"]
     }
   }
 }
@@ -302,16 +296,15 @@ the response sent to the client.
   "level": "INFO",
   "type": "dns_query",
   "module": "server",
-  "message": "evil.example.com. A -> blocked",
+  "message": "evil.example.com. A -> blocked by dns.quad9.net:53",
   "dns": {
-    "client": {
+    "request": {
       "ip": "192.168.1.10",
       "port": 54323,
       "protocol": "plain",
-      "domain": "evil.example.com.",
+      "domain": "evil.example.com",
       "qtype": "A",
       "qclass": "IN",
-      "do_bit": false,
       "edns": {
         "present": false
       }
@@ -320,19 +313,18 @@ the response sent to the client.
       {
         "index": 0,
         "address": "https://dns.quad9.net/dns-query",
+        "port": 443,
         "protocol": "doh",
         "duration_ms": 38,
         "rcode": "NOERROR",
         "blocked": true,
-        "dnssec": false,
         "answer_count": 1,
         "ede_code": 15,
-        "ede_text": "Blocked"
+        "ede_text": "Blocked (dns.quad9.net)"
       }
     ],
     "decision": {
       "blocked": true,
-      "blocked_by": "https://dns.quad9.net/dns-query",
       "block_source": "upstream",
       "cacheable": true,
       "all_responded": true,
@@ -341,7 +333,7 @@ the response sent to the client.
     "response": {
       "rcode": "NOERROR",
       "ede_code": 15,
-      "ede_text": "Blocked (dns.quad9.net)"
+      "ede_text": "Blocked (https://dns.quad9.net/dns-query)"
     }
   }
 }
@@ -355,30 +347,31 @@ the response sent to the client.
   "level": "INFO",
   "type": "dns_query",
   "module": "server",
-  "message": "tracker.example.com. A -> local blacklist",
+  "message": "tracker.example.com. A -> blocked by blacklist",
   "dns": {
-    "client": {
+    "request": {
       "ip": "192.168.1.10",
       "port": 54324,
       "protocol": "plain",
-      "domain": "tracker.example.com.",
+      "domain": "tracker.example.com",
       "qtype": "A",
       "qclass": "IN",
-      "do_bit": false,
       "edns": {
         "present": false
       }
     },
     "decision": {
       "blocked": true,
-      "blocked_by": "local-blacklist",
-      "block_source": "local-blacklist",
+      "block_source": "blacklist",
       "cacheable": false,
-      "all_responded": false,
       "rcode": "NOERROR"
     },
     "response": {
-      "rcode": "NOERROR"
+      "rcode": "NOERROR",
+      "answer_count": 1,
+      "ips": ["0.0.0.0"],
+      "ede_code": 15,
+      "ede_text": "Blocked (local-blacklist)"
     }
   }
 }
@@ -394,14 +387,13 @@ the response sent to the client.
   "module": "server",
   "message": "example.com. A -> slow upstream",
   "dns": {
-    "client": {
+    "request": {
       "ip": "192.168.1.10",
       "port": 54325,
       "protocol": "plain",
-      "domain": "example.com.",
+      "domain": "example.com",
       "qtype": "A",
       "qclass": "IN",
-      "do_bit": false,
       "edns": {
         "present": false
       }
@@ -410,14 +402,12 @@ the response sent to the client.
       {
         "index": 0,
         "address": "https://dns.quad9.net/dns-query",
+        "port": 443,
         "protocol": "doh",
         "duration_ms": 1807,
         "slow": true,
         "rcode": "NOERROR",
-        "blocked": false,
-        "servfail": false,
-        "dnssec": false,
-        "resolved_ips": ["1.2.3.4"],
+        "resolved_ips": ["9.9.9.9"],
         "answer_count": 1
       }
     ],
@@ -430,7 +420,7 @@ the response sent to the client.
     "response": {
       "rcode": "NOERROR",
       "answer_count": 1,
-      "ips": ["1.2.3.4"]
+      "ips": ["9.9.9.9"]
     }
   }
 }
@@ -446,14 +436,13 @@ the response sent to the client.
   "module": "server",
   "message": "fail.example.com. A -> SERVFAIL",
   "dns": {
-    "client": {
+    "request": {
       "ip": "192.168.1.10",
       "port": 54326,
       "protocol": "plain",
-      "domain": "fail.example.com.",
+      "domain": "fail.example.com",
       "qtype": "A",
       "qclass": "IN",
-      "do_bit": false,
       "edns": {
         "present": false
       }
@@ -462,13 +451,11 @@ the response sent to the client.
       {
         "index": 0,
         "address": "https://dns.quad9.net/dns-query",
+        "port": 443,
         "protocol": "doh",
         "duration_ms": 5001,
         "slow": true,
-        "rcode": "SERVFAIL",
-        "blocked": false,
         "servfail": true,
-        "dnssec": false,
         "error": "context deadline exceeded"
       }
     ],
@@ -501,11 +488,11 @@ Identifier option (RFC 5001).
   "module": "server",
   "message": "secure.example.com. A -> rcode=NOERROR",
   "dns": {
-    "client": {
+    "request": {
       "ip": "192.168.1.10",
       "port": 54328,
       "protocol": "plain",
-      "domain": "secure.example.com.",
+      "domain": "secure.example.com",
       "qtype": "A",
       "qclass": "IN",
       "do_bit": true,
@@ -518,6 +505,7 @@ Identifier option (RFC 5001).
       {
         "index": 0,
         "address": "https://dns.quad9.net/dns-query",
+        "port": 443,
         "protocol": "doh",
         "duration_ms": 52,
         "rcode": "NOERROR",
@@ -546,9 +534,10 @@ Identifier option (RFC 5001).
 
 ### Internationalized domain name (IDN)
 
-When the queried domain contains non-ASCII characters, `domain` contains the
-Unicode form and `domain_ace` contains the Punycode form. For ASCII-only
-domains `domain_ace` is omitted.
+DNSieve always logs the Punycode/ACE form of the domain name as it appears
+in the DNS wire format. For example, an IDN like
+`xn--fiq228c.example` is logged as-is. There is no separate `domain_ace`
+field.
 
 ```json
 {
@@ -558,15 +547,13 @@ domains `domain_ace` is omitted.
   "module": "server",
   "message": "xn--fiq228c.example. A -> rcode=NOERROR",
   "dns": {
-    "client": {
+    "request": {
       "ip": "192.168.1.10",
       "port": 54327,
       "protocol": "plain",
-      "domain": "Chinese-chars.example.",
-      "domain_ace": "xn--fiq228c.example.",
+      "domain": "xn--fiq228c.example",
       "qtype": "A",
       "qclass": "IN",
-      "do_bit": false,
       "edns": {
         "present": false
       }
@@ -575,6 +562,104 @@ domains `domain_ace` is omitted.
       "rcode": "NOERROR",
       "answer_count": 1,
       "ips": ["1.2.3.4"]
+    }
+  }
+}
+```
+
+### Background refresh upstream query
+
+When `renew_percent > 0`, a near-expiry cache entry is served to the client
+and a background goroutine re-queries upstreams to refresh the cache. When
+the refresh completes, a `dns_query` event is emitted with the upstream
+results and the caching decision.
+
+The `response` field is **absent** -- the client already received their answer
+from the cache. The background query only updates the cache for future
+requests. The `message` field includes `background-refresh` to distinguish
+these events from normal client-driven queries.
+
+The `client` sub-object contains only the domain name and query type; it has
+no `ip`, `port`, or `protocol` because there is no associated network
+connection.
+
+Example -- successful refresh:
+
+```json
+{
+  "timestamp": "2025-07-01T14:30:23.500000001Z",
+  "level": "INFO",
+  "type": "dns_query",
+  "module": "server",
+  "message": "example.com. A -> background-refresh rcode=NOERROR",
+  "dns": {
+    "request": {
+      "domain": "example.com",
+      "qtype": "A",
+      "qclass": "IN",
+      "edns": {
+        "present": false
+      }
+    },
+    "upstream": [
+      {
+        "index": 0,
+        "address": "https://dns.quad9.net/dns-query",
+        "port": 443,
+        "protocol": "doh",
+        "duration_ms": 31,
+        "rcode": "NOERROR",
+        "resolved_ips": ["9.9.9.9"],
+        "answer_count": 1
+      }
+    ],
+    "decision": {
+      "blocked": false,
+      "cacheable": true,
+      "all_responded": true,
+      "rcode": "NOERROR"
+    }
+  }
+}
+```
+
+Example -- domain now blocked after refresh:
+
+```json
+{
+  "timestamp": "2025-07-01T14:30:24.000000001Z",
+  "level": "INFO",
+  "type": "dns_query",
+  "module": "server",
+  "message": "evil.example.com. A -> background-refresh blocked by https://dns.quad9.net/dns-query",
+  "dns": {
+    "request": {
+      "domain": "evil.example.com",
+      "qtype": "A",
+      "qclass": "IN",
+      "edns": {
+        "present": false
+      }
+    },
+    "upstream": [
+      {
+        "index": 0,
+        "address": "https://dns.quad9.net/dns-query",
+        "port": 443,
+        "protocol": "doh",
+        "duration_ms": 29,
+        "rcode": "NOERROR",
+        "blocked": true,
+        "ede_code": 15,
+        "ede_text": "Blocked (dns.quad9.net)"
+      }
+    ],
+    "decision": {
+      "blocked": true,
+      "block_source": "upstream",
+      "cacheable": true,
+      "all_responded": true,
+      "rcode": "NOERROR"
     }
   }
 }
