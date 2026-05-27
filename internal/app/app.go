@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 
@@ -168,9 +169,6 @@ func Run() {
 		os.Exit(0)
 	}
 
-	// Print banner
-	fmt.Fprintf(os.Stderr, "%s\n\n", versionString())
-
 	// Handle service install/uninstall (independent of config)
 	if *installSvc || *uninstallSvc {
 		handleService(*installSvc, *cfgFile, *logDir)
@@ -217,7 +215,18 @@ func Run() {
 	logr := setupLogging(cfg)
 	defer logr.Close()
 
-	logr.Infof("Config loaded from: %s", cfgPath)
+	// Emit startup banner. In JSON mode, emit as structured log events so that
+	// JSON consumers receive only valid JSON on stdout. In text mode, print to
+	// stderr before any other log output.
+	if logr.IsStdoutJSONEnabled() {
+		logr.Infof("DNSieve - DNS Filtering Proxy - %s (%s)", resolveVersion(), versionTag())
+		logr.Infof("Copyright (c) 2020-2026 Jack L. (Cpt-JackL) (https://jack-l.com)")
+		logr.Infof("https://github.com/secu-tools/dnsieve")
+	} else {
+		fmt.Fprintf(os.Stderr, "%s\n\n", versionString())
+	}
+
+	logr.Infof("Config loaded from: %s", filepath.ToSlash(cfgPath))
 	for _, w := range warnings {
 		logr.Warnf("%s", w)
 	}
@@ -232,8 +241,7 @@ func Run() {
 
 	// Start server
 	if err := server.Run(cfg, logr); err != nil {
-		logr.Errorf("Server error: %v", err)
-		os.Exit(1)
+		logr.Fatalf("Server error: %v", err)
 	}
 }
 
@@ -263,9 +271,6 @@ func loadAndValidateConfig(cfgFile string) (*config.Config, string, []string) {
 	}
 
 	warnings, errors := cfg.Validate()
-	for _, w := range warnings {
-		fmt.Fprintf(os.Stderr, "WARN  | %s\n", w)
-	}
 	if len(errors) > 0 {
 		for _, e := range errors {
 			fmt.Fprintf(os.Stderr, "ERROR | %s\n", e)
@@ -291,7 +296,7 @@ func setupLogging(cfg *config.Config) *logging.Logger {
 		logr = logging.NewStdoutOnly(logCfg, "server")
 	}
 	if logr.FilePath() != "" {
-		logr.Infof("Logging to: %s", logr.FilePath())
+		logr.Infof("Logging to: %s", filepath.ToSlash(logr.FilePath()))
 	}
 	return logr
 }
@@ -308,7 +313,9 @@ func logStartupInfo(cfg *config.Config, logr *logging.Logger) {
 	if cfg.Downstream.Plain.Enabled {
 		logr.Infof("Downstream plain DNS: %v port %d (UDP+TCP)", cfg.Downstream.Plain.ListenAddresses, cfg.Downstream.Plain.Port)
 		if cfg.Downstream.Plain.Port == 5353 {
-			logr.Warnf("Port 5353 is non-standard, use port 53 for production (requires elevated privileges)")
+			logr.Warnf("Port 5353 is reserved for mDNS (RFC 6762) and may be in use by another service; this will cause a startup failure if already bound")
+		} else if cfg.Downstream.Plain.Port != 53 {
+			logr.Warnf("Port %d is non-standard, use port 53 for production (requires elevated privileges)", cfg.Downstream.Plain.Port)
 		}
 	}
 	if cfg.Downstream.DoT.Enabled {

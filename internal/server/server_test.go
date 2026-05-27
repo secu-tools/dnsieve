@@ -322,29 +322,37 @@ func TestHandleQuery_ResponseIDMatchesQuery(t *testing.T) {
 	}
 }
 
+// TestHandleQuery_BlockedLogsInfo verifies that a blocked upstream query
+// produces a dns_query JSON event with the domain name and blocked status.
+// Per-query details are JSON-only; text mode does not emit them.
 func TestHandleQuery_BlockedLogsInfo(t *testing.T) {
 	query := makeQuery("blocked.example.com", dns.TypeA)
 
 	var buf bytes.Buffer
-	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "info", Synchronous: true}, "test")
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
 
 	handler := newTestHandlerWithLogger(t, []*dns.Msg{makeBlockedResp(query)}, logger)
 	handler.HandleQuery(context.Background(), query)
 
 	output := buf.String()
-	if !strings.Contains(output, "blocked.example.com.") {
-		t.Errorf("expected domain name in blocked log, got: %s", output)
+	if !strings.Contains(output, "blocked.example.com") {
+		t.Errorf("expected domain name in JSON event, got: %s", output)
 	}
-	if !strings.Contains(output, "is blocked by") {
-		t.Errorf("expected 'is blocked by' in log, got: %s", output)
+	if !strings.Contains(output, "blocked") {
+		t.Errorf("expected 'blocked' in JSON event, got: %s", output)
+	}
+	if !strings.Contains(output, "dns_query") {
+		t.Errorf("expected dns_query type in JSON event, got: %s", output)
 	}
 }
 
+// TestHandleQuery_BlockedFromCacheLogsInfo verifies that a blocked-from-cache
+// response produces a dns_query JSON event. Text mode does not emit per-query data.
 func TestHandleQuery_BlockedFromCacheLogsInfo(t *testing.T) {
 	query := makeQuery("cached-block.example.com", dns.TypeA)
 
 	var buf bytes.Buffer
-	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "info", Synchronous: true}, "test")
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
 
 	handler := newTestHandlerWithLogger(t, []*dns.Msg{makeBlockedResp(query)}, logger)
 
@@ -359,8 +367,14 @@ func TestHandleQuery_BlockedFromCacheLogsInfo(t *testing.T) {
 	handler.HandleQuery(context.Background(), q2)
 
 	output := buf.String()
-	if !strings.Contains(output, "is blocked (from cache") {
-		t.Errorf("expected 'is blocked (from cache' in log, got: %s", output)
+	if !strings.Contains(output, "cached-block.example.com") {
+		t.Errorf("expected domain in JSON event, got: %s", output)
+	}
+	if !strings.Contains(output, "blocked") {
+		t.Errorf("expected 'blocked' in JSON event, got: %s", output)
+	}
+	if !strings.Contains(output, "cache") {
+		t.Errorf("expected 'cache' in JSON event, got: %s", output)
 	}
 }
 
@@ -1999,12 +2013,13 @@ func TestHandleQuery_LocalBlacklistBlocks(t *testing.T) {
 }
 
 // TestHandleQuery_LocalBlacklistLogsInfo verifies that a blacklist block
-// produces an info-level log entry with the domain name.
+// produces a dns_query JSON event with the domain name. Text mode does not
+// emit per-query data.
 func TestHandleQuery_LocalBlacklistLogsInfo(t *testing.T) {
 	query := makeQuery("logged.blacklisted.example.com", dns.TypeA)
 
 	var buf bytes.Buffer
-	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "info", Synchronous: true}, "test")
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
 
 	cfg := config.DefaultConfig()
 	cfg.Cache.Enabled = false
@@ -2016,11 +2031,14 @@ func TestHandleQuery_LocalBlacklistLogsInfo(t *testing.T) {
 	handler.HandleQuery(context.Background(), query)
 
 	out := buf.String()
-	if !strings.Contains(out, "logged.blacklisted.example.com.") {
-		t.Errorf("expected domain in blacklist log, got: %s", out)
+	if !strings.Contains(out, "logged.blacklisted.example.com") {
+		t.Errorf("expected domain in blacklist JSON event, got: %s", out)
 	}
 	if !strings.Contains(out, "local blacklist") {
-		t.Errorf("expected 'local blacklist' in log, got: %s", out)
+		t.Errorf("expected 'local blacklist' in JSON event, got: %s", out)
+	}
+	if !strings.Contains(out, "dns_query") {
+		t.Errorf("expected dns_query event type in JSON output, got: %s", out)
 	}
 }
 

@@ -106,7 +106,7 @@ func startDOHListenerGoroutine(srv *http.Server, addr, tcpNet string, cfg *confi
 	if cfg.Downstream.DoH.UsePlaintextHTTP {
 		ln, err := net.Listen(tcpNet, addr)
 		if err != nil {
-			return fmt.Errorf("listen %s: %w", addr, err)
+			return fmt.Errorf("bind %s: %w", addr, cleanBindErr(err))
 		}
 		go func() {
 			logger.Infof("DoH (HTTP plaintext) listening on %s", addr)
@@ -130,7 +130,7 @@ func startDOHListenerGoroutine(srv *http.Server, addr, tcpNet string, cfg *confi
 
 	ln, err := net.Listen(tcpNet, addr)
 	if err != nil {
-		return fmt.Errorf("listen %s: %w", addr, err)
+		return fmt.Errorf("bind %s: %w", addr, cleanBindErr(err))
 	}
 	go func() {
 		logger.Infof("DoH (HTTPS/HTTP2) listening on %s", addr)

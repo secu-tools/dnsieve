@@ -71,7 +71,7 @@ func serveDoTAddresses(ctx context.Context, handler *Handler, addrs []string, po
 		errCh := make(chan error, 1)
 		go func() {
 			if err := srv.ListenAndServe(); err != nil {
-				errCh <- fmt.Errorf("bind TCP %s: %w", addr, err)
+				errCh <- fmt.Errorf("bind TCP %s: %w", addr, cleanBindErr(err))
 			}
 		}()
 

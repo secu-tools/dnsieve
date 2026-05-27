@@ -4,8 +4,10 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"os"
 	"time"
 
 	"codeberg.org/miekg/dns"
@@ -103,6 +105,25 @@ func networkForIP(ip string) (tcpNet, udpNet string) {
 	return "tcp4", "udp4"
 }
 
+// cleanBindErr strips the redundant "listen proto addr: " prefix that
+// net.OpError adds when a server fails to bind a socket. The caller already
+// reports the protocol and address, so the net.OpError wrapper is pure
+// duplication. Returns the underlying syscall error when available.
+func cleanBindErr(err error) error {
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) {
+		return err
+	}
+	var sErr *os.SyscallError
+	if errors.As(opErr.Err, &sErr) {
+		return sErr.Err
+	}
+	if opErr.Err != nil {
+		return opErr.Err
+	}
+	return err
+}
+
 // ServePlain starts UDP and TCP DNS listeners on every configured address.
 // All addresses share the same port. It blocks until the context is cancelled.
 // Returns an error immediately if any address/port cannot be bound.
@@ -133,6 +154,24 @@ func servePlainAddresses(ctx context.Context, handler *Handler, addrs []string, 
 	pairs := make([]serverPair, 0, len(addrs))
 	portStr := fmt.Sprintf("%d", port)
 
+	// shutdownStarted shuts down all successfully-bound pairs and the two
+	// servers for the current address (which may not yet be in pairs).
+	// Called on early bind error to prevent goroutine leaks.
+	shutdownStarted := func(udpSrv, tcpSrv *dns.Server) {
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), time.Second)
+		defer shutCancel()
+		for _, p := range pairs {
+			p.udp.Shutdown(shutCtx)
+			p.tcp.Shutdown(shutCtx)
+		}
+		if udpSrv != nil {
+			udpSrv.Shutdown(shutCtx)
+		}
+		if tcpSrv != nil {
+			tcpSrv.Shutdown(shutCtx)
+		}
+	}
+
 	// Phase 1: bind all sockets synchronously so that any bind failure is
 	// returned before any goroutines are started.
 	for _, ip := range addrs {
@@ -159,12 +198,12 @@ func servePlainAddresses(ctx context.Context, handler *Handler, addrs []string, 
 
 		go func() {
 			if err := udpSrv.ListenAndServe(); err != nil {
-				errCh <- fmt.Errorf("bind UDP %s: %w", addr, err)
+				errCh <- fmt.Errorf("bind UDP %s: %w", addr, cleanBindErr(err))
 			}
 		}()
 		go func() {
 			if err := tcpSrv.ListenAndServe(); err != nil {
-				errCh <- fmt.Errorf("bind TCP %s: %w", addr, err)
+				errCh <- fmt.Errorf("bind TCP %s: %w", addr, cleanBindErr(err))
 			}
 		}()
 
@@ -179,6 +218,9 @@ func servePlainAddresses(ctx context.Context, handler *Handler, addrs []string, 
 				tcpRdy = nil
 				logger.Infof("Plain DNS (TCP) listening on %s", addr)
 			case err := <-errCh:
+				// Shut down any already-started servers in the background so the
+				// error is returned immediately and callers are not blocked.
+				go shutdownStarted(udpSrv, tcpSrv)
 				return err
 			}
 		}

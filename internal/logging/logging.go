@@ -99,10 +99,11 @@ func DefaultConfig() Config {
 // Returns isJSON, the minimum Level for that output, and whether it is enabled.
 // Valid inputs (case-insensitive): "json", "debug", "info", "warn", "error", "off".
 // An empty or unknown string defaults to info level, non-JSON, enabled.
+// "json" enables structured JSON output at INFO level (use "debug" for DEBUG+JSON).
 func parseOutputMode(mode string) (isJSON bool, minLvl Level, enabled bool) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "json":
-		return true, LevelDebug, true
+		return true, LevelInfo, true
 	case "debug":
 		return false, LevelDebug, true
 	case "info", "":
@@ -460,6 +461,7 @@ type logEntry struct {
 	msg      string        // raw message; used for text line formatting and general JSON events
 	event    *Event        // non-nil for structured dns_query events
 	textOnly bool          // when true, the entry is never written to JSON outputs
+	jsonOnly bool          // when true, the entry is never written to text outputs (dns_query events)
 	done     chan struct{} // non-nil: Flush sentinel; worker closes it when reached
 }
 
@@ -480,7 +482,9 @@ func (l *Logger) startWorker() {
 				continue
 			}
 			l.mu.Lock()
-			l.writeText(entry.level, l.formatLine(entry.level.String(), entry.msg))
+			if !entry.jsonOnly {
+				l.writeText(entry.level, l.formatLine(entry.level.String(), entry.msg))
+			}
 			if !entry.textOnly && (l.stdoutJSON || l.fileJSON) {
 				ev := entry.event
 				if ev == nil {
@@ -500,7 +504,9 @@ func (l *Logger) startWorker() {
 func (l *Logger) enqueue(entry logEntry) {
 	if l.config.Synchronous {
 		l.mu.Lock()
-		l.writeText(entry.level, l.formatLine(entry.level.String(), entry.msg))
+		if !entry.jsonOnly {
+			l.writeText(entry.level, l.formatLine(entry.level.String(), entry.msg))
+		}
 		if !entry.textOnly && (l.stdoutJSON || l.fileJSON) {
 			ev := entry.event
 			if ev == nil {
@@ -550,6 +556,13 @@ func (l *Logger) IsJSONEnabled() bool {
 	return (l.stdoutWriter != nil && l.stdoutJSON) || (l.fileWriter != nil && l.fileJSON)
 }
 
+// IsStdoutJSONEnabled reports whether the stdout output is configured as JSON.
+// Callers use this to decide whether to suppress plain-text banner output and
+// emit structured JSON events instead, ensuring stdout is pure JSON.
+func (l *Logger) IsStdoutJSONEnabled() bool {
+	return l.stdoutWriter != nil && l.stdoutJSON
+}
+
 // IsTextEnabled reports whether any text-format (non-JSON) output is active.
 // Callers may use this to decide whether to emit verbose messages that are
 // already captured in structured JSON DNS events.
@@ -557,13 +570,20 @@ func (l *Logger) IsTextEnabled() bool {
 	return (l.stdoutWriter != nil && !l.stdoutJSON) || (l.fileWriter != nil && !l.fileJSON)
 }
 
-// LogEvent enqueues a structured event for async writing. JSON outputs
-// receive the full event; text outputs receive a formatted summary line.
+// LogEvent enqueues a structured event for async writing.
+// For TypeDNSQuery events: only written to JSON outputs (never text).
+// If JSON is not enabled and the event is a dns_query type, it is dropped.
+// For all other event types: written to both text and JSON outputs.
 func (l *Logger) LogEvent(level Level, event *Event) {
 	if l.minLevel > level {
 		return
 	}
-	l.enqueue(logEntry{level: level, msg: event.Message, event: event})
+	jsonOnly := event.Type == TypeDNSQuery
+	if jsonOnly && !l.IsJSONEnabled() {
+		// No JSON output configured; dns_query events are JSON-only.
+		return
+	}
+	l.enqueue(logEntry{level: level, msg: event.Message, event: event, jsonOnly: jsonOnly})
 }
 
 // Debugf logs a DEBUG-level formatted message.

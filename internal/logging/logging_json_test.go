@@ -71,8 +71,8 @@ func TestParseOutputMode(t *testing.T) {
 		wantEnabled bool
 		wantLevel   Level
 	}{
-		{"json", true, true, LevelDebug},
-		{"JSON", true, true, LevelDebug},
+		{"json", true, true, LevelInfo},
+		{"JSON", true, true, LevelInfo},
 		{"debug", false, true, LevelDebug},
 		{"info", false, true, LevelInfo},
 		{"", false, true, LevelInfo},
@@ -821,14 +821,14 @@ func TestJSONLogger_EDNSDetails(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// JSON mode is effectively debug level
+// JSON mode uses INFO as minimum level
 // ---------------------------------------------------------------------------
 
-func TestJSONLogger_JSONModeIsDebugLevel(t *testing.T) {
+func TestJSONLogger_JSONModeIsInfoLevel(t *testing.T) {
 	var buf bytes.Buffer
 	l := NewWriterLogger(&buf, Config{StdoutMode: "json"}, "t")
-	if l.stdoutMin != LevelDebug {
-		t.Errorf("json mode must use LevelDebug min, got %v", l.stdoutMin)
+	if l.stdoutMin != LevelInfo {
+		t.Errorf("json mode must use LevelInfo min, got %v", l.stdoutMin)
 	}
 }
 
@@ -839,8 +839,8 @@ func TestJSONLogger_JSONModeIsDebugLevel(t *testing.T) {
 func TestLogger_SetLevelUpdatesMinLevel(t *testing.T) {
 	var buf bytes.Buffer
 	l := jsonLogger(&buf)
-	if l.minLevel != LevelDebug {
-		t.Errorf("expected minLevel=DEBUG after json construction, got %v", l.minLevel)
+	if l.minLevel != LevelInfo {
+		t.Errorf("expected minLevel=INFO after json construction, got %v", l.minLevel)
 	}
 
 	l.SetLevel(LevelError)
@@ -1134,5 +1134,88 @@ func TestJSONLogger_ConcurrentWrites(t *testing.T) {
 		if line["type"] != TypeDNSQuery {
 			t.Errorf("line %d: expected type=%q, got %v", i, TypeDNSQuery, line["type"])
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dns_query events are JSON-only — no text output regardless of mode
+// ---------------------------------------------------------------------------
+
+func TestDNSQueryEvent_TextModeProducesNoOutput(t *testing.T) {
+	for _, mode := range []string{"debug", "info", "warn"} {
+		var buf bytes.Buffer
+		l := NewWriterLogger(&buf, Config{StdoutMode: mode, Synchronous: true}, "t")
+		l.SetLevel(LevelDebug)
+		ev := NewDNSQueryEvent(LevelInfo, "t", "should not appear in text mode")
+		l.LogEvent(LevelInfo, ev)
+		if buf.Len() > 0 {
+			t.Errorf("mode=%s: dns_query event must not appear in text output, got: %s", mode, buf.String())
+		}
+	}
+}
+
+func TestDNSQueryEvent_JSONModeProducesOutput(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewWriterLogger(&buf, Config{StdoutMode: "json", Synchronous: true}, "t")
+	ev := NewDNSQueryEvent(LevelInfo, "t", "should appear in json mode")
+	l.LogEvent(LevelInfo, ev)
+	if buf.Len() == 0 {
+		t.Error("dns_query event must produce JSON output when StdoutMode=json")
+	}
+	lines := readJSONLines(&buf)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 JSON line, got %d: %s", len(lines), buf.String())
+	}
+	if lines[0]["type"] != TypeDNSQuery {
+		t.Errorf("expected type=%q, got %v", TypeDNSQuery, lines[0]["type"])
+	}
+}
+
+func TestDNSQueryEvent_DroppedWithoutJSONMode(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewWriterLogger(&buf, Config{StdoutMode: "info", Synchronous: true}, "t")
+	l.SetLevel(LevelDebug)
+	ev := NewDNSQueryEvent(LevelDebug, "t", "dropped event")
+	l.LogEvent(LevelDebug, ev)
+	if buf.Len() > 0 {
+		t.Errorf("dns_query event must be dropped entirely when no JSON output configured, got: %s", buf.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// JSON mode minimum level is INFO — DEBUG messages are filtered
+// ---------------------------------------------------------------------------
+
+func TestJSONMode_DebugMessageIsFiltered(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewWriterLogger(&buf, Config{StdoutMode: "json", Synchronous: true}, "t")
+	l.Debugf("debug message should not appear")
+	if buf.Len() > 0 {
+		t.Errorf("DEBUG general message must be filtered in json mode, got: %s", buf.String())
+	}
+}
+
+func TestJSONMode_InfoMessageIsNotFiltered(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewWriterLogger(&buf, Config{StdoutMode: "json", Synchronous: true}, "t")
+	l.Infof("info message should appear")
+	if buf.Len() == 0 {
+		t.Error("INFO general message must not be filtered in json mode")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// General (non-dns_query) events still appear in text mode
+// ---------------------------------------------------------------------------
+
+func TestGeneralEvent_AppearsInTextMode(t *testing.T) {
+	var buf bytes.Buffer
+	l := NewWriterLogger(&buf, Config{StdoutMode: "info", Synchronous: true}, "t")
+	l.Infof("general info message")
+	if buf.Len() == 0 {
+		t.Error("general INFO message must appear in text (info) mode")
+	}
+	if strings.Contains(buf.String(), "{") {
+		t.Errorf("text mode must not produce JSON for general messages, got: %s", buf.String())
 	}
 }

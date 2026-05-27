@@ -181,7 +181,7 @@ func (r *Resolver) resolveUpstream(ctx context.Context, idx int, c Client, query
 			r.logger.Warnf("Upstream[%d] %s error resolving %s: %v", idx, c, qname, err)
 		}
 	} else if r.slowThreshold > 0 && elapsed > r.slowThreshold {
-		r.logger.WarnfText("Slow upstream[%d] %s took %dms to resolve %s", idx, c, elapsed.Milliseconds(), qname)
+		r.logger.Warnf("Slow upstream[%d] %s took %dms to resolve %s.", idx, c, elapsed.Milliseconds(), qname)
 	}
 
 	// RFC 7873: update per-upstream cookie state immediately after receiving

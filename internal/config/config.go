@@ -1164,9 +1164,10 @@ log_max_backups = 5
 # Maximum age of rotated log files in days.
 log_max_age_days = 30
 
-# Threshold in milliseconds for logging slow upstream responses (text mode only).
-# Upstream queries exceeding this duration are logged as warnings.
-# Set to 0 to disable. In JSON mode this information is in the upstream object.
+# Threshold in milliseconds for logging slow upstream responses.
+# Upstream queries exceeding this duration are logged as WARN in all output modes.
+# In JSON mode the upstream[].slow field is also set to true in the dns_query event.
+# Set to 0 to disable.
 slow_upstream_ms = 200
 
 

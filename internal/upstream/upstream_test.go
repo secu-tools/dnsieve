@@ -452,6 +452,31 @@ func TestResolve_UpstreamTimeoutWarning(t *testing.T) {
 	}
 }
 
+// TestResolve_SlowUpstreamWarningInJSONMode verifies that the slow upstream
+// warning now appears in JSON output (was previously WarnfText, JSON-only suppressed).
+func TestResolve_SlowUpstreamWarningInJSONMode(t *testing.T) {
+	query := makeQuery("example.com", dns.TypeA)
+	clients := []Client{
+		&mockClient{name: "slow-server", response: makeNormalResp(query), delay: 80 * time.Millisecond},
+	}
+
+	var buf bytes.Buffer
+	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
+	r := newTestResolverWithLogger(clients, logger)
+	r.minWait = 5 * time.Millisecond
+	r.slowThreshold = 50 * time.Millisecond
+
+	r.Resolve(context.Background(), query)
+
+	output := buf.String()
+	if !strings.Contains(output, "Slow upstream") {
+		t.Errorf("expected slow upstream warning in JSON output, got: %s", output)
+	}
+	if !strings.Contains(output, "slow-server") {
+		t.Errorf("expected upstream name in JSON slow warning, got: %s", output)
+	}
+}
+
 func TestHasNXDomainDisagreement(t *testing.T) {
 	r := &Resolver{}
 

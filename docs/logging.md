@@ -8,16 +8,16 @@ DNSieve supports two output formats (text and JSON) and can write to stdout and/
 
 See [docs/configuration.md](configuration.md) for the full `[logging]` section reference including all TOML keys, default values, and validation rules.
 
-Quick reference — output mode values for `log_level_stdout` / `log_level_file`:
+Quick reference: output mode values for `log_level_stdout` / `log_level_file`:
 
 | Value   | Format | Min level | Notes                                         |
 |---------|--------|-----------|-----------------------------------------------|
-| `json`  | JSON   | DEBUG     | Newline-delimited JSON; one object per line   |
+| `json`  | JSON   | INFO      | Newline-delimited JSON; one object per line   |
 | `debug` | Text   | DEBUG     |                                               |
 | `info`  | Text   | INFO      | **Default**                                   |
 | `warn`  | Text   | WARN      |                                               |
 | `error` | Text   | ERROR     |                                               |
-| `off`   | —      | —         | Disables this output entirely                 |
+| `off`   | -      | -         | Disables this output entirely                 |
 
 The two outputs are independent -- e.g. text INFO to stdout and JSON to a file:
 
@@ -39,8 +39,11 @@ Examples:
 ```
 INFO  | 2025/07/01 14:30:00 [server] Plain DNS (UDP) listening on 127.0.0.1:5353
 WARN  | 2025/07/01 14:30:12 [server] Slow upstream[0] https://dns.quad9.net/dns-query took 1807ms to resolve example.com.
-INFO  | 2025/07/01 14:30:12 [server] evil.example.com. is blocked by https://dns.quad9.net/dns-query
 ```
+
+> **Note:** Per-query details (blocked domains, resolved IPs, cache hits) are only
+> emitted as structured `dns_query` events in JSON mode. Text mode does not include
+> per-query lines in order to avoid excessive output volume.
 
 ---
 
@@ -49,10 +52,10 @@ INFO  | 2025/07/01 14:30:12 [server] evil.example.com. is blocked by https://dns
 When `log_level_stdout` or `log_level_file` is set to `json`, each log line is
 a self-contained JSON object followed by a newline (`\n`).
 
-> **Note:** In JSON mode, redundant text-only messages such as slow-upstream
-> warnings and blocked-domain notifications are suppressed for stdout/file
-> configured as JSON - the same information is available in the structured
-> `dns` object of each `dns_query` event.
+> **Note:** `dns_query` events are JSON-only - they are never written to text
+> outputs. This keeps text-mode logs focused on operational messages (startup,
+> warnings, errors) while the full per-query detail is available in JSON.
+> The slow-upstream warning appears in both text and JSON outputs.
 
 ### Top-level fields (all events)
 
@@ -61,7 +64,7 @@ a self-contained JSON object followed by a newline (`\n`).
 | `timestamp` | string | RFC 3339 Nano timestamp (UTC)                    |
 | `level`     | string | `DEBUG`, `INFO`, `WARN`, `ERROR`                 |
 | `type`      | string | `general` or `dns_query`                         |
-| `module`    | string | Internal component (`server`, `upstream`, …)     |
+| `module`    | string | Internal component (`server`, `upstream`, ...)     |
 | `message`   | string | Human-readable summary                           |
 | `dns`       | object | Present only for `dns_query` events (see below)  |
 
@@ -71,7 +74,7 @@ The `dns` object groups all per-query fields. It contains five sub-objects:
 `client`, `upstream`, `decision`, `cache`, and `response`.
 
 `response` is always populated for `dns_query` events and records what the
-client actually received — regardless of whether the answer came from an
+client actually received, regardless of whether the answer came from an
 upstream server, the local cache, or a block decision. The other sub-objects
 provide context for *how* that answer was produced.
 
@@ -83,8 +86,8 @@ provide context for *how* that answer was produced.
 | `port`             | number  | Client source port                                    |
 | `protocol`         | string  | `plain`, `doh`, `dot`                                 |
 | `domain`           | string  | Queried domain name in Unicode (UTF-8)                |
-| `domain_ace`       | string  | ACE/Punycode form — present **only** when it differs from `domain` |
-| `qtype`            | string  | DNS query type (`A`, `AAAA`, `MX`, …)                 |
+| `domain_ace`       | string  | ACE/Punycode form - present **only** when it differs from `domain` |
+| `qtype`            | string  | DNS query type (`A`, `AAAA`, `MX`, ...)                 |
 | `qclass`           | string  | DNS query class (`IN`)                                |
 | `do_bit`           | boolean | EDNS DNSSEC OK bit set by client                      |
 | `edns`             | object  | EDNS0 details (see below)                             |
@@ -172,48 +175,314 @@ fan-out. `dns.response.ips` shows what the client received. These differ when:
 
 ## JSON examples
 
-### General startup message
+> Each event is written as a single line in actual log output (NDJSON).
+> The `dns_query` examples below are formatted across multiple lines for
+> readability.
 
-```json
-{"timestamp":"2025-07-01T14:30:00.000000001Z","level":"INFO","type":"general","module":"server","message":"Plain DNS (UDP) listening on 127.0.0.1:5353"}
+### Startup banner and general messages
+
+When `log_level_stdout = "json"`, the startup banner is emitted as individual
+JSON events instead of plain text, keeping stdout as valid JSON from the first
+line. A JSON parser or log aggregator will receive well-formed JSON throughout.
+
 ```
+{"timestamp":"2025-07-01T14:30:00.000000001Z","level":"INFO","type":"general","module":"server","message":"DNSieve - DNS Filtering Proxy - 1.2.0.1012 (afeb8f3)"}
+{"timestamp":"2025-07-01T14:30:00.000000002Z","level":"INFO","type":"general","module":"server","message":"Copyright (c) 2020-2026 Jack L. (Cpt-JackL) (https://jack-l.com)"}
+{"timestamp":"2025-07-01T14:30:00.000000003Z","level":"INFO","type":"general","module":"server","message":"https://github.com/secu-tools/dnsieve"}
+{"timestamp":"2025-07-01T14:30:00.000000004Z","level":"INFO","type":"general","module":"server","message":"Plain DNS (UDP) listening on 127.0.0.1:5353"}
+```
+
+In text mode, the banner is printed to stderr before any log output.
 
 ### Successful DNS query (resolved via upstream)
 
 ```json
-{"timestamp":"2025-07-01T14:30:12.123456789Z","level":"INFO","type":"dns_query","module":"server","message":"example.com. A -> rcode=NOERROR","dns":{"client":{"ip":"192.168.1.10","port":54321,"protocol":"plain","domain":"example.com.","qtype":"A","qclass":"IN","do_bit":false,"edns":{"present":true,"udp_size":4096,"padding_requested":false}},"upstream":[{"index":0,"address":"https://dns.quad9.net/dns-query","protocol":"doh","duration_ms":45,"slow":false,"rcode":"NOERROR","blocked":false,"servfail":false,"dnssec":false,"resolved_ips":["1.2.3.4"],"answer_count":1}],"decision":{"blocked":false,"cacheable":true,"all_responded":true,"rcode":"NOERROR"},"response":{"rcode":"NOERROR","answer_count":1,"ips":["1.2.3.4"]}}}
+{
+  "timestamp": "2025-07-01T14:30:12.123456789Z",
+  "level": "INFO",
+  "type": "dns_query",
+  "module": "server",
+  "message": "example.com. A -> rcode=NOERROR",
+  "dns": {
+    "client": {
+      "ip": "192.168.1.10",
+      "port": 54321,
+      "protocol": "plain",
+      "domain": "example.com.",
+      "qtype": "A",
+      "qclass": "IN",
+      "do_bit": false,
+      "edns": {
+        "present": true,
+        "udp_size": 4096,
+        "padding_requested": false
+      }
+    },
+    "upstream": [
+      {
+        "index": 0,
+        "address": "https://dns.quad9.net/dns-query",
+        "protocol": "doh",
+        "duration_ms": 45,
+        "slow": false,
+        "rcode": "NOERROR",
+        "blocked": false,
+        "servfail": false,
+        "dnssec": false,
+        "resolved_ips": ["1.2.3.4"],
+        "answer_count": 1
+      }
+    ],
+    "decision": {
+      "blocked": false,
+      "cacheable": true,
+      "all_responded": true,
+      "rcode": "NOERROR"
+    },
+    "response": {
+      "rcode": "NOERROR",
+      "answer_count": 1,
+      "ips": ["1.2.3.4"]
+    }
+  }
+}
 ```
 
 ### Cache hit
 
 ```json
-{"timestamp":"2025-07-01T14:30:13.000000001Z","level":"INFO","type":"dns_query","module":"server","message":"example.com. A -> cache hit","dns":{"client":{"ip":"192.168.1.10","port":54322,"protocol":"plain","domain":"example.com.","qtype":"A","qclass":"IN","do_bit":false,"edns":{"present":true,"udp_size":4096,"padding_requested":false}},"cache":{"hit":true,"ttl_sec":300,"ttl_remaining_sec":247,"ttl_remaining_pct":82.33,"blocked":false,"whitelisted":false,"background_refresh_triggered":false,"dnssec":false},"response":{"rcode":"NOERROR","answer_count":1,"ips":["1.2.3.4"]}}}
+{
+  "timestamp": "2025-07-01T14:30:13.000000001Z",
+  "level": "INFO",
+  "type": "dns_query",
+  "module": "server",
+  "message": "example.com. A -> cache hit",
+  "dns": {
+    "client": {
+      "ip": "192.168.1.10",
+      "port": 54322,
+      "protocol": "plain",
+      "domain": "example.com.",
+      "qtype": "A",
+      "qclass": "IN",
+      "do_bit": false,
+      "edns": {
+        "present": true,
+        "udp_size": 4096,
+        "padding_requested": false
+      }
+    },
+    "cache": {
+      "hit": true,
+      "ttl_sec": 300,
+      "ttl_remaining_sec": 247,
+      "ttl_remaining_pct": 82.33,
+      "blocked": false,
+      "whitelisted": false,
+      "background_refresh_triggered": false,
+      "dnssec": false
+    },
+    "response": {
+      "rcode": "NOERROR",
+      "answer_count": 1,
+      "ips": ["1.2.3.4"]
+    }
+  }
+}
 ```
 
 ### Blocked domain (upstream block)
 
-EDE code 15 (Blocked, RFC 8914) is included in both the upstream result and the response sent to the client.
+EDE code 15 (Blocked, RFC 8914) is included in both the upstream result and
+the response sent to the client.
 
 ```json
-{"timestamp":"2025-07-01T14:30:14.000000001Z","level":"INFO","type":"dns_query","module":"server","message":"evil.example.com. A -> blocked","dns":{"client":{"ip":"192.168.1.10","port":54323,"protocol":"plain","domain":"evil.example.com.","qtype":"A","qclass":"IN","do_bit":false,"edns":{"present":false}},"upstream":[{"index":0,"address":"https://dns.quad9.net/dns-query","protocol":"doh","duration_ms":38,"rcode":"NOERROR","blocked":true,"dnssec":false,"answer_count":1,"ede_code":15,"ede_text":"Blocked"}],"decision":{"blocked":true,"blocked_by":"https://dns.quad9.net/dns-query","block_source":"upstream","cacheable":true,"all_responded":true,"rcode":"NOERROR"},"response":{"rcode":"NOERROR","ede_code":15,"ede_text":"Blocked (dns.quad9.net)"}}}
+{
+  "timestamp": "2025-07-01T14:30:14.000000001Z",
+  "level": "INFO",
+  "type": "dns_query",
+  "module": "server",
+  "message": "evil.example.com. A -> blocked",
+  "dns": {
+    "client": {
+      "ip": "192.168.1.10",
+      "port": 54323,
+      "protocol": "plain",
+      "domain": "evil.example.com.",
+      "qtype": "A",
+      "qclass": "IN",
+      "do_bit": false,
+      "edns": {
+        "present": false
+      }
+    },
+    "upstream": [
+      {
+        "index": 0,
+        "address": "https://dns.quad9.net/dns-query",
+        "protocol": "doh",
+        "duration_ms": 38,
+        "rcode": "NOERROR",
+        "blocked": true,
+        "dnssec": false,
+        "answer_count": 1,
+        "ede_code": 15,
+        "ede_text": "Blocked"
+      }
+    ],
+    "decision": {
+      "blocked": true,
+      "blocked_by": "https://dns.quad9.net/dns-query",
+      "block_source": "upstream",
+      "cacheable": true,
+      "all_responded": true,
+      "rcode": "NOERROR"
+    },
+    "response": {
+      "rcode": "NOERROR",
+      "ede_code": 15,
+      "ede_text": "Blocked (dns.quad9.net)"
+    }
+  }
+}
 ```
 
 ### Blocked domain (local blacklist)
 
 ```json
-{"timestamp":"2025-07-01T14:30:15.000000001Z","level":"INFO","type":"dns_query","module":"server","message":"tracker.example.com. A -> local blacklist","dns":{"client":{"ip":"192.168.1.10","port":54324,"protocol":"plain","domain":"tracker.example.com.","qtype":"A","qclass":"IN","do_bit":false,"edns":{"present":false}},"decision":{"blocked":true,"blocked_by":"local-blacklist","block_source":"local-blacklist","cacheable":false,"all_responded":false,"rcode":"NOERROR"},"response":{"rcode":"NOERROR"}}}
+{
+  "timestamp": "2025-07-01T14:30:15.000000001Z",
+  "level": "INFO",
+  "type": "dns_query",
+  "module": "server",
+  "message": "tracker.example.com. A -> local blacklist",
+  "dns": {
+    "client": {
+      "ip": "192.168.1.10",
+      "port": 54324,
+      "protocol": "plain",
+      "domain": "tracker.example.com.",
+      "qtype": "A",
+      "qclass": "IN",
+      "do_bit": false,
+      "edns": {
+        "present": false
+      }
+    },
+    "decision": {
+      "blocked": true,
+      "blocked_by": "local-blacklist",
+      "block_source": "local-blacklist",
+      "cacheable": false,
+      "all_responded": false,
+      "rcode": "NOERROR"
+    },
+    "response": {
+      "rcode": "NOERROR"
+    }
+  }
+}
 ```
 
 ### Slow upstream warning
 
 ```json
-{"timestamp":"2025-07-01T14:30:16.000000001Z","level":"WARN","type":"dns_query","module":"server","message":"example.com. A -> slow upstream","dns":{"client":{"ip":"192.168.1.10","port":54325,"protocol":"plain","domain":"example.com.","qtype":"A","qclass":"IN","do_bit":false,"edns":{"present":false}},"upstream":[{"index":0,"address":"https://dns.quad9.net/dns-query","protocol":"doh","duration_ms":1807,"slow":true,"rcode":"NOERROR","blocked":false,"servfail":false,"dnssec":false,"resolved_ips":["1.2.3.4"],"answer_count":1}],"decision":{"blocked":false,"cacheable":true,"all_responded":true,"rcode":"NOERROR"},"response":{"rcode":"NOERROR","answer_count":1,"ips":["1.2.3.4"]}}}
+{
+  "timestamp": "2025-07-01T14:30:16.000000001Z",
+  "level": "WARN",
+  "type": "dns_query",
+  "module": "server",
+  "message": "example.com. A -> slow upstream",
+  "dns": {
+    "client": {
+      "ip": "192.168.1.10",
+      "port": 54325,
+      "protocol": "plain",
+      "domain": "example.com.",
+      "qtype": "A",
+      "qclass": "IN",
+      "do_bit": false,
+      "edns": {
+        "present": false
+      }
+    },
+    "upstream": [
+      {
+        "index": 0,
+        "address": "https://dns.quad9.net/dns-query",
+        "protocol": "doh",
+        "duration_ms": 1807,
+        "slow": true,
+        "rcode": "NOERROR",
+        "blocked": false,
+        "servfail": false,
+        "dnssec": false,
+        "resolved_ips": ["1.2.3.4"],
+        "answer_count": 1
+      }
+    ],
+    "decision": {
+      "blocked": false,
+      "cacheable": true,
+      "all_responded": true,
+      "rcode": "NOERROR"
+    },
+    "response": {
+      "rcode": "NOERROR",
+      "answer_count": 1,
+      "ips": ["1.2.3.4"]
+    }
+  }
+}
 ```
 
 ### Upstream error (SERVFAIL)
 
 ```json
-{"timestamp":"2025-07-01T14:30:17.000000001Z","level":"WARN","type":"dns_query","module":"server","message":"fail.example.com. A -> SERVFAIL","dns":{"client":{"ip":"192.168.1.10","port":54326,"protocol":"plain","domain":"fail.example.com.","qtype":"A","qclass":"IN","do_bit":false,"edns":{"present":false}},"upstream":[{"index":0,"address":"https://dns.quad9.net/dns-query","protocol":"doh","duration_ms":5001,"slow":true,"rcode":"SERVFAIL","blocked":false,"servfail":true,"dnssec":false,"error":"context deadline exceeded"}],"decision":{"blocked":false,"cacheable":false,"all_responded":false,"rcode":"SERVFAIL"},"response":{"rcode":"SERVFAIL"}}}
+{
+  "timestamp": "2025-07-01T14:30:17.000000001Z",
+  "level": "WARN",
+  "type": "dns_query",
+  "module": "server",
+  "message": "fail.example.com. A -> SERVFAIL",
+  "dns": {
+    "client": {
+      "ip": "192.168.1.10",
+      "port": 54326,
+      "protocol": "plain",
+      "domain": "fail.example.com.",
+      "qtype": "A",
+      "qclass": "IN",
+      "do_bit": false,
+      "edns": {
+        "present": false
+      }
+    },
+    "upstream": [
+      {
+        "index": 0,
+        "address": "https://dns.quad9.net/dns-query",
+        "protocol": "doh",
+        "duration_ms": 5001,
+        "slow": true,
+        "rcode": "SERVFAIL",
+        "blocked": false,
+        "servfail": true,
+        "dnssec": false,
+        "error": "context deadline exceeded"
+      }
+    ],
+    "decision": {
+      "blocked": false,
+      "cacheable": false,
+      "all_responded": false,
+      "rcode": "SERVFAIL"
+    },
+    "response": {
+      "rcode": "SERVFAIL"
+    }
+  }
+}
 ```
 
 ### DNSSEC-validated response
@@ -225,7 +494,54 @@ RRSIG records. NSID is included when the upstream returns a Name Server
 Identifier option (RFC 5001).
 
 ```json
-{"timestamp":"2025-07-01T14:30:19.000000001Z","level":"DEBUG","type":"dns_query","module":"server","message":"secure.example.com. A -> rcode=NOERROR","dns":{"client":{"ip":"192.168.1.10","port":54328,"protocol":"plain","domain":"secure.example.com.","qtype":"A","qclass":"IN","do_bit":true,"edns":{"present":true,"udp_size":4096}},"upstream":[{"index":0,"address":"https://dns.quad9.net/dns-query","protocol":"doh","duration_ms":52,"rcode":"NOERROR","dnssec":true,"resolved_ips":["93.184.216.34"],"answer_count":2,"nsid":"ns1.quad9.net"}],"decision":{"blocked":false,"cacheable":true,"all_responded":true,"rcode":"NOERROR"},"response":{"rcode":"NOERROR","answer_count":2,"ips":["93.184.216.34"],"ad":true,"rrsig":true}}}
+{
+  "timestamp": "2025-07-01T14:30:19.000000001Z",
+  "level": "INFO",
+  "type": "dns_query",
+  "module": "server",
+  "message": "secure.example.com. A -> rcode=NOERROR",
+  "dns": {
+    "client": {
+      "ip": "192.168.1.10",
+      "port": 54328,
+      "protocol": "plain",
+      "domain": "secure.example.com.",
+      "qtype": "A",
+      "qclass": "IN",
+      "do_bit": true,
+      "edns": {
+        "present": true,
+        "udp_size": 4096
+      }
+    },
+    "upstream": [
+      {
+        "index": 0,
+        "address": "https://dns.quad9.net/dns-query",
+        "protocol": "doh",
+        "duration_ms": 52,
+        "rcode": "NOERROR",
+        "dnssec": true,
+        "resolved_ips": ["93.184.216.34"],
+        "answer_count": 2,
+        "nsid": "ns1.quad9.net"
+      }
+    ],
+    "decision": {
+      "blocked": false,
+      "cacheable": true,
+      "all_responded": true,
+      "rcode": "NOERROR"
+    },
+    "response": {
+      "rcode": "NOERROR",
+      "answer_count": 2,
+      "ips": ["93.184.216.34"],
+      "ad": true,
+      "rrsig": true
+    }
+  }
+}
 ```
 
 ### Internationalized domain name (IDN)
@@ -235,7 +551,33 @@ Unicode form and `domain_ace` contains the Punycode form. For ASCII-only
 domains `domain_ace` is omitted.
 
 ```json
-{"timestamp":"2025-07-01T14:30:18.000000001Z","level":"INFO","type":"dns_query","module":"server","message":"xn--fiq228c.example. A -> rcode=NOERROR","dns":{"client":{"ip":"192.168.1.10","port":54327,"protocol":"plain","domain":"Chinese-chars.example.","domain_ace":"xn--fiq228c.example.","qtype":"A","qclass":"IN","do_bit":false,"edns":{"present":false}},"response":{"rcode":"NOERROR","answer_count":1,"ips":["1.2.3.4"]}}}
+{
+  "timestamp": "2025-07-01T14:30:18.000000001Z",
+  "level": "INFO",
+  "type": "dns_query",
+  "module": "server",
+  "message": "xn--fiq228c.example. A -> rcode=NOERROR",
+  "dns": {
+    "client": {
+      "ip": "192.168.1.10",
+      "port": 54327,
+      "protocol": "plain",
+      "domain": "Chinese-chars.example.",
+      "domain_ace": "xn--fiq228c.example.",
+      "qtype": "A",
+      "qclass": "IN",
+      "do_bit": false,
+      "edns": {
+        "present": false
+      }
+    },
+    "response": {
+      "rcode": "NOERROR",
+      "answer_count": 1,
+      "ips": ["1.2.3.4"]
+    }
+  }
+}
 ```
 
 ---
@@ -272,3 +614,4 @@ filebeat.inputs:
 
 **Splunk** (HEC JSON source type): set the source type to `_json` and Splunk
 will automatically index all top-level fields including the nested `dns` object.
+

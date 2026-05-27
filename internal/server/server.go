@@ -122,7 +122,7 @@ func (h *Handler) checkWhitelistCache(ctx context.Context, query *dns.Msg, qname
 			BackgroundRefreshTriggered: refreshTriggered,
 		}
 		ev.DNS.Response = buildResponseInfo(resp)
-		h.logger.LogEvent(logging.LevelDebug, ev)
+		h.logger.LogEvent(logging.LevelInfo, ev)
 	}
 	return resp
 }
@@ -151,7 +151,7 @@ func (h *Handler) resolveWhitelistUpstream(ctx context.Context, query *dns.Msg, 
 	}
 	if h.logger.IsJSONEnabled() {
 		rcode := dns.RcodeToString[resp.Rcode]
-		ev := logging.NewDNSQueryEvent(logging.LevelDebug, "server",
+		ev := logging.NewDNSQueryEvent(logging.LevelInfo, "server",
 			qname+" "+qtype+" -> rcode="+rcode+" (whitelist resolver)")
 		ev.DNS.Client = buildClientInfo(query, ClientMetaFrom(ctx))
 		ev.DNS.Decision = &logging.DecisionInfo{
@@ -162,7 +162,7 @@ func (h *Handler) resolveWhitelistUpstream(ctx context.Context, query *dns.Msg, 
 			RCode:        rcode,
 		}
 		ev.DNS.Response = buildResponseInfo(resp)
-		h.logger.LogEvent(logging.LevelDebug, ev)
+		h.logger.LogEvent(logging.LevelInfo, ev)
 	}
 	return resp
 }
@@ -174,7 +174,6 @@ func (h *Handler) handleBlacklistedQuery(ctx context.Context, query *dns.Msg, qn
 	if h.blacklist == nil || !h.blacklist.Contains(qname) {
 		return nil
 	}
-	h.logger.InfofText("%s is blocked by local blacklist", qname)
 	resp := dnsmsg.MakeBlockedResponse(query, h.cfg.Blocking.Mode, "local-blacklist")
 	h.logger.Debugf("Query %s %s -> final: rcode=%s blocked=true (blacklist)",
 		qname, qtype, dns.RcodeToString[resp.Rcode])
@@ -209,9 +208,9 @@ func (h *Handler) handleCacheHit(ctx context.Context, query *dns.Msg, qname, qty
 
 	if entry.Blocked {
 		if refreshTriggered {
-			h.logger.InfofText("%s is blocked (from cache, background-refresh queued, ttl=%ds rtl=%ds)", qname, ttlSec, rtlSec)
+			h.logger.Debugf("Query %s %s -> blocked (cached, background-refresh queued, ttl=%ds rtl=%ds)", qname, qtype, ttlSec, rtlSec)
 		} else {
-			h.logger.InfofText("%s is blocked (from cache, ttl=%ds rtl=%ds)", qname, ttlSec, rtlSec)
+			h.logger.Debugf("Query %s %s -> blocked (cached, ttl=%ds rtl=%ds)", qname, qtype, ttlSec, rtlSec)
 		}
 	} else {
 		if refreshTriggered {
@@ -229,10 +228,7 @@ func (h *Handler) handleCacheHit(ctx context.Context, query *dns.Msg, qname, qty
 
 // emitCacheHitEvent builds and logs a structured JSON event for a cache hit.
 func (h *Handler) emitCacheHitEvent(ctx context.Context, query *dns.Msg, qname, qtype string, entry *cache.Entry, refreshTriggered bool, resp *dns.Msg) {
-	level := logging.LevelDebug
-	if entry.Blocked {
-		level = logging.LevelInfo
-	}
+	level := logging.LevelInfo
 	msg := qname + " " + qtype + " -> cache hit"
 	if entry.Blocked {
 		msg = qname + " " + qtype + " -> blocked (cached)"
@@ -339,8 +335,6 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 
 	// Step 5: If blocked, return blocked response
 	if result.Blocked {
-		h.logger.InfofText("%s is blocked by %s", qname, result.BlockedBy)
-
 		blockedResp := dnsmsg.MakeBlockedResponse(query, h.cfg.Blocking.Mode, result.BlockedBy)
 		cached := h.cfg.Cache.Enabled && result.Cacheable
 		if cached {
@@ -397,10 +391,9 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 // emitUpstreamQueryEvent builds and logs a structured JSON event for a query
 // resolved via upstream servers. resp is the response that was sent to the client.
 func (h *Handler) emitUpstreamQueryEvent(ctx context.Context, query *dns.Msg, qname, qtype string, result *upstream.FanOutResult, rcode string, cached bool, resp *dns.Msg) {
-	level := logging.LevelDebug
+	level := logging.LevelInfo
 	msg := qname + " " + qtype + " -> rcode=" + rcode
 	if result.Blocked {
-		level = logging.LevelInfo
 		msg = qname + " " + qtype + " -> blocked by " + result.BlockedBy
 	}
 	ev := logging.NewDNSQueryEvent(level, "server", msg)

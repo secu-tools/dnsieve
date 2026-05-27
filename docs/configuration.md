@@ -418,12 +418,15 @@ formats, output modes, the complete JSON schema, and configuration examples.
 ### slow_upstream_ms
 
 When an upstream takes longer than `slow_upstream_ms` milliseconds to respond,
-a warning is logged (text mode) or the `upstream[].slow` field is set to `true`
-in the JSON event. Default: 200. Set to `0` to disable.
+a warning is logged in all output modes. In JSON mode the `upstream[].slow`
+field is also set to `true` in the `dns_query` event. Default: 200. Set to
+`0` to disable.
 
-Setting `log_level_stdout` (or `log_level_file`) to `debug` enables detailed
-logging of each DNS query, cache hit/miss status with TTL and remaining TTL,
-per-upstream response details, and final query results.
+Setting `log_level_stdout` (or `log_level_file`) to `json` emits a structured
+`dns_query` event for every DNS query including cache hit/miss status with TTL
+and remaining TTL, per-upstream response details, and final query results.
+`dns_query` events are only emitted in JSON mode; text modes do not include
+per-query lines.
 
 
 ## Whitelist
