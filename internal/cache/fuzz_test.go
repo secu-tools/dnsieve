@@ -39,8 +39,15 @@ func FuzzCacheRenewPercent(f *testing.F) {
 		c := New(100, 3600, 1, renewPercent)
 
 		var refreshCalled bool
+		refreshDone := make(chan struct{}, 1)
 		c.SetRefreshFunc(func(q *dns.Msg) {
 			refreshCalled = true
+			defer func() {
+				select {
+				case refreshDone <- struct{}{}:
+				default:
+				}
+			}()
 			// Simulate a successful refresh by putting a response
 			resp := new(dns.Msg)
 			dnsutil.SetReply(resp, q)
@@ -63,10 +70,26 @@ func FuzzCacheRenewPercent(f *testing.F) {
 
 		// Should not panic regardless of inputs
 		c.Put(query, resp, blocked, false)
-		entry, _ := c.Get(query)
+		if t.Context().Err() != nil {
+			return
+		}
+		entry, refreshTriggered := c.Get(query)
+		if t.Context().Err() != nil {
+			return
+		}
 
 		if entry != nil {
 			_ = MakeCachedResponse(query, entry)
+		}
+
+		// Wait for any background refresh goroutine before flushing to prevent
+		// goroutine leaks and ensure a clean post-Flush cache state.
+		if refreshTriggered {
+			select {
+			case <-refreshDone:
+			case <-t.Context().Done():
+				return
+			}
 		}
 
 		c.Flush()

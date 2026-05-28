@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"codeberg.org/miekg/dns"
@@ -60,6 +61,30 @@ func TestBuildQueryFromJSONParams_InvalidType(t *testing.T) {
 	_, status, _ := buildQueryFromJSONParams(r)
 	if status != http.StatusBadRequest {
 		t.Errorf("status=%d, want 400", status)
+	}
+}
+
+// TestBuildQueryFromJSONParams_NameTooLong verifies that a ?name= value
+// exceeding the 253-character DNS name limit returns 400, not 500.
+func TestBuildQueryFromJSONParams_NameTooLong(t *testing.T) {
+	longName := strings.Repeat("a", 254)
+	r := httptest.NewRequest(http.MethodGet, "/dns-query?name="+longName+"&type=A", nil)
+	_, status, _ := buildQueryFromJSONParams(r)
+	if status != http.StatusBadRequest {
+		t.Errorf("status=%d, want 400 for name longer than 253 chars", status)
+	}
+}
+
+// TestBuildQueryFromJSONParams_LongLabel verifies that a DNS label exceeding
+// the 63-character per-label limit (RFC 1035) returns 400, not 500.
+// A label this long passes the overall name-length check but causes Pack to
+// fail; the handler must report a client error rather than an internal one.
+func TestBuildQueryFromJSONParams_LongLabel(t *testing.T) {
+	longLabel := strings.Repeat("a", 64) + ".example.com"
+	r := httptest.NewRequest(http.MethodGet, "/dns-query?name="+longLabel+"&type=A", nil)
+	_, status, _ := buildQueryFromJSONParams(r)
+	if status != http.StatusBadRequest {
+		t.Errorf("status=%d, want 400 for label exceeding 63 chars", status)
 	}
 }
 

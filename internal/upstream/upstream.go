@@ -310,7 +310,13 @@ func (r *Resolver) Resolve(ctx context.Context, query *dns.Msg) *FanOutResult {
 			// All upstreams finished before we could return early.
 			// Fall through to the normal aggregation path.
 		default:
-			partialResult := r.selectResult(results)
+			// Snapshot results under mu before reading: goroutines may still be
+			// writing to results[i] for upstreams that haven't finished yet.
+			mu.Lock()
+			snapshot := make([]*Result, len(results))
+			copy(snapshot, results)
+			mu.Unlock()
+			partialResult := r.selectResult(snapshot)
 			partialResult.WaitAll = func() []*Result {
 				<-allDone
 				cancel()

@@ -75,6 +75,13 @@ func serveDoHAddresses(ctx context.Context, handler *Handler, addrs []string, po
 		}
 
 		if err := startDOHListenerGoroutine(srv, addr, tcpNet, cfg, logger, runErrCh); err != nil {
+			// Shut down every server that started successfully before
+			// returning the error so no goroutines are leaked.
+			shutCtx, shutCancel := context.WithTimeout(context.Background(), time.Second)
+			for _, s := range servers {
+				s.Shutdown(shutCtx) //nolint:errcheck
+			}
+			shutCancel()
 			return err
 		}
 		servers = append(servers, srv)
@@ -92,6 +99,12 @@ func serveDoHAddresses(ctx context.Context, handler *Handler, addrs []string, po
 		}
 		return nil
 	case err := <-runErrCh:
+		// One server crashed after startup; shut down the rest.
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), time.Second)
+		for _, s := range servers {
+			s.Shutdown(shutCtx) //nolint:errcheck
+		}
+		shutCancel()
 		return err
 	}
 }
@@ -197,6 +210,13 @@ func buildQueryFromJSONParams(r *http.Request) ([]byte, int, string) {
 	if name == "" {
 		return nil, http.StatusBadRequest, "Missing ?name= parameter."
 	}
+	// RFC 1035: domain names are limited to 253 characters (without trailing
+	// dot). Enforce this before packing so an oversized name returns 400
+	// (client error) instead of 500 (internal error).
+	if len(name) > 253 {
+		return nil, http.StatusBadRequest, "Name parameter exceeds the maximum DNS name length of 253 characters."
+	}
+
 	typeStr := r.URL.Query().Get("type")
 	if typeStr == "" {
 		typeStr = "A"
@@ -225,8 +245,10 @@ func buildQueryFromJSONParams(r *http.Request) ([]byte, int, string) {
 		query.Pseudo = append(query.Pseudo, opt)
 	}
 
+	// Pack failure here indicates an invalid DNS name (e.g. a label exceeding
+	// 63 characters). This is a client error, not an internal server error.
 	if err := query.Pack(); err != nil {
-		return nil, http.StatusInternalServerError, "Failed to build DNS query."
+		return nil, http.StatusBadRequest, "Invalid domain name."
 	}
 	return query.Data, http.StatusOK, ""
 }

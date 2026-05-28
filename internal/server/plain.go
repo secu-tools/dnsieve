@@ -157,7 +157,28 @@ func servePlainAddresses(ctx context.Context, handler *Handler, addrs []string, 
 	// shutdownStarted shuts down all successfully-bound pairs and the two
 	// servers for the current address (which may not yet be in pairs).
 	// Called on early bind error to prevent goroutine leaks.
-	shutdownStarted := func(udpSrv, tcpSrv *dns.Server) {
+	//
+	// udpReady/tcpReady are closed by NotifyStartedFunc when the server is up.
+	// udpFailed/tcpFailed are closed when ListenAndServe returns with an error.
+	// We wait for init() to complete on both servers before calling Shutdown()
+	// to prevent a DATA RACE between ListenAndServe's internal init() writes
+	// and Shutdown's reads (detected by -race on the bind-failure error path).
+	shutdownStarted := func(udpSrv, tcpSrv *dns.Server,
+		udpReady, udpFailed, tcpReady, tcpFailed <-chan struct{}) {
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Second)
+		defer waitCancel()
+		// Wait for UDP init() to finish (success → udpReady, failure → udpFailed).
+		select {
+		case <-udpReady:
+		case <-udpFailed:
+		case <-waitCtx.Done():
+		}
+		// Wait for TCP init() to finish.
+		select {
+		case <-tcpReady:
+		case <-tcpFailed:
+		case <-waitCtx.Done():
+		}
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), time.Second)
 		defer shutCancel()
 		for _, p := range pairs {
@@ -194,15 +215,20 @@ func servePlainAddresses(ctx context.Context, handler *Handler, addrs []string, 
 			NotifyStartedFunc: func(_ context.Context) { close(tcpReady) },
 		}
 
+		udpFailed := make(chan struct{})
+		tcpFailed := make(chan struct{})
+
 		errCh := make(chan error, 2)
 
 		go func() {
 			if err := udpSrv.ListenAndServe(); err != nil {
+				close(udpFailed)
 				errCh <- fmt.Errorf("bind UDP %s: %w", addr, cleanBindErr(err))
 			}
 		}()
 		go func() {
 			if err := tcpSrv.ListenAndServe(); err != nil {
+				close(tcpFailed)
 				errCh <- fmt.Errorf("bind TCP %s: %w", addr, cleanBindErr(err))
 			}
 		}()
@@ -220,7 +246,7 @@ func servePlainAddresses(ctx context.Context, handler *Handler, addrs []string, 
 			case err := <-errCh:
 				// Shut down any already-started servers in the background so the
 				// error is returned immediately and callers are not blocked.
-				go shutdownStarted(udpSrv, tcpSrv)
+				go shutdownStarted(udpSrv, tcpSrv, udpReady, udpFailed, tcpReady, tcpFailed)
 				return err
 			}
 		}

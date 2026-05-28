@@ -79,6 +79,13 @@ func serveDoTAddresses(ctx context.Context, handler *Handler, addrs []string, po
 		case <-ready:
 			logger.Infof("DoT (DNS-over-TLS) listening on %s", addr)
 		case err := <-errCh:
+			// Shut down every server that started successfully before
+			// returning the error so no goroutines are leaked.
+			shutCtx, shutCancel := context.WithTimeout(context.Background(), time.Second)
+			for _, s := range servers {
+				s.Shutdown(shutCtx) //nolint:errcheck
+			}
+			shutCancel()
 			return err
 		}
 

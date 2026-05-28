@@ -63,6 +63,32 @@ func (m *mockUpstreamClient) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg,
 
 func (m *mockUpstreamClient) String() string { return m.name }
 
+// syncBuf is a thread-safe bytes.Buffer wrapper for tests where async logging
+// goroutines (emitBlockedQueryEvent, upstream slow-warning) write concurrently
+// with the test goroutine reading the output.
+type syncBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *syncBuf) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
+}
+
 func newTestHandler(t *testing.T, responses []*dns.Msg) *Handler {
 	t.Helper()
 	return newTestHandlerWithLogger(t, responses, logging.NewStdoutOnly(logging.DefaultConfig(), "test"))
@@ -330,11 +356,13 @@ func TestHandleQuery_ResponseIDMatchesQuery(t *testing.T) {
 func TestHandleQuery_BlockedLogsInfo(t *testing.T) {
 	query := makeQuery("blocked.example.com", dns.TypeA)
 
-	var buf bytes.Buffer
+	var buf syncBuf
 	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
 
 	handler := newTestHandlerWithLogger(t, []*dns.Msg{makeBlockedResp(query)}, logger)
 	handler.HandleQuery(context.Background(), query)
+	// emitBlockedQueryEvent runs in a goroutine; wait for it to write.
+	time.Sleep(200 * time.Millisecond)
 
 	output := buf.String()
 	if !strings.Contains(output, "blocked.example.com") {
@@ -353,13 +381,15 @@ func TestHandleQuery_BlockedLogsInfo(t *testing.T) {
 func TestHandleQuery_BlockedFromCacheLogsInfo(t *testing.T) {
 	query := makeQuery("cached-block.example.com", dns.TypeA)
 
-	var buf bytes.Buffer
+	var buf syncBuf
 	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
 
 	handler := newTestHandlerWithLogger(t, []*dns.Msg{makeBlockedResp(query)}, logger)
 
 	// First query: populates cache with blocked entry
 	handler.HandleQuery(context.Background(), query)
+	// Wait for the emitBlockedQueryEvent goroutine from the first query.
+	time.Sleep(200 * time.Millisecond)
 
 	// Clear the buffer so we only see the second query's log
 	buf.Reset()
@@ -367,6 +397,8 @@ func TestHandleQuery_BlockedFromCacheLogsInfo(t *testing.T) {
 	// Second query: should come from cache
 	q2 := makeQuery("cached-block.example.com", dns.TypeA)
 	handler.HandleQuery(context.Background(), q2)
+	// Wait for the emitBlockedQueryEvent goroutine from the second query.
+	time.Sleep(200 * time.Millisecond)
 
 	output := buf.String()
 	if !strings.Contains(output, "cached-block.example.com") {
@@ -1454,6 +1486,100 @@ func TestServeDoTAddresses_EmptyAddresses(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty DoT address slice")
 	}
+}
+
+// TestServeDoT_PartialBindFailure verifies that when the second DoT address
+// fails to bind, the already-started first server is shut down so no
+// goroutines or sockets are leaked.
+func TestServeDoT_PartialBindFailure(t *testing.T) {
+	cert := genDownstreamCert(t)
+	tlsCfg, tlsErr := loadTLSConfig("", "", cert.certB64, cert.keyB64)
+	if tlsErr != nil {
+		t.Fatalf("loadTLSConfig: %v", tlsErr)
+	}
+
+	handler := newTestHandler(t, nil)
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test-dot-partial-bind-fail")
+	port := downstreamFreePort(t)
+
+	// Pass the same address twice: the first bind succeeds; the second
+	// fails with "address already in use" because the first server is
+	// already listening on the port.
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- serveDoTAddresses(
+			context.Background(), handler,
+			[]string{"127.0.0.1", "127.0.0.1"}, port, tlsCfg, logger,
+		)
+	}()
+
+	select {
+	case e := <-errCh:
+		if e == nil {
+			t.Error("expected bind error, got nil")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for DoT partial bind error")
+	}
+
+	// After the error return the first server must have been shut down.
+	// Poll until the port is released (or 2 seconds pass).
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ln, lnErr := net.Listen("tcp4", addr)
+		if lnErr == nil {
+			ln.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("port %d was not released after DoT partial bind failure", port)
+}
+
+// TestServeDoH_PartialBindFailure verifies that when the second DoH address
+// fails to bind, the already-started first server is shut down so no
+// goroutines or sockets are leaked.
+func TestServeDoH_PartialBindFailure(t *testing.T) {
+	handler := newTestHandler(t, nil)
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test-doh-partial-bind-fail")
+
+	cfg := config.DefaultConfig()
+	cfg.Downstream.DoH.UsePlaintextHTTP = true
+	port := findFreePort(t)
+
+	// Pass the same address twice: the first bind succeeds; the second
+	// fails with "address already in use" because the first server is
+	// already listening on the port.
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- serveDoHAddresses(
+			context.Background(), handler,
+			[]string{"127.0.0.1", "127.0.0.1"}, port, cfg, logger,
+		)
+	}()
+
+	select {
+	case e := <-errCh:
+		if e == nil {
+			t.Error("expected bind error, got nil")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for DoH partial bind error")
+	}
+
+	// After the error return the first server must have been shut down.
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ln, lnErr := net.Listen("tcp4", addr)
+		if lnErr == nil {
+			ln.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("port %d was not released after DoH partial bind failure", port)
 }
 
 // TestNetworkForIP verifies that networkForIP returns the correct network type
@@ -3627,7 +3753,7 @@ func makeBlockedRespWithEDE(query *dns.Msg, ede string) *dns.Msg {
 // Regression test for the dns library bug where Pack() mutates EDE.ExtraText.
 func TestJSONEvent_EDEText_NotNullBytes(t *testing.T) {
 	query := makeQuery("blocked-ede.example.com", dns.TypeA)
-	var buf bytes.Buffer
+	var buf syncBuf
 	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
 
 	cfg := config.DefaultConfig()
@@ -3692,7 +3818,7 @@ func (c *slowMockClient) String() string { return c.name }
 // upstream signals the block first.
 func TestJSONEvent_SlowFlag_BlockedDomain(t *testing.T) {
 	query := makeQuery("malware-slow.example.com", dns.TypeA)
-	var buf bytes.Buffer
+	var buf syncBuf
 	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
 
 	cfg := config.DefaultConfig()
@@ -3738,7 +3864,7 @@ func TestJSONEvent_SlowFlag_BlockedDomain(t *testing.T) {
 // emitted with complete upstream information once all upstreams finish.
 func TestJSONEvent_EarlyBlockedReturn_WaitAll(t *testing.T) {
 	query := makeQuery("early-block.example.com", dns.TypeA)
-	var buf bytes.Buffer
+	var buf syncBuf
 	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
 
 	cfg := config.DefaultConfig()
@@ -3793,7 +3919,7 @@ func TestJSONEvent_EarlyBlockedReturn_WaitAll(t *testing.T) {
 func TestJSONEvent_EarlyBlockedReturn_EDEText_NotCorrupted(t *testing.T) {
 	query := makeQuery("ede-early.example.com", dns.TypeA)
 	edeText := "Blocked (early-block-ede-test)"
-	var buf bytes.Buffer
+	var buf syncBuf
 	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
 
 	cfg := config.DefaultConfig()
