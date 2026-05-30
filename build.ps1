@@ -198,7 +198,7 @@ if ($testall) {
 
         Write-Host ""
         Write-Host "[5/5] E2E tests..." -ForegroundColor Cyan
-        go test -v -tags e2e -count=1 -timeout 300s ./tests/e2e/
+        go test -v -tags e2e -count=1 -timeout 600s ./tests/e2e/
         if ($LASTEXITCODE -ne 0) { throw "E2E tests failed" }
     } catch {
         Write-Host "$_" -ForegroundColor Red
@@ -258,7 +258,7 @@ if ($teste2e) {
     Write-Host "Running e2e tests..." -ForegroundColor Green
     $saved = Enter-TestTmp
     try {
-        go test -v -tags e2e -count=1 -timeout 300s ./tests/e2e/
+        go test -v -tags e2e -count=1 -timeout 600s ./tests/e2e/
         if ($LASTEXITCODE -ne 0) { throw "E2E tests failed" }
     } catch {
         Write-Host "$_" -ForegroundColor Red

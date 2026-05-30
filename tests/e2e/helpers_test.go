@@ -7,7 +7,7 @@
 // These tests start a real DNSieve proxy with various configurations and
 // validate its behaviour by sending queries over all supported protocols.
 //
-// Run with: go test -tags e2e -v ./tests/e2e/ -timeout 300s
+// Run with: go test -tags e2e -v ./tests/e2e/ -timeout 600s
 package e2e
 
 import (

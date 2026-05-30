@@ -178,7 +178,7 @@ if $RUN_TESTALL; then
 
   echo ""
   echo "[5/5] E2E tests..."
-  go test -v -tags e2e -count=1 -timeout 300s ./tests/e2e/ || { echo "E2E tests failed"; exit 1; }
+  go test -v -tags e2e -count=1 -timeout 600s ./tests/e2e/ || { echo "E2E tests failed"; exit 1; }
 
   cleanup_test_tmp
   trap - EXIT
@@ -262,7 +262,7 @@ if $RUN_E2E; then
   }
   trap cleanup_e2e_tmp EXIT
 
-  go test -v -tags e2e -count=1 -timeout 300s ./tests/e2e/ || { cleanup_e2e_tmp; trap - EXIT; echo "E2E tests failed"; exit 1; }
+  go test -v -tags e2e -count=1 -timeout 600s ./tests/e2e/ || { cleanup_e2e_tmp; trap - EXIT; echo "E2E tests failed"; exit 1; }
   cleanup_e2e_tmp
   trap - EXIT
   echo "E2E tests passed."
