@@ -747,23 +747,29 @@ jobs:
           Write-Host "Pushed: $channelTag"
 
   # ---------------------------------------------------------------
-  # 4b. Cleanup if Docker fails
-  #     Deletes all uploaded build artifacts and removes any GHCR
-  #     image versions that were pushed before the failure.
-  #     No GitHub Release or git tag exists yet at this point.
-  #     Build number is intentionally not rolled back.
+  # Cleanup: runs after the workflow completes regardless of outcome.
+  # - Deletes intermediate build artifacts (unless KEEP_ARTIFACTS=true).
+  #   Covers both the normal post-publish path and the Docker-failure
+  #   path (where publish is skipped but artifacts still exist).
+  # - When Docker failed, also removes any partially-pushed GHCR images.
+  # Does not affect files uploaded to the GitHub release page.
+  # Build number is intentionally not rolled back on failure.
   # ---------------------------------------------------------------
-  cleanup-on-docker-failure:
-    name: Cleanup (Docker failed)
-    needs: [resolve-version, docker, docker-windows]
-    if: always() && (needs.docker.result == 'failure' || needs.docker-windows.result == 'failure')
+  cleanup:
+    name: Cleanup
+    needs: [resolve-version, docker, docker-windows, publish]
+    if: always()
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      packages: write
     steps:
-      - name: Delete build artifacts
+      - name: Delete intermediate build artifacts
+        if: env.KEEP_ARTIFACTS == 'false'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Deleting build artifacts for run ${GITHUB_RUN_ID}..."
+          echo "Deleting intermediate build artifacts for run ${GITHUB_RUN_ID}..."
           for name in build-linux build-windows build-macos-arm64 build-macos-amd64; do
             artifact_id=$(curl -s \
               -H "Authorization: Bearer $GITHUB_TOKEN" \
@@ -777,11 +783,12 @@ jobs:
                 "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
               echo "  Deleted artifact: $name (id: $artifact_id)"
             else
-              echo "  Not found: $name"
+              echo "  Not found (already deleted or never uploaded): $name"
             fi
           done
 
-      - name: Delete GHCR image versions
+      - name: Delete GHCR image versions (Docker push failed)
+        if: needs.docker.result == 'failure' || needs.docker-windows.result == 'failure'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FULL_VERSION: ${{ needs.resolve-version.outputs.full_version }}
@@ -812,22 +819,3 @@ jobs:
           else
             echo "  No GHCR image found for version ${FULL_VERSION} -- nothing to delete"
           fi
-
-  # ---------------------------------------------------------------
-  # Cleanup: delete intermediate build artifacts from the runner
-  # after the release has been published successfully.
-  # Does not affect files uploaded to the GitHub release page.
-  # Set KEEP_ARTIFACTS: "true" to retain artifacts after release.
-  # ---------------------------------------------------------------
-  cleanup:
-    needs: [publish]
-    if: always()
-    runs-on: ubuntu-latest
-    permissions:
-      actions: write
-    steps:
-      - name: Delete intermediate build artifacts
-        if: env.KEEP_ARTIFACTS == 'false'
-        uses: actions/delete-artifact@v4
-        with:
-          pattern: build-*
