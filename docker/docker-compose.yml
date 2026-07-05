@@ -15,9 +15,7 @@ services:
   dnsieve:
     image: ghcr.io/secu-tools/dnsieve:latest
     container_name: dnsieve
-    # Restart on non-zero exit (server crash). Clean shutdowns (exit 0) do not
-    # trigger a restart, so "docker stop dnsieve" works as expected.
-    restart: on-failure
+    restart: unless-stopped
     ports:
       - "5353:5353/udp"   # Plain DNS (default). Change to 53:53 for standard port.
       - "5353:5353/tcp"
@@ -50,7 +48,7 @@ services:
     tmpfs:
       - /tmp
     healthcheck:
-      test: ["CMD", "nslookup", "example.com", "127.0.0.1"]
+      test: ["CMD", "nslookup", "example.com", "127.0.0.1:5353"]
       interval: 30s
       timeout: 5s
       retries: 3
