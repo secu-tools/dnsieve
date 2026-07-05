@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 )
 
 func init() {
@@ -32,12 +33,7 @@ func installWindows(cfg ServiceConfig) error {
 		}
 	}
 
-	args := cfg.ServerArgs()
-	binPath := `"` + exe + `"`
-	// Embed --svcname so the binary knows its SCM service name when started
-	// by the Windows Service Control Manager (needed for svc.Run).
-	svcArgs := append([]string{"--svcname", name}, args...)
-	binPath += " " + strings.Join(svcArgs, " ")
+	binPath := serviceBinPath(exe, name, cfg.ServerArgs())
 
 	// Create the service
 	out, err := exec.Command("sc.exe", "create", name,
@@ -76,6 +72,21 @@ func installWindows(cfg ServiceConfig) error {
 	fmt.Printf("  Stop:    sc stop %s\n", name)
 	fmt.Printf("  Remove:  dnsieve --uninstall\n")
 	return nil
+}
+
+// serviceBinPath builds the SCM ImagePath command line for the service: the
+// quoted executable followed by --svcname and the server arguments. The SCM
+// passes this string verbatim to CreateProcess when starting the service, so
+// every argument is quoted per Windows command-line rules (syscall.EscapeArg)
+// to survive that parsing — --cfgfile/--logdir values may contain spaces.
+// --svcname is embedded so the binary knows its SCM service name when started
+// by the Service Control Manager (needed for svc.Run).
+func serviceBinPath(exe, name string, args []string) string {
+	parts := []string{`"` + exe + `"`, "--svcname", syscall.EscapeArg(name)}
+	for _, a := range args {
+		parts = append(parts, syscall.EscapeArg(a))
+	}
+	return strings.Join(parts, " ")
 }
 
 // Uninstall lists all DNSieve Windows services and prompts user to pick one.
