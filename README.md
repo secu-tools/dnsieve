@@ -6,7 +6,6 @@
 [![Build](https://github.com/secu-tools/dnsieve/actions/workflows/build.yml/badge.svg)](https://github.com/secu-tools/dnsieve/actions/workflows/build.yml)
 [![CodeQL](https://github.com/secu-tools/dnsieve/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/secu-tools/dnsieve/actions/workflows/github-code-scanning/codeql)
 [![Dependency Graph](https://github.com/secu-tools/dnsieve/actions/workflows/dependabot/update-graph/badge.svg)](https://github.com/secu-tools/dnsieve/actions/workflows/dependabot/update-graph)
-[![Go Report Card](https://goreportcard.com/badge/github.com/secu-tools/dnsieve)](https://goreportcard.com/report/github.com/secu-tools/dnsieve)
 
 ## Introduction
 
