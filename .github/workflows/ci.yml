@@ -112,7 +112,29 @@ jobs:
             while IFS= read -r func; do
               [ -z "$func" ] && continue
               echo "=== Fuzzing $func in $pkg for $FUZZ_TIME ==="
-              go test -buildvcs=false -run='^$' -fuzz="^${func}$" -fuzztime="$FUZZ_TIME" -count=1 "$pkg" || FAILED=true
+              # The Go fuzz coordinator has a known shutdown race: when
+              # -fuzztime expires while workers are mid-execution, the run
+              # can FAIL with a bare "context deadline exceeded" even though
+              # no bug was found (golang/go#56238). A genuine finding always
+              # writes a crasher ("Failing input written to testdata/...").
+              # So: fail immediately on a real crasher, otherwise retry the
+              # target once before declaring failure.
+              for attempt in 1 2; do
+                if out=$(go test -buildvcs=false -run='^$' -fuzz="^${func}$" -fuzztime="$FUZZ_TIME" -count=1 "$pkg" 2>&1); then
+                  echo "$out"
+                  break
+                fi
+                echo "$out"
+                if echo "$out" | grep -q "Failing input written to"; then
+                  FAILED=true
+                  break
+                fi
+                if [ "$attempt" -eq 2 ]; then
+                  FAILED=true
+                else
+                  echo "--- Spurious fuzz shutdown failure (no failing input recorded); retrying $func once ---"
+                fi
+              done
             done < <(go test -buildvcs=false -list "^Fuzz" "$pkg" 2>/dev/null | grep "^Fuzz" || true)
           done
           if $FAILED; then exit 1; fi
