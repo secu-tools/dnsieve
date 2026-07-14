@@ -3757,7 +3757,7 @@ func TestJSONEvent_EDEText_NotNullBytes(t *testing.T) {
 	logger := logging.NewWriterLogger(&buf, logging.Config{StdoutMode: "json", Synchronous: true}, "test")
 
 	cfg := config.DefaultConfig()
-	cfg.Cache.Enabled = true // ensure cache.Put is called — this triggers the bug
+	cfg.Cache.Enabled = true // ensure cache.Put is called -- this triggers the bug
 	c := cache.New(100, 3600, 5, 0)
 
 	// The response EDE text will be set by dnsmsg.MakeBlockedResponse using the
@@ -3877,7 +3877,7 @@ func TestJSONEvent_EarlyBlockedReturn_WaitAll(t *testing.T) {
 	clients := []upstream.Client{
 		// Fast blocker signals the block immediately.
 		&mockUpstreamClient{name: "fast-blocker", response: blockedResp},
-		// Slow upstream takes time — exercises WaitAll.
+		// Slow upstream takes time -- exercises WaitAll.
 		&slowMockClient{name: "slow-upstream", response: normalResp, delay: 300 * time.Millisecond},
 	}
 	// Use non-zero minWait so Phase 1 properly waits for block detection
@@ -4134,7 +4134,7 @@ func TestSplitClientAddress_Plain(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// buildClientInfo: Unicode domain → Punycode
+// buildClientInfo: Unicode domain -> Punycode
 // ---------------------------------------------------------------------------
 
 // TestBuildClientInfo_UnicodeDomain_NormalizedToPunycode verifies that a DNS

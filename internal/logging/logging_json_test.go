@@ -852,7 +852,7 @@ func TestLogger_SetLevelUpdatesMinLevel(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ResponseInfo — what was actually sent back to the client
+// ResponseInfo -- what was actually sent back to the client
 // ---------------------------------------------------------------------------
 
 // responseSubmap extracts dns.response from a top-level JSON event.
@@ -1093,7 +1093,7 @@ func TestJSONLogger_ResponseInfo_PresentInAllDNSQueryPaths(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Pool-based write path — verify no data corruption under concurrent use
+// Pool-based write path -- verify no data corruption under concurrent use
 // ---------------------------------------------------------------------------
 
 func TestJSONLogger_ConcurrentWrites(t *testing.T) {
@@ -1135,7 +1135,7 @@ func TestJSONLogger_ConcurrentWrites(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// dns_query events are JSON-only — no text output regardless of mode
+// dns_query events are JSON-only -- no text output regardless of mode
 // ---------------------------------------------------------------------------
 
 func TestDNSQueryEvent_TextModeProducesNoOutput(t *testing.T) {
@@ -1180,7 +1180,7 @@ func TestDNSQueryEvent_DroppedWithoutJSONMode(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// JSON mode minimum level is INFO — DEBUG messages are filtered
+// JSON mode minimum level is INFO -- DEBUG messages are filtered
 // ---------------------------------------------------------------------------
 
 func TestJSONMode_DebugMessageIsFiltered(t *testing.T) {

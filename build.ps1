@@ -1,30 +1,7 @@
 # Copyright (c) 2020-2026 Jack L. (Cpt-JackL) (https://jack-l.com)
 # SPDX-License-Identifier: MIT
-# DNSieve build script for Windows PowerShell
-# Usage:
-#   .\build.ps1                   # Build windows/amd64 + linux/amd64
-#   .\build.ps1 -windows          # Build windows/amd64 + windows/arm64
-#   .\build.ps1 -linux            # Build linux/amd64 + linux/arm64
-#   .\build.ps1 -darwin           # Build darwin/amd64 + darwin/arm64
-#   .\build.ps1 -amd64            # Build all platforms for amd64 only
-#   .\build.ps1 -arm64            # Build all platforms for arm64 only
-#   .\build.ps1 -linux -amd64     # Build linux/amd64 only
-#   .\build.ps1 -linux -arm64     # Build linux/arm64 only
-#   .\build.ps1 -windows -amd64   # Build windows/amd64 only
-#   .\build.ps1 -windows -arm64   # Build windows/arm64 only
-#   .\build.ps1 -all              # Build all platform/arch combinations
-#   .\build.ps1 -test             # Run unit + integration tests and short fuzz seeds
-#   .\build.ps1 -testall          # Run smoke -> unit+integration -> fuzz -> e2e (full suite)
-#   .\build.ps1 -coverage         # Run tests with coverage
-#   .\build.ps1 -clean            # Clean build artifacts
-#   .\build.ps1 -linux -deb       # Build linux + create .deb packages
-#   .\build.ps1 -linux -rpm       # Build linux + create .rpm packages
-#   .\build.ps1 -linux -deb -rpm  # Build linux + both .deb and .rpm
-#   .\build.ps1 -upx              # Enable UPX compression (requires upx installed)
-#   .\build.ps1 -teste2e          # Run end-to-end tests (requires network)
-#   .\build.ps1 -testsmoke        # Run smoke tests (builds binary + network required)
-#
-# All builds use CGO_ENABLED=0 (pure Go).
+# DNSieve build script for Windows PowerShell.
+# See "Build Scripts" in docs/compilation.md for usage and flags.
 #
 # Filename convention:
 #   dnsieve_<VERSION>-<OS>-<ARCH>[.exe]

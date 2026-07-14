@@ -167,7 +167,7 @@ func servePlainAddresses(ctx context.Context, handler *Handler, addrs []string, 
 		udpReady, udpFailed, tcpReady, tcpFailed <-chan struct{}) {
 		waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Second)
 		defer waitCancel()
-		// Wait for UDP init() to finish (success → udpReady, failure → udpFailed).
+		// Wait for UDP init() to finish (success -> udpReady, failure -> udpFailed).
 		select {
 		case <-udpReady:
 		case <-udpFailed:

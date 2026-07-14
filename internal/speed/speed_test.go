@@ -1964,7 +1964,7 @@ func TestExtractAnswerIPs_Mixed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// buildDomainResult – ResolvedIPs population
+// buildDomainResult - ResolvedIPs population
 // ---------------------------------------------------------------------------
 
 func TestBuildDomainResult_ResolvedIPsPopulated(t *testing.T) {
@@ -2004,7 +2004,7 @@ func TestBuildDomainResult_NoIPsForSERVFAIL(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// queryDomain – ipFamily routing (A vs AAAA)
+// queryDomain - ipFamily routing (A vs AAAA)
 // ---------------------------------------------------------------------------
 
 func TestQueryDomain_UsesAAAA_WhenIPv6(t *testing.T) {
@@ -2059,7 +2059,7 @@ func TestQueryDomain_UsesA_WhenEmpty(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// queryDomain – latency measurement
+// queryDomain - latency measurement
 // ---------------------------------------------------------------------------
 
 func TestQueryDomain_TimingIsPositive_OnSuccess(t *testing.T) {
@@ -2126,7 +2126,7 @@ func TestQueryDomain_TimingCapturesRoundTrip(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// printDomainRow / printDomainResults – resolved IPs sub-line
+// printDomainRow / printDomainResults - resolved IPs sub-line
 // ---------------------------------------------------------------------------
 
 func TestPrintDomainResults_ResolvedIPsSubLine(t *testing.T) {
@@ -2177,7 +2177,7 @@ func TestPrintDomainResults_NoIPLine_WhenEmpty(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ServerResult – BootstrapLatency and BootstrapIP fields
+// ServerResult - BootstrapLatency and BootstrapIP fields
 // ---------------------------------------------------------------------------
 
 func TestServerResult_BootstrapFields(t *testing.T) {

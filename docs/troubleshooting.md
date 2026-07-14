@@ -30,10 +30,6 @@ lsof -i :5353
 netstat -ano | findstr :5353
 ```
 
-On Linux with dual-stack (`listen_addresses = ["0.0.0.0", "::"]`), this error can
-appear if another program binds a generic IPv6 socket that implicitly claims all
-IPv4 addresses. DNSieve uses explicit `tcp4`/`udp4` and `tcp6`/`udp6` socket
-types to avoid this, but other programs on the same port may still conflict.
 Change DNSieve's `port` to an unused one, or stop the conflicting service.
 
 **Common culprits on port 53:**
@@ -85,8 +81,8 @@ sudo setcap cap_net_bind_service=+ep /usr/local/bin/dnsieve
 `AmbientCapabilities=CAP_NET_BIND_SERVICE`; ensure the binary has the capability
 set as above.
 
-**Docker:** The compose file already adds `NET_BIND_SERVICE`. For port 53
-mappings update `docker/docker-compose.yml`:
+**Docker:** Uncomment `cap_add: NET_BIND_SERVICE` in
+`docker/docker-compose.yml` and update the port mappings:
 ```yaml
 ports:
   - "53:5353/udp"
@@ -127,7 +123,7 @@ elevated privileges automatically).
 5. **Enable debug logging** to see per-upstream results:
    ```toml
    [logging]
-   log_level = "debug"
+   log_level_stdout = "debug"
    ```
    Look for `Upstream[n] ... blocked=true/false` in the logs.
 
@@ -145,7 +141,7 @@ intelligence.
    ```toml
    [whitelist]
    enabled = true
-   domains = ["falsepositive.example.com"]
+   list_files = ["/etc/dnsieve/whitelist.txt"]  # add the domain to this file
    resolver_address = "https://1.1.1.1/dns-query"
    resolver_protocol = "doh"
    ```
@@ -206,14 +202,13 @@ intelligence.
      - "53:5353/tcp"
    ```
 
-3. **Check if config is mounted.** The config volume must exist and contain a
-   valid `config.toml`:
+3. **Check the config volume.** The container auto-generates a default
+   `config.toml` on first run, but only if it can write to the mounted
+   `./config/` directory (see the ownership note in
+   [docker.md](docker.md#quick-start)). Verify the file exists and is valid:
    ```bash
-   docker exec dnsieve cat /etc/dnsieve/config.toml
+   docker exec dnsieve cat /app/config/config.toml
    ```
-   If the file is missing, the container will exit immediately. Create the
-   `./config/` directory and place your `config.toml` in it before running
-   `docker compose -f docker/docker-compose.yml up -d`.
 
 4. **View container logs:**
    ```bash
@@ -221,11 +216,10 @@ intelligence.
    docker logs dnsieve --follow
    ```
 
-5. **Read-only filesystem errors.** The compose file mounts the container root as
-   read-only. If DNSieve tries to write files outside `/etc/dnsieve` or
-   `/var/log/dnsieve`, it will fail. Ensure `--logdir` is not set to a path
-   outside the mounted volume, and that no process writes to unexpected paths in
-   the container.
+5. **Read-only filesystem errors.** The container filesystem is read-only;
+   only the mounted volumes (`/app/config`, `/app/log`) and `/tmp` are
+   writable. Ensure `--logdir` is not set to a path outside the mounted
+   volumes.
 
 6. **TZ environment variable.** If log timestamps are in the wrong timezone, set
    the `TZ` variable in `docker/docker-compose.yml`:
@@ -279,7 +273,9 @@ address = "https://internal-dns.corp.example.com/dns-query"
 protocol = "doh"
 verify_certificates = false
 ```
-Never disable certificate verification for public upstream servers.
+
+> [!CAUTION]
+> Never disable certificate verification for public upstream servers.
 
 **Generating a self-signed certificate for testing:**
 ```bash
@@ -383,10 +379,10 @@ Or check the startup warning in stderr output:
 WARN | Using fallback log directory (default was not writable). Use --logdir to specify a custom location.
 ```
 
-In **Docker**, logs are written inside the container at `/var/log/dnsieve/`. The
-compose file mounts this to `./log/` on the host. Ensure the `./log/` directory
-is writable by the container's `dnsieve` user (UID varies -- run
-`docker exec dnsieve id` to check, then `chown` accordingly if needed).
+In **Docker**, logs are written inside the container at `/app/log/`. The
+compose file mounts this to `./log/` on the host. Ensure the `./log/`
+directory is writable by the container's `dnsieve` user (UID 1000; run
+`sudo chown -R 1000:1000 log` if needed).
 
 ---
 

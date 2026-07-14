@@ -78,7 +78,7 @@ func installWindows(cfg ServiceConfig) error {
 // quoted executable followed by --svcname and the server arguments. The SCM
 // passes this string verbatim to CreateProcess when starting the service, so
 // every argument is quoted per Windows command-line rules (syscall.EscapeArg)
-// to survive that parsing — --cfgfile/--logdir values may contain spaces.
+// to survive that parsing -- --cfgfile/--logdir values may contain spaces.
 // --svcname is embedded so the binary knows its SCM service name when started
 // by the Service Control Manager (needed for svc.Run).
 func serviceBinPath(exe, name string, args []string) string {

@@ -205,24 +205,10 @@ func isBlockedIPv6(addr netip.Addr) bool {
 }
 
 // MakeBlockedResponse creates a DNS response that signals a blocked domain
-// to the client using the specified blocking mode.
-//
-// Modes (following Pi-hole and Technitium conventions):
-//
-//   - "null" (default, recommended): NOERROR with 0.0.0.0 for A / :: for AAAA.
-//     Other query types get NODATA (NOERROR, empty answer). Clients see an
-//     immediate connection failure. 0.0.0.0 is "this host on this network"
-//     (RFC 1122 Section 3.2.1.3); :: is the unspecified address (RFC 4291
-//     Section 2.5.2). Both Pi-hole and Technitium default to this mode.
-//
-//   - "nxdomain": NXDOMAIN with empty answer. Domain does not exist.
-//
-//   - "nodata": NOERROR with empty answer. Domain exists but no records.
-//
-//   - "refused": REFUSED with empty answer. Server refuses the query.
-//
-// All modes include Extended DNS Error (EDE) code 15 (Blocked) per RFC 8914
-// section 4.16. The extraText includes which upstream detected the block.
+// to the client using the specified blocking mode (see the BlockingMode*
+// constants). All modes include Extended DNS Error (EDE) code 15 (Blocked)
+// per RFC 8914 section 4.16, with extra text naming the upstream that
+// detected the block.
 //
 // The blockedBy parameter identifies the upstream that signalled the block
 // (e.g., "dns.quad9.net"). Pass empty string for cached blocked responses.

@@ -1,31 +1,8 @@
 #!/usr/bin/env bash
 # Copyright (c) 2020-2026 Jack L. (Cpt-JackL) (https://jack-l.com)
 # SPDX-License-Identifier: MIT
-# DNSieve build script for Linux/macOS
-# Usage:
-#   ./build.sh                    # Build linux/amd64 + windows/amd64
-#   ./build.sh -windows           # Build windows/amd64 + windows/arm64
-#   ./build.sh -linux             # Build linux/amd64 + linux/arm64
-#   ./build.sh -darwin            # Build darwin/amd64 + darwin/arm64
-#   ./build.sh -amd64             # Build all platforms for amd64 only
-#   ./build.sh -arm64             # Build all platforms for arm64 only
-#   ./build.sh -linux -amd64      # Build linux/amd64 only
-#   ./build.sh -linux -arm64      # Build linux/arm64 only
-#   ./build.sh -windows -amd64    # Build windows/amd64 only
-#   ./build.sh -windows -arm64    # Build windows/arm64 only
-#   ./build.sh -all               # Build all platform/arch combinations
-#   ./build.sh -test              # Run unit + integration tests and short fuzz seeds
-#   ./build.sh -testall           # Run smoke -> unit+integration -> fuzz -> e2e (full suite)
-#   ./build.sh -coverage          # Run tests with coverage
-#   ./build.sh -clean             # Clean build artifacts
-#   ./build.sh -linux -deb        # Build linux + create .deb packages
-#   ./build.sh -linux -rpm        # Build linux + create .rpm packages
-#   ./build.sh -linux -deb -rpm   # Build linux + both .deb and .rpm
-#   ./build.sh -upx               # Enable UPX compression (requires upx installed)
-#   ./build.sh -teste2e           # Run end-to-end tests (requires network)
-#   ./build.sh -testsmoke         # Run smoke tests (builds binary + network required)
-#
-# All builds use CGO_ENABLED=0 (pure Go).
+# DNSieve build script for Linux/macOS.
+# See "Build Scripts" in docs/compilation.md for usage and flags.
 #
 # Filename convention:
 #   dnsieve_<VERSION>-<OS>-<ARCH>[.exe]

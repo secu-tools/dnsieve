@@ -101,21 +101,11 @@ func versionString() string {
 		resolveVersion(), versionTag())
 }
 
-// Run is the main entry point called from main.go.
 // patchSpeedArg normalises os.Args before flag.Parse so that a bare
-// --speed (or -speed) with no following value is accepted by the flag
-// package. The stdlib flag package requires string flags to always have a
-// value; without this pre-pass `dnsieve --speed` prints
-// "flag needs an argument: -speed" and exits.
-//
-// The logic is intentionally narrow:
-//   - --speed=value and -speed=value already carry their value inline; skip.
-//   - --speed value and -speed value already have a value as the next token
-//     (next token does not start with '-'); skip.
-//   - Bare --speed / -speed with no following non-flag token: insert an
-//     empty string so the parser sees --speed "".
-//
-// An empty string value is equivalent to "use built-in default domains".
+// --speed (or -speed) with no following value is accepted: the stdlib flag
+// package requires string flags to always have a value, so an empty string
+// (meaning "use built-in default domains") is inserted when the flag is
+// bare. Inline (--speed=x) and separated (--speed x) values are left alone.
 func patchSpeedArg() {
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]

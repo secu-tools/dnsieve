@@ -44,30 +44,14 @@ type UpstreamSettings struct {
 	// "ipv4" queries only A records; use on IPv4-only hosts.
 	// "ipv6" queries only AAAA records; use on IPv6-only hosts.
 	BootstrapIPFamily string `toml:"bootstrap_ip_family"`
-	// UpstreamTTL controls periodic re-resolution of upstream
-	// hostnames after the initial startup resolution.
-	//
-	//  -1 (default): disabled. The hostname is resolved once at startup
-	//               and never again. This matches the behaviour of most
-	//               DNS proxy software.
-	//   0:           TTL-based. The resolved IP is reused for the full
-	//               lifetime of the DNS record TTL. When a new connection
-	//               must be established after the TTL has expired the
-	//               hostname is re-resolved via bootstrap DNS. A background
-	//               refresh is triggered proactively when cache.renew_percent
-	//               of the TTL remains so the new address is usually ready
-	//               before the old one expires. A minimum floor of 30 s
-	//               applies to avoid hammering the bootstrap server.
-	//   1-2147483647: fixed interval in seconds. The resolved IP is
-	//               refreshed at most once per interval. The refresh
-	//               only happens when a new connection is being established
-	//               (no existing connections are closed). A background
-	//               refresh is started when cache.renew_percent of the
-	//               interval remains so the address is ready before expiry.
-	//
-	// The background refresh threshold is controlled by cache.renew_percent
-	// (default 10). Re-resolution uses the same bootstrap_dns and
-	// bootstrap_ip_family settings as the initial startup resolution.
+	// UpstreamTTL controls re-resolution of upstream hostnames after the
+	// initial startup resolution:
+	//   -1 (default): disabled, resolve once at startup.
+	//    0:           TTL-based, reuse the IP for the DNS record TTL (30 s floor).
+	//    1-2147483647: fixed interval in seconds.
+	// In modes 0 and N>0 a background refresh starts when cache.renew_percent
+	// of the TTL/interval remains. Re-resolution reuses bootstrap_dns and
+	// bootstrap_ip_family; existing connections are never closed.
 	UpstreamTTL int `toml:"upstream_ttl"`
 }
 
@@ -230,27 +214,10 @@ type TCPKeepaliveConfig struct {
 // BlockingConfig controls how DNSieve responds to clients when an upstream
 // DNS server signals that a domain is blocked.
 type BlockingConfig struct {
-	// Mode selects the DNS response style for blocked domains.
-	//
-	// Supported modes (following Pi-hole and Technitium conventions):
-	//   "null"     - (Default, recommended) NOERROR with 0.0.0.0 for A queries
-	//                and :: for AAAA queries. Other query types receive NODATA
-	//                (NOERROR with empty answer). Clients see an immediate
-	//                connection failure with no timeout. Both Pi-hole and
-	//                Technitium recommend this approach.
-	//   "nxdomain" - NXDOMAIN with empty answer section. Signals that the
-	//                domain does not exist. Some clients retry more aggressively
-	//                than with "null" mode.
-	//   "nodata"   - NOERROR with empty answer section. Signals that the domain
-	//                exists but has no records for the requested type. Better
-	//                client acceptance than NXDOMAIN in some environments.
-	//   "refused"  - REFUSED with empty answer section. Signals that the server
-	//                refuses to answer the query. Caution: some clients may fall
-	//                back to another DNS resolver, bypassing the proxy entirely.
-	//
-	// All modes include Extended DNS Error (EDE) code 15 "Blocked" (RFC 8914)
-	// with extra text identifying which upstream service detected the block.
-	// Example EDE text: "Blocked (dns.quad9.net)"
+	// Mode selects the DNS response style for blocked domains:
+	// "null" (default), "nxdomain", "nodata", or "refused".
+	// See the dnsmsg package BlockingMode* constants and
+	// docs/configuration.md for the semantics of each mode.
 	Mode string `toml:"mode"`
 }
 
@@ -954,49 +921,29 @@ verify_certificates = true
 bootstrap_dns = "9.9.9.9:53,149.112.112.112:53"
 
 # Address family used when the bootstrap DNS resolves DoH/DoT hostnames.
-# The bootstrap lookup races an A query and a AAAA query (RFC 6555 Happy
-# Eyeballs) and connects to whichever responds first. On hosts where one
-# address family has no outbound connectivity the wrong address type can
-# win, causing every upstream connection to fail.
 #
-#   "auto" -- race A and AAAA, fastest wins (default; best for dual-stack)
-#   "ipv4" -- query only A records  (use on IPv4-only hosts / containers)
-#   "ipv6" -- query only AAAA records (use on IPv6-only hosts)
+#   "auto" -- race A and AAAA, fastest wins. On hosts where one family has
+#             no outbound connectivity the wrong address type can win,
+#             causing every upstream connection to fail.
+#   "ipv4" -- query only A records (safe everywhere; generated default)
+#   "ipv6" -- query only AAAA records (IPv6-only hosts)
 #
-# This setting only affects how upstream hostnames are resolved. The
-# encrypted DNS traffic itself flows over whatever address is returned.
-# Leave as "auto" on dual-stack hosts.
+# Only affects how upstream hostnames are resolved, not the DNS traffic
+# itself. Switch to "auto" on dual-stack hosts if preferred.
 bootstrap_ip_family = "ipv4"
 
 # Controls whether and how often upstream hostnames are re-resolved after
 # the initial startup resolution.
 #
-#   -1   -- Disabled (default). The hostname is resolved once at startup
-#            and never again. This is the standard behaviour for DNS proxy
-#            software. Use this when your upstreams have stable IPs that
-#            rarely or never change.
+#   -1   -- Disabled (default). Resolve once at startup, never again.
+#    0   -- TTL-based. The IP is valid for the DNS record TTL (30 s floor);
+#            re-resolved on the next new connection after expiry.
+#   N>0  -- Fixed interval in seconds (minimum sensible value: 60).
 #
-#    0   -- TTL-based. The resolved IP is considered valid for the full TTL
-#            of the DNS record returned during resolution. When a new
-#            connection must be opened after the TTL expires, the hostname
-#            is re-resolved via bootstrap DNS. A background refresh is
-#            triggered when cache.renew_percent of the TTL remains (default
-#            10%) so the new address is usually ready before the old one
-#            expires, avoiding any slowdown on connection setup. A floor of
-#            30 seconds is enforced so that very short TTLs do not cause
-#            excessive bootstrap queries. No open connections are closed
-#            forcibly.
-#
-#   N>0  -- Fixed interval in seconds (1 to 2147483647). The IP is
-#            considered valid for N seconds. Re-resolution happens only
-#            when a new connection needs to be established after the
-#            interval has elapsed. A background refresh begins when
-#            cache.renew_percent of the interval remains (default 10%) to
-#            keep the address fresh. No open connections are closed.
-#            Minimum sensible value: 60.
-#
-# All modes reuse the same bootstrap_dns and bootstrap_ip_family settings
-# that were active at startup.
+# In modes 0 and N>0 a background refresh starts when cache.renew_percent
+# of the TTL/interval remains, so the new address is usually ready before
+# the old one expires. Open connections are never closed forcibly. All
+# modes reuse bootstrap_dns and bootstrap_ip_family.
 upstream_ttl = -1
 
 
@@ -1049,23 +996,19 @@ use_plaintext_http = false
 # =============================================================================
 # Cache Settings
 # =============================================================================
-# DNSieve caches DNS responses using an LRU (Least Recently Used) eviction
-# policy. Cache TTLs are based on upstream DNS response TTLs.
+# DNSieve caches DNS responses in memory. When full, the entry closest to
+# expiry is evicted first (TTL-priority, not LRU). Cache TTLs are based on
+# upstream DNS response TTLs. See docs/caching.md for details.
 #
-# Memory usage: each cached entry uses approximately 500-1500 bytes depending
-# on the DNS response size. Rough estimates:
+# Memory usage: each cached entry uses approximately 500-1500 bytes.
 #   10,000 entries ~ 5-15 MB    (suitable for ~20 users, 30 devices)
 #   50,000 entries ~ 25-75 MB   (suitable for ~100 users, 200 devices)
 #  100,000 entries ~ 50-150 MB  (suitable for ~500 users, 1000 devices)
-#
-# For a business with 100 employees on 1 computer each plus ~1900 servers,
-# consider 50,000-100,000 entries depending on available memory.
 
 [cache]
 enabled = true
 
-# Maximum number of cached entries (LRU eviction when full).
-# See memory estimates above to size appropriately for your environment.
+# Maximum number of cached entries (closest-to-expiry eviction when full).
 max_entries = 10000
 
 # TTL for blocked domain responses in seconds (default: 24 hours).
@@ -1078,15 +1021,10 @@ blocked_ttl = 86400
 # down DNS resolution. Recommended: 60-300.
 min_ttl = 60
 
-# Background cache refresh threshold as a percentage of the entry's total TTL.
-# When a client requests a cached entry with less than renew_percent of its TTL
-# remaining, DNSieve returns the cached result and quietly re-queries all
-# upstream servers in the background. The response is only committed to cache
-# if all upstream servers respond and the result is cacheable (same block
-# consensus rules apply). If the result is not cacheable, the old entry stays
-# until it naturally expires.
-# This value also controls when the upstream hostname resolver starts a
-# background re-resolution (see upstream_settings.upstream_ttl).
+# Background cache refresh threshold as a percentage of the entry's total
+# TTL. When a cached entry is served with less than this much TTL remaining,
+# upstreams are quietly re-queried in the background. Also controls when
+# upstream hostnames are re-resolved (see upstream_settings.upstream_ttl).
 # 0 disables background refresh. Range: 0-99. Default: 10.
 renew_percent = 10
 
@@ -1094,38 +1032,20 @@ renew_percent = 10
 # =============================================================================
 # Blocking Mode
 # =============================================================================
-# Controls how DNSieve responds when an upstream DNS server signals that a
-# domain is blocked (malware, phishing, tracking, etc.).
-#
-# Both Pi-hole and Technitium DNS Server recommend "null" mode as the default.
-# See docs/configuration.md for a detailed comparison of each mode.
-#
-# All modes include Extended DNS Error (EDE) code 15 "Blocked" (RFC 8914)
-# with extra text identifying which upstream service detected the block.
-# Example EDE extra text: "Blocked (dns.quad9.net)"
+# Controls how DNSieve responds when an upstream signals that a domain is
+# blocked. All modes include Extended DNS Error (EDE) code 15 "Blocked"
+# (RFC 8914) identifying which upstream detected the block.
+# See docs/configuration.md for a detailed comparison.
 
 [blocking]
 # Blocking response mode:
-#
-#   "null"      - (Default, recommended) NOERROR with 0.0.0.0 for A queries
-#                 and :: for AAAA queries. Other query types get empty NODATA.
-#                 Clients see an immediate connection failure with no timeout.
-#                 0.0.0.0 is "this host on this network" (RFC 1122 Section
-#                 3.2.1.3). :: is the IPv6 unspecified address (RFC 4291
-#                 Section 2.5.2). Connections fail instantly with "connection
-#                 refused" -- no HTTP timeout, no retry storm.
-#
-#   "nxdomain"  - NXDOMAIN with empty answer. Tells clients the domain does
-#                 not exist. Some clients retry more aggressively with this
-#                 mode compared to "null".
-#
-#   "nodata"    - NOERROR with empty answer. Tells clients the domain exists
-#                 but has no records for the requested type. Better client
-#                 acceptance than NXDOMAIN in some environments.
-#
-#   "refused"   - REFUSED with empty answer. Tells clients the server refuses
-#                 the query. WARNING: some clients may fall back to another
-#                 DNS resolver, bypassing this proxy entirely.
+#   "null"      - (Default, recommended by Pi-hole and Technitium) NOERROR
+#                 with 0.0.0.0 (A) or :: (AAAA); other types get NODATA.
+#                 Clients fail instantly with no timeout or retry storm.
+#   "nxdomain"  - NXDOMAIN with empty answer. Some clients retry aggressively.
+#   "nodata"    - NOERROR with empty answer.
+#   "refused"   - REFUSED. WARNING: some clients fall back to another DNS
+#                 resolver, bypassing this proxy entirely.
 mode = "null"
 
 
@@ -1244,62 +1164,36 @@ list_ttl = 0
 # =============================================================================
 # Privacy Settings
 # =============================================================================
-# Controls how DNSieve handles privacy-sensitive EDNS0 options when proxying
-# queries between LAN clients and upstream DNS servers.
-#
-# Since this proxy sits between your LAN and remote upstream servers, these
-# settings help you control what information is leaked to upstreams.
+# Controls privacy-sensitive EDNS0 options when proxying queries between
+# clients and upstream DNS servers.
 
 [privacy.ecs]
-# EDNS Client Subnet (RFC 7871) handling.
-# Controls whether client subnet information is sent to upstream DNS servers.
+# EDNS Client Subnet (RFC 7871) handling:
+#   "strip"      - Remove ECS from forwarded queries (best for privacy).
+#   "forward"    - Forward client ECS verbatim (may improve CDN routing).
+#   "substitute" - Replace client ECS with the subnet configured below.
 #
-# Options:
-#   "strip"      - Remove ECS from all forwarded queries. Best for privacy.
-#                  Upstream servers will not receive client location hints.
-#                  This is the recommended default for a LAN proxy.
-#   "forward"    - Forward client ECS verbatim to upstream servers.
-#                  Reduces privacy but may improve CDN routing accuracy.
-#   "substitute" - Replace client ECS with a specific subnet you provide.
-#                  Useful when you want CDN optimization for a specific
-#                  location without revealing individual client addresses.
-#
-# Default: "strip" (best privacy for LAN-to-remote proxy setups)
+# Default: "strip"
 mode = "strip"
 
-# Only used when mode = "substitute". Specify a subnet in CIDR notation
+# Only used when mode = "substitute". Subnet in CIDR notation
 # (e.g., "203.0.113.0/24" for IPv4 or "2001:db8::/32" for IPv6).
 # subnet = "203.0.113.0/24"
 
 [privacy.cookies]
-# DNS Cookies (RFC 7873) handling.
-# DNS cookies provide lightweight transaction authentication between
-# DNS clients and servers.
-#
-# Options:
-#   "reoriginate"  - Maintain independent cookie state per upstream server.
-#                    The proxy generates its own client cookies for each
-#                    upstream, processes server cookies independently, and
-#                    strips client cookies from downstream responses.
-#                    Provides full cookie security between proxy and upstreams.
-#   "strip"        - Remove all DNS cookies from forwarded queries and
-#                    responses. Upstream servers will not see cookie data.
+# DNS Cookies (RFC 7873) handling:
+#   "reoriginate"  - The proxy keeps its own cookie state per upstream and
+#                    strips cookies from responses to clients.
+#   "strip"        - Remove all cookies from forwarded queries and responses.
 #
 # Default: "reoriginate"
 mode = "reoriginate"
 
 [privacy.nsid]
-# Name Server Identifier (RFC 5001) handling.
-# NSID allows clients to request the identity of the DNS server.
-#
-# Options:
-#   "strip"      - Remove NSID option from forwarded queries.
-#                  Upstream servers will not receive NSID requests.
-#                  Recommended default for privacy.
-#   "forward"    - Forward NSID requests to upstream servers verbatim
-#                  and return their NSID responses to clients.
-#   "substitute" - Intercept NSID requests and return the proxy's own
-#                  identifier (configured below) instead of forwarding.
+# Name Server Identifier (RFC 5001) handling:
+#   "strip"      - Remove NSID from forwarded queries (default).
+#   "forward"    - Forward NSID requests and responses verbatim.
+#   "substitute" - Answer NSID requests with the identifier configured below.
 #
 # Default: "strip"
 mode = "strip"
@@ -1310,20 +1204,12 @@ mode = "strip"
 [privacy.padding]
 # EDNS(0) Padding (RFC 7830 / RFC 8467) for upstream queries.
 #
-# When enabled, queries forwarded to encrypted upstreams (DoT, DoH) are
-# padded to a multiple of 128 bytes using a random jitter before alignment
-# (RFC 8467 s4.1). The random jitter prevents identical queries from always
-# producing the same wire size, defeating cross-query size fingerprinting
-# (RFC 8467 s3). Padding is never added to plain UDP upstreams (RFC 7830
-# s3.1).
+# When enabled, queries to encrypted upstreams (DoT, DoH) are padded to a
+# multiple of 128 bytes with random jitter, defeating cross-query size
+# fingerprinting. Plain UDP upstreams are never padded.
 #
-# When a client sends a PADDING option over TCP/DoT/DoH, the proxy always
-# echoes padding back in the response (468-byte blocks, RFC 8467 s4.2),
+# Client-requested response padding over TCP/DoT/DoH is always honoured,
 # regardless of this setting.
-#
-# RFC 6891 s6.1.2 requires DNS servers to silently ignore unrecognised
-# EDNS options, so padded queries are safe to send to any RFC-compliant
-# upstream.
 #
 # Default: true
 upstream_padding = true

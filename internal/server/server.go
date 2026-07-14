@@ -361,7 +361,7 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 	h.edns.HandleNSIDSubstitute(query, result.BestResponse)
 
 	// Step 9: Return best response, cache if appropriate.
-	// Emit JSON log BEFORE caching to preserve EDE ExtraText — the dns
+	// Emit JSON log BEFORE caching to preserve EDE ExtraText -- the dns
 	// library's pack mutation corrupts EDE.ExtraText on Pack (triggered
 	// internally by cache.Put).
 	h.logger.Debugf("Query %s %s -> rcode=%s cacheable=%v allResponded=%v",
@@ -720,7 +720,6 @@ func RunContext(ctx context.Context, cfg *config.Config, logger *logging.Logger)
 	return nil
 }
 
-// stopListWatchers stops background file watchers for whitelist and blacklist.
 // newBlacklist creates and loads a DomainList for the blacklist config.
 // Returns nil when blacklisting is disabled.
 func newBlacklist(cfg *config.BlacklistConfig, logger *logging.Logger) *domainlist.DomainList {
@@ -770,6 +769,7 @@ func newBlacklist(cfg *config.BlacklistConfig, logger *logging.Logger) *domainli
 	return bl
 }
 
+// stopListWatchers stops background file watchers for whitelist and blacklist.
 func stopListWatchers(wl *upstream.WhitelistResolver, bl *domainlist.DomainList) {
 	if wl != nil {
 		wl.Stop()

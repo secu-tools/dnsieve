@@ -45,41 +45,20 @@ The generated systemd unit file applies several security directives:
 
 ### ProtectSystem
 
-`ProtectSystem=strict` remounts the entire filesystem hierarchy read-only
-inside the service mount namespace (with the exception of paths listed in
-`ReadWritePaths`). This gives the service no write access anywhere outside
-its designated config and log directories.
-
-DNSieve uses `ProtectSystem=strict` for production installs (binary in a
-system path such as `/usr/local/bin`, config in `/etc/dnsieve`, logs in
-`/var/log/dnsieve`). In this configuration the service cannot tamper with
-the rest of the filesystem even if compromised.
-
-When any relevant path (binary, config directory, or log directory) is
-located under `/tmp` -- which is typical of development builds and CI
-installations -- DNSieve sets `ProtectSystem=no` instead. With
-`ProtectSystem=strict` in effect, `/tmp` is also remounted read-only inside
-the namespace, which prevents the service from starting correctly when the
-binary or configuration lives there. Setting `ProtectSystem=no` disables all
-filesystem remounting for those installs while the remaining hardening
-directives (`NoNewPrivileges`, `AmbientCapabilities`) still apply.
+`ProtectSystem=strict` remounts the filesystem read-only for the service
+except for `ReadWritePaths` (the config and log directories). DNSieve uses
+it for production installs. When the binary, config, or log path is under
+`/tmp` (development or CI installs), DNSieve sets `ProtectSystem=no`
+instead, because strict mode would remount `/tmp` read-only and prevent the
+service from starting; the other hardening directives still apply.
 
 ### ProtectHome
 
-`ProtectHome=yes` makes `/home`, `/root`, and `/run/user` appear empty and
-inaccessible to the service at the mount-namespace level. This is stronger
-than `ReadWritePaths`: even paths listed in `ReadWritePaths` that fall under
-these prefixes remain inaccessible.
+`ProtectHome=yes` (the default) makes `/home`, `/root`, and `/run/user`
+inaccessible to the service, even for paths listed in `ReadWritePaths`.
+When a custom `--cfgfile` or `--logdir` points under one of those prefixes,
+DNSieve automatically sets `ProtectHome=no` in the generated unit file.
 
-DNSieve sets `ProtectHome=yes` by default, which is appropriate when the
-binary, config file, and log directory all reside in system paths such as
-`/usr/local/bin`, `/etc/dnsieve`, and `/var/log/dnsieve`.
-
-If you supply a custom `--cfgfile` or `--logdir` pointing to a path under
-`/home/`, `/root/`, or `/run/user/`, DNSieve automatically sets
-`ProtectHome=no` in the generated unit file so the service can access those
-paths at startup.
-
-For system-level deployments, keeping config and logs in standard system
-directories (`/etc/dnsieve`, `/var/log/dnsieve`) is recommended so the
-stronger `ProtectHome=yes` setting can be used.
+> [!TIP]
+> Keep config and logs in the standard system directories (`/etc/dnsieve`,
+> `/var/log/dnsieve`) so the stronger `ProtectHome=yes` setting can be used.

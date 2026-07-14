@@ -13,36 +13,20 @@ DNS filtering proxy that queries multiple upstream DNS servers concurrently
 and enforces block-consensus: if **any** upstream signals a domain is
 blocked, the blocked response is returned to the client.
 
-DNSieve relies primarily on upstream filtering rather than maintaining local
-block lists. Instead of downloading and maintaining lists of known-bad domains
-(as Pi-hole or AdGuard Home do), DNSieve acts as an intelligent proxy that fans
-out each DNS query to multiple upstream resolvers -- such as Quad9, Cloudflare
-for Families, or Control D -- that already perform threat-intelligence filtering
-on their end. DNSieve then enforces the strictest outcome: if any upstream
-signals a domain is blocked, DNSieve returns a blocked response to the client.
-This means there are no lists to download, store, deduplicate, or refresh --
-protection is always as current as the upstream providers. Combining multiple
-providers gives complementary coverage across malware, phishing, and newly
-registered domains without managing separate subscriptions. For cases where you
-want to block specific domains not covered by upstream filtering, an optional
-local blacklist is also available -- it is disabled by default and entirely
-opt-in. The trade-off is that querying all upstreams concurrently introduces a
-small amount of latency compared to a single-server setup; for best results, use
-fast upstream servers and keep the count to 2-3.
+Instead of maintaining local block lists, DNSieve fans each query out to
+upstream resolvers that already perform threat-intelligence filtering --
+such as Quad9, Cloudflare for Families, or Control D -- and enforces the
+strictest outcome. There are no lists to download or refresh, and combining
+providers gives complementary coverage. An optional local blacklist
+(disabled by default) covers domains your upstreams miss.
 
-> **Development Status**
->
-> DNSieve is still under active development. Not all features have been fully tested and edge cases may exist. This project was built for personal use -- use it at your own discretion.
->
-> If you encounter any issues, please open a report in the [Issues](../../issues) section. Include full app version and commit sha, steps to reproduce and a screenshot when possible -- it helps a lot. I may or may not have time to address every report, but all feedback is appreciated.
-
-## AI Assisted
-
-This project is AI assisted. The core idea and original code started back in 2020 as a personal project, written in a messy "it works on my machine" style. AI helped finish planned features, clean up and restructure the code, make it more efficient, and catch bugs that weren't even on the radar.
+> [!TIP]
+> Fanning out to all upstreams adds a little latency versus a single
+> resolver. Use 2-3 fast upstream servers for best results.
 
 ## App Privacy
 
-The app communicates only with the IPs and domains you explicitly configure in the config file. If bootstrap servers are unavailable or not configured, it falls back to your computer's default DNS servers to resolve upstream domains. That's it. No telemetry, no callbacks, no surprises. Feel free to read through the code to verify.
+The app communicates only with the IPs and domains you configure. If bootstrap servers are unavailable or not configured, it falls back to your computer's default DNS servers to resolve upstream domains. No telemetry, no callbacks -- feel free to read the code to verify.
 
 ## How It Works
 
@@ -58,8 +42,8 @@ The app communicates only with the IPs and domains you explicitly configure in t
      a blocked response with EDE Blocked (RFC 8914 code 15) to the client.
      Default mode: NOERROR + 0.0.0.0/:: (configurable: null, nxdomain,
      nodata, refused)
-   - If **not blocked** and **all** upstreams responded, cache from the
-     highest-priority upstream and return
+   - If **not blocked** and **all** upstreams responded, cache and return
+     the best response (DNSSEC-validated preferred, then highest priority)
    - If some upstreams had errors, do **not** cache but still return the
      best available result
 8. Nearly-expired cache entries are refreshed in the background to keep
@@ -70,7 +54,7 @@ The app communicates only with the IPs and domains you explicitly configure in t
 - **Concurrent fan-out** with block-consensus across multiple upstreams
 - **DNS-over-HTTPS** (RFC 8484), **DNS-over-TLS** (RFC 7858), and **plain DNS**
   for both upstream and downstream
-- **LRU caching** with upstream TTL respect, background refresh for
+- **In-memory caching** with upstream TTL respect, background refresh for
   nearly-expired entries, and configurable minimum TTL
 - **Domain whitelist and blacklist** with file-based lists, glob patterns, and wildcard support (`*.example.com`); hot-reload without restarts
 - **Bootstrap DNS** for resolving DoH/DoT hostnames without system DNS
@@ -103,8 +87,8 @@ The easiest way to deploy DNSieve is with Docker Compose:
 
 ```bash
 mkdir -p config log
-# Place your config.toml in ./config/ (or run dnsieve once to generate one)
 docker compose -f docker/docker-compose.yml up -d
+# A default config.toml is generated in ./config/ on first run
 ```
 
 The included `docker/docker-compose.yml` pulls the pre-built image from GHCR and

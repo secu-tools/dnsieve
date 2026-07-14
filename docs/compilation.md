@@ -14,32 +14,42 @@ go build -o dnsieve ./
 
 ## Build Scripts
 
-Cross-platform build scripts are included with support for multi-arch builds,
-packaging, testing, and coverage.
+All three scripts accept the same flags. Run the one for your OS:
 
-### PowerShell (Windows)
+| Platform | Command |
+|---|---|
+| Linux / macOS | `./build.sh [flags]` |
+| Windows (PowerShell) | `.\build.ps1 [flags]` |
+| Windows (CMD) | `build.cmd [flags]` (forwards to `build.ps1`) |
 
-```powershell
-.\build.ps1                   # Windows + Linux amd64
-.\build.ps1 -all              # All platforms and architectures
-.\build.ps1 -linux -deb       # Linux + .deb packages
-.\build.ps1 -linux -rpm       # Linux + .rpm packages
-.\build.ps1 -upx              # Enable UPX compression (requires upx installed)
-.\build.ps1 -test             # Run tests
-.\build.ps1 -coverage         # Run tests with coverage
-.\build.ps1 -clean            # Clean build artifacts
-```
+| Flag | Effect |
+|---|---|
+| `-windows` / `-linux` / `-darwin` | Select platform(s); combine freely |
+| `-amd64` / `-arm64` | Select architecture(s); combine freely |
+| `-all` | Build every platform/arch combination |
+| `-upx` | Enable UPX binary compression (requires `upx` in `PATH`) |
+| `-deb` / `-rpm` | Package linux builds as .deb/.rpm (combine with `-linux`) |
+| `-test` | Run unit + integration tests + fuzz seed corpus |
+| `-testall` | Run the full suite: smoke, unit, integration, fuzz, e2e |
+| `-testsmoke` | Run smoke tests (builds a binary; needs network) |
+| `-teste2e` | Run end-to-end tests (needs network) |
+| `-coverage` | Run tests with a coverage report |
+| `-clean` | Remove build artifacts |
 
-### Shell (Linux/macOS)
+Example: `./build.sh -linux -arm64 -deb` builds linux/arm64 and packages it as `.deb`.
+
+> [!NOTE]
+> With no flags, all three scripts build windows/amd64 + linux/amd64. Darwin
+> is always opt-in (`-darwin` or `-all`). All builds use `CGO_ENABLED=0`
+> (pure Go).
+
+**Makefile** (Linux/macOS convenience wrapper; not flag-based):
 
 ```bash
-./build.sh                    # Linux + macOS amd64
-./build.sh -all               # All platforms and architectures
-./build.sh -linux -deb        # Linux + .deb packages
-./build.sh -upx               # Enable UPX compression (requires upx installed)
-./build.sh -test              # Run tests
-./build.sh -coverage          # Run tests with coverage
-./build.sh -clean             # Clean build artifacts
+make build          # Native build
+make cross          # All platforms (delegates to build.sh)
+make test           # Run unit tests
+make coverage       # Tests with coverage report
 ```
 
 ## Version Embedding

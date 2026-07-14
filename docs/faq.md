@@ -6,44 +6,24 @@ Pi-hole and AdGuard Home maintain local block lists that must be downloaded, sto
 
 **Q: Can I use DNSieve together with Pi-hole?**
 
-Yes, and there are two useful topologies depending on what you want to achieve.
-
-**Topology A -- Pi-hole in front (recommended for most setups):**
+Yes. The recommended topology is Pi-hole in front:
 
 ```
 Clients -> Pi-hole (port 53) -> DNSieve -> [Quad9, Cloudflare, ...]
 ```
 
-Pi-hole handles its local block lists and serves your network on port 53. You set
-DNSieve as Pi-hole's upstream resolver. This gives you Pi-hole's ad-list blocking
-*and* DNSieve's multi-provider threat-intelligence filtering in a single stack.
+In Pi-hole's *Settings -> DNS*, set a Custom upstream DNS server pointing at
+DNSieve (e.g. `127.0.0.1#5353` on the same host). You get Pi-hole's ad-list
+blocking plus DNSieve's multi-provider filtering.
 
-To configure this, go to Pi-hole's *Settings -> DNS* and set a Custom upstream DNS
-server pointing at DNSieve's address and port (e.g. `127.0.0.1#5353` if both run
-on the same host).
+Alternatively, run DNSieve in front with Pi-hole as one upstream
+(`Clients -> DNSieve -> [Pi-hole, Quad9, ...]`) so Pi-hole's list decisions
+participate in the block-consensus.
 
-**Topology B -- DNSieve in front, Pi-hole as one upstream:**
-
-```
-Clients -> DNSieve -> [Pi-hole, Quad9, Cloudflare, ...]
-```
-
-DNSieve fans all queries out to Pi-hole *and* to threat-intel providers
-concurrently. If any of them signals a block, DNSieve returns a blocked response
-(block-consensus). This lets Pi-hole's list-based decisions participate in the
-consensus alongside Quad9/Cloudflare.
-
-There is one important requirement: Pi-hole must use a **separate** upstream DNS
-(e.g. `8.8.8.8` or `9.9.9.9` directly) that does **not** point back to DNSieve.
-If Pi-hole's upstream is DNSieve, queries loop indefinitely.
-
-Keep Pi-hole's upstream server count low in this topology -- DNSieve already
-fans out to multiple providers, so Pi-hole only needs one reliable non-blocking
-resolver for its own lookups.
-
-**Which topology should I choose?**
-
-Topology A
+> [!WARNING]
+> In that second topology, Pi-hole's own upstream must NOT point back to
+> DNSieve, or queries loop indefinitely. Give Pi-hole one separate
+> non-blocking resolver (e.g. `8.8.8.8`).
 
 ---
 
@@ -144,8 +124,10 @@ list_files = ["/etc/dnsieve/blacklist.txt"]
 Yes -- entries in list files use the same format:
 - `example.com` -- exact match only
 - `*.example.com` -- all subdomains (and `example.com` itself)
-- `*.fr` -- every `.fr` domain
-- `*` -- everything (whitelist: effectively bypasses all blocking)
+
+The wildcard base must contain at least one dot: TLD-wide entries like
+`*.fr` and the bare `*` do not match everything (see
+[configuration.md -- Domain Matching](configuration.md#domain-matching)).
 
 **Q: How does the cache background refresh work?**
 
@@ -171,29 +153,18 @@ Yes. The default `listen_addresses = ["0.0.0.0", "::"]` binds to both IPv4 and
 IPv6 interfaces simultaneously. DNSieve also forwards AAAA queries and blocks
 AAAA answers according to the configured `blocking.mode` (default: `"null"`,
 which returns `::` for blocked AAAA queries).
+
 **Q: How do I test that blocking is working?**
 
-Use a domain known to be blocked by your upstream providers. For example, Quad9
-blocks `malware.testcategory.com`. Query it through DNSieve:
+Use a domain known to be blocked by your upstream providers. For example,
+Quad9 blocks `malware.testcategory.com`:
 
 ```bash
-# Plain DNS
-nslookup malware.testcategory.com 127.0.0.1
-
-# Dig (port 5353)
 dig @127.0.0.1 -p 5353 malware.testcategory.com A
 ```
 
-A blocked response depends on the configured `blocking.mode`. In the default
-`"null"` mode, the response has status NOERROR with a 0.0.0.0 answer and
-EDE code 15 (Blocked) in the OPT record. You can verify this with:
-
-```bash
-dig @127.0.0.1 -p 5353 malware.testcategory.com A +norecurse
-```
-
-Look for `status: NOERROR`, a `0.0.0.0` answer record, and an
-`EDE: 15 (Blocked)` line in the OPT pseudo-section.
+In the default `"null"` mode, look for `status: NOERROR`, a `0.0.0.0` answer
+record, and an `EDE: 15 (Blocked)` line in the OPT pseudo-section.
 
 **Q: How do I check which upstreams are fastest for my location?**
 
@@ -212,9 +183,12 @@ in table form.
 
 **Q: Does DNSieve log which domains are blocked?**
 
-Yes. At the default `info` log level, blocked domains are logged:
-```
-example.com. is blocked (ttl=86400s)
-```
-Set `log_level = "debug"` to see every query, cache hit/miss, per-upstream result,
-and the final decision for each request.
+Yes, in two ways:
+
+- **Text mode**: set `log_level_stdout = "debug"` (or `log_level_file`) to
+  see every query, cache hit/miss, per-upstream result, and the final
+  decision -- including blocked domains. Default `info` text mode does not
+  log per-query lines.
+- **JSON mode** (`log_level_stdout = "json"`): a structured `dns_query`
+  event is emitted for every query, with `decision.blocked` and the block
+  source. See [docs/logging.md](logging.md).

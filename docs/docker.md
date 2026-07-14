@@ -17,11 +17,10 @@ docker compose -f docker/docker-compose.yml stop
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-> **Note:** Create the `config` and `log` directories before the first run.
-> On Linux the container user (UID 1000) must be able to write to them.
-> If your host user is UID 1000 (the default on most Linux desktops),
-> `mkdir -p config log` is all that is needed. On macOS or with a different
-> UID, run `sudo chown -R 1000:1000 config log` after creating the directories.
+> [!IMPORTANT]
+> Create the `config` and `log` directories before the first run. The
+> container user (UID 1000) must be able to write to them -- on macOS or
+> with a different host UID, run `sudo chown -R 1000:1000 config log`.
 
 ## Default Ports
 
@@ -134,11 +133,9 @@ settings.
 
 ## Restart Policy
 
-The compose file uses `restart: on-failure`. This means:
-- The container restarts automatically if DNSieve exits with a non-zero code
-  (e.g., a crash or config error on startup).
-- A clean shutdown via `docker stop` or `docker compose stop` (exit 0) does
-  not trigger a restart.
+The compose file uses `restart: unless-stopped`: the container restarts
+automatically after a crash or host reboot, but stays down after an explicit
+`docker stop` / `docker compose stop`.
 
 ## Environment Variables
 
@@ -153,7 +150,7 @@ DNS server:
 
 ```yaml
 healthcheck:
-  test: ["CMD", "nslookup", "example.com", "127.0.0.1"]
+  test: ["CMD", "nslookup", "example.com", "127.0.0.1:5353"]
   interval: 30s
   timeout: 5s
   retries: 3

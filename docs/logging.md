@@ -535,9 +535,7 @@ Identifier option (RFC 5001).
 ### Internationalized domain name (IDN)
 
 DNSieve always logs the Punycode/ACE form of the domain name as it appears
-in the DNS wire format. For example, an IDN like
-`xn--fiq228c.example` is logged as-is. There is no separate `domain_ace`
-field.
+in the DNS wire format. There is no separate `domain_ace` field.
 
 ```json
 {
@@ -579,7 +577,7 @@ from the cache. The background query only updates the cache for future
 requests. The `message` field includes `background-refresh` to distinguish
 these events from normal client-driven queries.
 
-The `client` sub-object contains only the domain name and query type; it has
+The `request` sub-object contains only the domain name and query type; it has
 no `ip`, `port`, or `protocol` because there is no associated network
 connection.
 

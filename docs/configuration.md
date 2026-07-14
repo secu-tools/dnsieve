@@ -26,17 +26,11 @@ dnsieve
 DNSieve queries all configured upstream servers concurrently. If **any**
 upstream signals a domain is blocked, the blocked response is returned.
 
-Using more than 3 upstream servers may slow down DNS resolution and
-increase startup time. For best results, pick 2-3 fast providers with
-complementary filtering.
-
-**Recommendation: use DNSSEC-supporting upstreams.** DNSieve always sets
-DO=1 on every upstream query. If an upstream supports DNSSEC it returns
-signed records (RRSIG) or sets the Authenticated Data (AD) bit. DNSieve
-then prefers that response over unsigned responses from other upstreams,
-even if those upstreams have a higher priority index. If none of your
-configured upstreams support DNSSEC, DNSieve falls back to the
-highest-priority valid response.
+> [!TIP]
+> Pick 2-3 fast providers with complementary filtering. More than 3
+> upstreams slows down resolution and startup. Prefer DNSSEC-supporting
+> upstreams: DNSieve prefers a DNSSEC-validated response (RRSIG or AD=1)
+> over unsigned ones when selecting which answer to return.
 
 ```toml
 [[upstream]]
@@ -90,41 +84,32 @@ protocol = "udp"
 timeout_ms = 2000            # Per-upstream query timeout
 min_wait_ms = 200            # Minimum wait for block consensus
 verify_certificates = true   # Global TLS cert verification
-# bootstrap_dns = "9.9.9.9:53"  # Bootstrap DNS for DoH/DoT hostname resolution
+bootstrap_dns = "9.9.9.9:53,149.112.112.112:53"  # Bootstrap DNS for DoH/DoT hostname resolution
 ```
 
 ### timeout_ms vs min_wait_ms
 
-These two settings work together to implement the block-consensus algorithm:
+- **`timeout_ms`** is the hard deadline for each upstream query.
+- **`min_wait_ms`** is the minimum time DNSieve waits before accepting an
+  early result, so a fast non-blocking upstream cannot win before a slower
+  blocking upstream has a chance to signal a block.
 
-- **`timeout_ms`** is the hard deadline for each upstream query. If an upstream
-  does not respond within this time, the query to that upstream is cancelled.
-
-- **`min_wait_ms`** is the minimum time DNSieve waits before it is allowed to
-  return an early result. Even if one upstream responds very quickly, DNSieve
-  will wait at least `min_wait_ms` so that slower upstreams have a chance to
-  signal a block.
-
-**Why `min_wait_ms` matters:** Suppose upstream A (fast, non-blocking) responds
-in 10ms and upstream B (slow, blocking) responds in 150ms. Without
-`min_wait_ms`, DNSieve would accept upstream A's response immediately and the
-blocked domain would be served. With `min_wait_ms = 200`, DNSieve waits the
-full 200ms, receives upstream B's block signal, and returns the blocked
-response correctly.
-
-Set `min_wait_ms` high enough that all your blocking upstreams can respond, but
-no higher than necessary (latency cost). A value of 150-300ms works well for
-publicly hosted blocking resolvers.
+> [!IMPORTANT]
+> Set `min_wait_ms` high enough for your slowest blocking upstream to
+> respond, but no higher (it is a latency floor on cache misses). 150-300 ms
+> works well for public blocking resolvers.
 
 ### Bootstrap DNS
 
 When using DoH or DoT upstreams, DNSieve needs to resolve the upstream
-server's hostname. By default this uses system DNS, but you can set a
-dedicated bootstrap server to avoid circular dependencies:
+server's hostname. `bootstrap_dns` takes a comma-separated list of IP:port
+addresses queried in parallel; the fastest response wins. The default config
+uses both Quad9 anycast IPs. Set it to an empty string to use the system
+resolver instead.
 
 ```toml
 [upstream_settings]
-bootstrap_dns = "9.9.9.9:53"
+bootstrap_dns = "9.9.9.9:53,149.112.112.112:53"
 ```
 
 ### Bootstrap IP Family
@@ -137,8 +122,8 @@ one family:
 
 | Value | Behaviour |
 |-------|-----------|
-| `"auto"` | Race A and AAAA; fastest response wins. **Default.** |
-| `"ipv4"` | Query only A records. Use on IPv4-only hosts. |
+| `"auto"` | Race A and AAAA; fastest response wins. Default when the key is omitted. |
+| `"ipv4"` | Query only A records. Set in the generated default config. |
 | `"ipv6"` | Query only AAAA records. Use on IPv6-only hosts. |
 
 ```toml
@@ -146,10 +131,10 @@ one family:
 bootstrap_ip_family = "ipv4"   # IPv4-only host
 ```
 
-This setting affects only the bootstrap hostname resolution step (resolving
-`dns.quad9.net` to an IP before connecting). The encrypted DNS traffic itself
-flows over whichever address was resolved -- there is no separate restriction
-on the upstream connection. Leave as `"auto"` on dual-stack hosts.
+> [!NOTE]
+> This setting affects only the bootstrap hostname lookup. The generated
+> default config sets `"ipv4"` (works everywhere); on dual-stack hosts you
+> can switch to `"auto"`.
 
 ### Upstream Re-resolution (`upstream_ttl`)
 
@@ -164,25 +149,20 @@ hostname is re-resolved.
 | Value | Behaviour |
 |-------|-----------|
 | `-1` | **Disabled (default).** Resolve once at startup. Matches most DNS proxies. |
-| `0` | **TTL-based.** Reuse the IP for the full TTL of the DNS record. After expiry, re-resolve when the next new connection is established. A background refresh is started when `renew_percent` of the TTL remains so the new address is usually ready before the old one expires. A 30-second floor prevents excessive bootstrap queries on very short TTLs. |
-| `1-2147483647` | **Fixed interval (seconds).** Reuse the IP for this many seconds. Re-resolve at the next new connection after the interval expires. A background refresh starts when `renew_percent` of the interval remains. |
+| `0` | **TTL-based.** Reuse the IP for the full TTL of the DNS record (30-second floor), then re-resolve on the next new connection. |
+| `1-2147483647` | **Fixed interval (seconds).** Reuse the IP for this many seconds, then re-resolve on the next new connection. |
 
-The background refresh threshold is set by `cache.renew_percent` (default 10%).
-Set `renew_percent = 0` to disable background re-resolution for `upstream_ttl` as well.
-A debug log message is emitted each time the upstream IP is re-resolved.
+In modes 0 and N>0 a background refresh starts when `cache.renew_percent`
+(default 10%) of the TTL/interval remains, so the new address is usually
+ready before the old one expires. `renew_percent = 0` disables this.
 
 In all modes:
-- Re-resolution uses the same `bootstrap_dns` and `bootstrap_ip_family`
-  settings as the initial startup resolution. The config file is never
-  re-read.
-- **Existing connections are never closed forcibly.** The new IP is picked
-  up when a new TCP/TLS connection is established (DoT creates a new
-  connection per query; DoH reuses a pooled HTTP/2 connection).
-- If the bootstrap DNS is unreachable during a refresh, the current
-  (possibly stale) address continues to be used. A retry is scheduled
-  after 30 seconds.
-- Plain-DNS (`"udp"`) upstreams configured with a numeric IP are
-  unaffected by this setting.
+- Re-resolution reuses `bootstrap_dns` and `bootstrap_ip_family`.
+- Existing connections are never closed forcibly; the new IP applies to new
+  connections only.
+- If the bootstrap DNS is unreachable, the current address stays in use and
+  a retry is scheduled after 30 seconds.
+- Upstreams configured with a numeric IP are unaffected.
 
 ```toml
 [upstream_settings]
@@ -237,44 +217,20 @@ use_plaintext_http = false  # Set true for reverse proxy (no TLS cert needed)
 
 ### IPv4 and IPv6 Listening
 
-Each listener's `listen_addresses` is an array of IP addresses to bind.
-Common values:
-
-| Value       | Behaviour                                      |
-|-------------|------------------------------------------------|
-| `"0.0.0.0"` | All IPv4 interfaces                            |
-| `"::"`      | All IPv6 interfaces only                       |
-| `"127.0.0.1"` | IPv4 loopback only                           |
-| `"::1"`     | IPv6 loopback only                             |
-
-The default configuration binds to both `0.0.0.0` and `::` so that clients
-using either address family can reach DNSieve:
+`listen_addresses` accepts any mix of IPv4 and IPv6 addresses; the default
+`["0.0.0.0", "::"]` binds all interfaces in both families. An empty array on
+an enabled listener is a startup error.
 
 ```toml
-listen_addresses = ["0.0.0.0", "::"]
-```
-
-DNSieve uses explicit IPv4 (`tcp4`/`udp4`) and IPv6 (`tcp6`/`udp6`) socket
-types for each address. This prevents the OS-level dual-stack conflict that
-occurs on Linux and Windows when a generic IPv6 socket implicitly claims all
-IPv4 addresses as well, which would cause a "bind: address already in use"
-error when `0.0.0.0` and `::` are both configured.
-
-You can mix any combination of IPv4 and IPv6 addresses:
-
-```toml
-# Common combinations
 listen_addresses = ["0.0.0.0", "::"]                          # all interfaces, both families
-listen_addresses = ["127.0.0.1", "::1"]                       # loopback only, both families
+listen_addresses = ["127.0.0.1", "::1"]                       # loopback only
 listen_addresses = ["192.168.1.10", "fd12:3456:789a:1::5"]    # specific interfaces
-
-# Single family
 listen_addresses = ["0.0.0.0"]                                # IPv4 only
-listen_addresses = ["::"]                                     # IPv6 only
 ```
 
-At least one address must be present in `listen_addresses` for each enabled
-listener; an empty array is a startup error.
+DNSieve binds each address with an explicit single-family socket type, so
+configuring both `0.0.0.0` and `::` does not cause the dual-stack
+"address already in use" conflict seen on Linux and Windows.
 
 ### DoH Without TLS (Reverse Proxy)
 
@@ -322,83 +278,23 @@ service detected the block, for example: `Blocked (dns.quad9.net)`.
 
 ### Modes
 
-| Mode        | Rcode    | Answer                          | Recommended |
-|-------------|----------|---------------------------------|-------------|
-| `"null"`    | NOERROR  | 0.0.0.0 (A) or :: (AAAA)       | Yes         |
-| `"nxdomain"`| NXDOMAIN | Empty                           |             |
-| `"nodata"`  | NOERROR  | Empty                           |             |
-| `"refused"` | REFUSED  | Empty                           |             |
+| Mode        | Rcode    | Answer                    | Notes                                              |
+|-------------|----------|---------------------------|----------------------------------------------------|
+| `"null"`    | NOERROR  | 0.0.0.0 (A) or :: (AAAA)  | **Default, recommended.** Immediate "connection refused"; other query types get NODATA. 10-second answer TTL. |
+| `"nxdomain"`| NXDOMAIN | Empty                     | Some clients retry NXDOMAIN more aggressively.     |
+| `"nodata"`  | NOERROR  | Empty                     | Domain exists, no records of the requested type.   |
+| `"refused"` | REFUSED  | Empty                     | See warning below.                                 |
 
-#### null (default, recommended)
+`"null"` is the default recommended by both Pi-hole and Technitium: clients
+fail fast with no timeouts or retry storms. Use `"nxdomain"` or `"nodata"`
+only if specific client software handles them better.
 
-Returns NOERROR with a synthesized answer: `0.0.0.0` for A queries,
-`::` for AAAA queries. Other query types (MX, TXT, CNAME, SRV, etc.)
-receive NODATA (NOERROR with an empty answer section).
+> [!WARNING]
+> With `"refused"`, some clients fall back to another DNS resolver,
+> bypassing the proxy entirely.
 
-This is the safest mode and the default recommended by both Pi-hole and
-Technitium. Connections to blocked domains fail immediately with
-"connection refused" because 0.0.0.0 (RFC 1122 Section 3.2.1.3) and ::
-(RFC 4291 Section 2.5.2) are non-routable addresses. Clients do not
-experience timeouts or retry storms.
-
-The synthesized answer uses a 10-second TTL.
-
-```toml
-[blocking]
-mode = "null"
-```
-
-#### nxdomain
-
-Returns NXDOMAIN (Name Error) with an empty answer section. Signals
-that the domain does not exist. Some clients retry NXDOMAIN responses
-more aggressively than null responses, which may increase DNS traffic.
-
-```toml
-[blocking]
-mode = "nxdomain"
-```
-
-#### nodata
-
-Returns NOERROR with an empty answer section. Signals that the domain
-exists but has no records of the requested type. Some clients accept
-NODATA more gracefully than NXDOMAIN.
-
-```toml
-[blocking]
-mode = "nodata"
-```
-
-#### refused
-
-Returns REFUSED with an empty answer section. Signals that the server
-refuses to answer the query. **Use with caution**: some clients fall back
-to another DNS resolver when they receive REFUSED, which bypasses the
-proxy entirely.
-
-```toml
-[blocking]
-mode = "refused"
-```
-
-### Choosing a Mode
-
-For most deployments, `"null"` is the best choice:
-
-- Web browsers and applications see an immediate "connection refused"
-  error instead of a slow timeout.
-- No retry storms: clients accept the response without re-querying.
-- Compatible with DNSSEC validation (NOERROR is not treated as BOGUS).
-- Both Pi-hole and Technitium independently recommend this approach as
-  their default.
-
-Use `"nxdomain"` or `"nodata"` if you have specific client software that
-handles those rcodes better for your use case. Avoid `"refused"` unless
-you understand the DNS fallback risk.
-
-For the exact wire format of each mode (Rcode, Answer, Authority sections,
-EDE option), see [docs/protocol.md -- Blocked Response Format](protocol.md#blocked-response-format).
+For the exact wire format of each mode see
+[protocol.md -- Blocked Response Format](protocol.md#blocked-response-format).
 
 ## Logging
 
@@ -449,28 +345,19 @@ resolver_protocol = "doh"
 
 ### List Files
 
-Domain lists are loaded from external files specified via `list_files`.
-Each entry is a file path or **glob pattern**. A glob is a filename
-pattern where `*` matches any sequence of characters, so
-`/etc/dnsieve/lists/whitelist-*.txt` matches `whitelist-work.txt`,
-`whitelist-home.txt`, and so on:
+Domain lists are loaded from the files in `list_files`. Each entry is a
+file path or glob pattern (`*` matches any characters):
 
 ```toml
 list_files = [
   "/etc/dnsieve/whitelist.txt",          # single file
-  "/etc/dnsieve/lists/whitelist-*.txt",  # glob: matches whitelist-work.txt, whitelist-home.txt, etc.
+  "/etc/dnsieve/lists/whitelist-*.txt",  # glob
 ]
 ```
 
-**Windows path example:** On Windows, paths in `list_files` require either
-forward slashes or escaped backslashes:
-
-```toml
-list_files = [
-  "C:/dnsieve/lists/blocklist.txt",
-  "C:\\dnsieve\\lists\\blocklist.txt",  # double backslash in TOML string
-]
-```
+> [!NOTE]
+> On Windows, use forward slashes (`"C:/dnsieve/lists/blocklist.txt"`) or
+> doubled backslashes (`"C:\\dnsieve\\..."`) in TOML strings.
 
 **File format:** DNSieve accepts the following formats in a list file. Empty
 lines and lines starting with `#` or `!` are treated as comments and are
@@ -529,49 +416,29 @@ exact-allow.example.org
 
 ### Hot Reload
 
-When `list_ttl` is set to a positive value (in seconds), DNSieve
-periodically checks all list files for changes and reloads them
-atomically without downtime:
+When `list_ttl` is a positive number of seconds, DNSieve periodically checks
+all list files (mtime/size, plus re-expanding globs) and reloads them on
+change:
 
 ```toml
 list_ttl = 300  # check every 5 minutes; 0 = no auto-reload
 ```
 
-Reload is atomic: DNS queries always see either the old or the new
-complete set -- never a partial load.
-
-#### How hot reload works
-
-Every `list_ttl` seconds a background goroutine wakes up and:
-
-1. **Checks for changes** by calling `os.Stat` on each file and comparing
-   modification time and size against the last-known values. It also
-   re-expands glob patterns to detect added or removed files. If nothing
-   changed, no reload occurs (a debug log entry is written).
-
-2. **Builds the new set** entirely in private memory -- the running server
-   is not touched yet. All files are read into new Go maps. No compilation
-   occurs; this is pure runtime file I/O.
-
-3. **Swaps atomically** via a single `atomic.Pointer.Store()`. DNS query
-   goroutines read the pointer with `atomic.Load()`, which is non-blocking.
-   They see the old set or the new set -- never a mix of both.
-
-4. **Releases the old set** for garbage collection. No explicit cleanup is
-   needed.
-
-#### Behaviour in edge cases
+The new set is built in private memory and swapped in atomically -- queries
+always see either the old or the new complete set, never a partial load, and
+are never blocked by a reload.
 
 | Situation | What happens |
 |-----------|-------------|
-| No file changes detected | Skip reload; debug log only |
-| A file is **modified** | Reload triggered |
-| A new file **appears** matching a glob | Reload triggered |
-| A file is **deleted** | Reload triggered; the deleted file is excluded and the remaining files are loaded normally - no error, no interruption |
-| An **unrecognised line** in a file | Line is skipped; if any lines were skipped a warning is logged with the count after each load or reload; with `log_level_stdout = "debug"` each invalid line is logged individually |
-| A file **fails to read** (permissions, I/O error) | Reload aborted; previous list kept; warning logged |
-| Reload takes a long time | DNS queries are **never blocked** -- they read the old set from the atomic pointer until the swap completes |
-| New list is very large and causes OOM | The Go runtime panics and the process crashes; there is no guard against this -- keep list sizes reasonable (see the 100,000-domain warning threshold) |
+| No changes detected | Skip reload; debug log only |
+| File modified, added (via glob), or deleted | Reload triggered; deleted files are simply excluded |
+| Unrecognised line in a file | Line skipped; warning with the count after each load; debug level logs each line |
+| File fails to read (permissions, I/O) | Reload aborted; previous list kept; warning logged |
+
+> [!CAUTION]
+> There is no guard against a list too large for available memory. Keep
+> lists reasonable -- a warning is logged above 100,000 domains and large
+> lists are not officially supported.
 
 ### Domain Matching
 
@@ -585,14 +452,12 @@ example.com
 *.example.com
 ||example.com^              # blocklist only: AdGuard block rule (same as *.example.com)
 @@||example.com^            # allowlist only: AdGuard exception rule (same as *.example.com)
-
-# TLD wildcard
-*.fr
-# matches: all .fr domains
-
-# Global wildcard (disables blocking entirely -- use with caution)
-*
 ```
+
+> [!NOTE]
+> A wildcard base must contain at least one dot: TLD-wide entries like
+> `*.fr` are silently dropped, and a bare `*` matches only a query
+> literally named `*` -- neither can be used to match everything.
 
 **Hierarchical deduplication** is applied automatically after loading all
 files. A broader wildcard supersedes any narrower entry at any depth:
@@ -612,23 +477,15 @@ logged at startup and on each reload.
 
 ### Internationalized Domain Names (IDN)
 
-Whitelist entries support internationalized domain names. You may write
-entries either in ACE/Punycode form (the `xn--` encoded representation used
-in DNS wire messages) or in their native Unicode form as UTF-8 text in the
-list file. DNSieve normalises Unicode entries to ACE form internally
-(RFC 5891 / IDNA 2008) before comparing them to incoming query names, so
-both representations match identically.
+List entries may be written in ACE/Punycode form (`xn--...`) or in native
+Unicode as UTF-8 text. Unicode entries are normalised to ACE form internally
+(RFC 5891 / IDNA 2008), so both representations match identically:
 
 ```text
 # These two entries are equivalent:
 xn--bcher-kva.example.com
 bücher.example.com
 ```
-
-ACE-encoded domain names (labels starting with `xn--`) are ordinary ASCII
-labels in the DNS wire protocol and require no special treatment by the
-proxy. DNSieve passes them to upstream resolvers unchanged, just like any
-other ASCII-labelled domain name.
 
 ### Custom whitelist resolver
 
@@ -654,9 +511,10 @@ and upstream resolvers, but lower priority than the whitelist.
 
 The blacklist is **disabled by default**.
 
-> **Note:** Large-scale DNS blocking is not the primary purpose of DNSieve.
-> The blacklist is provided for cases where you need to block specific
-> domains not covered by upstream filtering.
+> [!NOTE]
+> Large-scale DNS blocking is not the primary purpose of DNSieve. The
+> blacklist is provided for cases where you need to block specific domains
+> not covered by upstream filtering.
 
 ```toml
 [blacklist]
@@ -666,16 +524,8 @@ list_ttl = 300
 ```
 
 The `list_files` and `list_ttl` options work identically to the whitelist
-(see above). The file format, domain matching, glob patterns, hot reload,
-and IDN support are all the same.
-
-The **blocklist uses `||domain^` rules** and silently skips `@@||domain^`
-lines. The **whitelist uses `@@||domain^` rules** and silently skips
-`||domain^` lines. Because skipped lines do not generate warnings, the same
-physical file can be referenced by both `whitelist.list_files` and
-`blacklist.list_files`. See
-[Sharing a File Between Whitelist and Blacklist](#sharing-a-file-between-whitelist-and-blacklist)
-for important restrictions.
+(see above): same file format, domain matching, glob patterns, hot reload,
+and IDN support.
 
 ### Query Processing Order
 
@@ -701,54 +551,21 @@ on whitelist hot-reload (including wildcard matching semantics), see
 ## Sharing a File Between Whitelist and Blacklist
 
 Because `||domain^` lines are silently skipped by the allowlist and
-`@@||domain^` lines are silently skipped by the blocklist, the same physical
-file can appear in both `whitelist.list_files` and `blacklist.list_files`
-without generating spurious warnings.
+`@@||domain^` lines by the blocklist, the same file can appear in both
+`whitelist.list_files` and `blacklist.list_files` without warnings:
 
 ```text
 # Shared file: AdGuard-style rules only.
 ||ads.example.com^       # loaded by blocklist, skipped by allowlist
-||tracker.example.net^
 @@||cdn.trusted.com^     # loaded by allowlist, skipped by blocklist
-@@||fonts.trusted.org^
 ```
 
-**Restriction: use AdGuard-style rules only in shared files.**
-
-Plain domains (`example.com`), wildcard entries (`*.example.com`), and
-hosts-file lines (`0.0.0.0 example.com`) are loaded by **both** the blocklist
-and the allowlist. Because the whitelist takes precedence over the blacklist
-in the query processing order (whitelist is checked before blacklist), any
-domain expressed in one of those formats will be unconditionally whitelisted:
-it will always resolve via the whitelist resolver and will never be blocked,
-regardless of what the blacklist says.
-
-In short: a shared file must contain **only** `||domain^` (blocking) and
-`@@||domain^` (exception) lines. Keep plain/wildcard/hosts-file entries in
-separate, dedicated blocklist or allowlist files.
-
-```text
-# DO NOT do this in a shared file.
-# These entries are loaded by BOTH the blocklist and the allowlist.
-# Because the whitelist takes precedence, they become unconditionally
-# whitelisted -- they will never be blocked.
-example.com           # plain domain: loaded by both
-*.example.com         # wildcard: loaded by both
-0.0.0.0 example.com   # hosts-file: loaded by both
-```
-
-```text
-# DO this instead: plain/wildcard/hosts entries in dedicated files.
-
-# blocklist-only.txt  (referenced only in blacklist.list_files)
-example.com
-*.ads.example.net
-0.0.0.0 tracker.example.org
-
-# allowlist-only.txt  (referenced only in whitelist.list_files)
-bypass.example.com
-*.trusted.example.net
-```
+> [!WARNING]
+> A shared file must contain **only** `||domain^` and `@@||domain^` lines.
+> Plain domains, wildcards, and hosts-file lines are loaded by **both**
+> lists, and since the whitelist is checked first, such entries become
+> unconditionally whitelisted -- they will never be blocked. Keep
+> plain/wildcard/hosts entries in dedicated blocklist or allowlist files.
 
 ## Privacy (EDNS0 Options)
 
@@ -854,7 +671,7 @@ Upstreams:
 - `upstream[N].address` is empty
 - `upstream[N].protocol` not one of `doh`, `dot`, `udp`
 - `upstream_settings.bootstrap_ip_family` not one of `auto`, `ipv4`, `ipv6`
-- `upstream_settings.upstream_ttl` < −1 (must be −1, 0, or a positive integer)
+- `upstream_settings.upstream_ttl` < -1 (must be -1, 0, or a positive integer)
 - `upstream_settings.upstream_ttl` > 2,147,483,647
 
 Listeners:
@@ -897,7 +714,7 @@ Upstreams:
 - Any upstream has `verify_certificates = false`
 - Global `upstream_settings.verify_certificates = false`
 - `upstream_settings.timeout_ms` < 100 ms
-- `upstream_settings.min_wait_ms` ≥ `timeout_ms` (block consensus may not function correctly)
+- `upstream_settings.min_wait_ms` >= `timeout_ms` (block consensus may not function correctly)
 - More than 3 upstream servers configured
 - Any upstream uses `protocol = "udp"` (plain DNS, unencrypted)
 
@@ -922,23 +739,18 @@ Whitelist / Blacklist:
 
 **Runtime warnings (logged after startup, during domain list loading):**
 
-These occur after config validation passes, as the server loads list files into memory:
-- A glob pattern in `list_files` matches no files -- warning logged, that entry is skipped
-- A list file fails to open or read -- warning logged, that file is skipped
+- A glob pattern in `list_files` matches no files, or a file fails to open -- warning logged, entry/file skipped
 - All `list_files` loaded but no valid domain entries found -- warning logged
-- A line that is not a comment, not blank, not an Adblock format header (`[Adblock Plus]`), and not a valid plain/hosts/AdGuard domain entry is counted as invalid. A warning is logged with the total invalid count after each load or reload. With `log_level_stdout = "debug"`, each invalid line is logged individually with its line number and content. Silently-skipped lines (mode-crossing rules such as `||` in an allowlist or `@@||` in a blocklist) are **not** counted as invalid. A `@@||` line with an invalid or overlong domain in an allowlist **is** counted as invalid so the user sees a warning.
-- A domain entry that violates DNS length limits (label > 63 characters or total name > 253 characters per RFC 1035 s2.3.4) is rejected and counted as invalid.
+- Lines that are not a comment, blank, Adblock header, or valid domain entry are counted as invalid; a warning with the total count follows each load. Debug level logs each invalid line. Mode-crossing rules (`||` in an allowlist, `@@||` in a blocklist) are silently skipped and not counted.
+- Entries violating DNS length limits (label > 63 chars or name > 253 chars, RFC 1035 s2.3.4) are rejected as invalid.
 - Total loaded domain count exceeds 100,000 -- warning logged (large lists are not officially supported)
 
-**Deduplication** is applied automatically during loading:
-- `*.foo.com` covers `foo.com` (apex) and all subdomains, so any exact entry for `foo.com`, or for any subdomain like `sub.foo.com`, is removed as redundant.
-- A narrower wildcard like `*.sub.foo.com` is removed when a broader wildcard like `*.foo.com` is present.
-- Deduplication runs hierarchically and is order-independent: it does not matter whether the broader wildcard appears before or after narrower entries in the file, or whether entries come from different files.
-- The loaded domain count and any dedup/invalid counts are reported in the startup log:
-  `Blacklist: loaded 42 domains (3 dedup), 1 invalid from list files`
+**Deduplication** is applied automatically and order-independently during
+loading: a broader wildcard removes any exact entry or narrower wildcard it
+covers, at any depth and across files. The result is reported at startup:
+`Blacklist: loaded 42 domains (3 dedup), 1 invalid from list files`
 
----
-
-**Notes - not validated at startup:**
-
-- `whitelist.resolver_address` is not checked at startup. An invalid or unreachable address does not prevent startup. Queries for whitelisted domains will return SERVFAIL; the error is logged per query.
+> [!NOTE]
+> `whitelist.resolver_address` is not checked at startup. An unreachable
+> address does not prevent startup; whitelisted queries return SERVFAIL and
+> the error is logged per query.
