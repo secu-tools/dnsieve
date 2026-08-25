@@ -55,6 +55,10 @@ type Client interface {
 	Query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error)
 	// String returns a human-readable description.
 	String() string
+	// Close releases any connections the client holds. Pooling transports keep
+	// sockets open between queries, so a finished client must be closed.
+	// Safe to call more than once.
+	Close()
 }
 
 // NewResolver creates a resolver from the given config.
@@ -97,6 +101,14 @@ func NewResolverFromClients(clients []Client, timeout, minWait time.Duration, lo
 		minWait:       minWait,
 		slowThreshold: 200 * time.Millisecond,
 		logger:        logger,
+	}
+}
+
+// Close releases the connections held by every upstream client. Callers that
+// build a Resolver for bounded work must call this.
+func (r *Resolver) Close() {
+	for _, c := range r.clients {
+		c.Close()
 	}
 }
 

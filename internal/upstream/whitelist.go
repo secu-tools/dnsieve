@@ -97,10 +97,17 @@ func (w *WhitelistResolver) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg, 
 	return w.client.Query(ctx, msg)
 }
 
-// Stop shuts down the whitelist resolver's background watcher.
+// Stop shuts down the background watcher and releases the upstream client.
 func (w *WhitelistResolver) Stop() {
-	if w != nil && w.list != nil {
+	if w == nil {
+		return
+	}
+	if w.list != nil {
 		w.list.Stop()
+	}
+	// This resolver owns a second upstream client, separate from Resolver's.
+	if w.client != nil {
+		w.client.Close()
 	}
 }
 

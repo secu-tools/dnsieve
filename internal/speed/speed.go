@@ -166,6 +166,9 @@ func testServer(srv config.UpstreamServer, verifyCert bool, bootstrapDNS, ipFami
 		r.Errors = append(r.Errors, fmt.Sprintf("client creation failed: %v", err))
 		return r
 	}
+	// Throwaway client: without Close it would leave pooled connections open
+	// for every configured upstream.
+	defer client.Close()
 
 	for _, domain := range domains {
 		queryDomain(&r, client, domain, ipFamily)

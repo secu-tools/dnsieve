@@ -61,6 +61,8 @@ func (m *mockIntegrationClient) Query(_ context.Context, msg *dns.Msg) (*dns.Msg
 }
 
 func (m *mockIntegrationClient) String() string { return m.name }
+
+func (m *mockIntegrationClient) Close() {}
 func (m *mockIntegrationClient) Calls() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()

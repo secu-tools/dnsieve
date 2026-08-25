@@ -63,6 +63,8 @@ func (m *mockUpstreamClient) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg,
 
 func (m *mockUpstreamClient) String() string { return m.name }
 
+func (m *mockUpstreamClient) Close() {}
+
 // syncBuf is a thread-safe bytes.Buffer wrapper for tests where async logging
 // goroutines (emitBlockedQueryEvent, upstream slow-warning) write concurrently
 // with the test goroutine reading the output.
@@ -3811,6 +3813,8 @@ func (c *slowMockClient) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg, err
 }
 
 func (c *slowMockClient) String() string { return c.name }
+
+func (c *slowMockClient) Close() {}
 
 // TestJSONEvent_SlowFlag_BlockedDomain verifies that the slow flag is set
 // independently per upstream even when the domain is blocked. An upstream

@@ -253,6 +253,8 @@ func (m *mockSpeedClient) Query(_ context.Context, msg *dns.Msg) (*dns.Msg, erro
 
 func (m *mockSpeedClient) String() string { return "mock-speed" }
 
+func (m *mockSpeedClient) Close() {}
+
 func makeNormalSpeedResp(query *dns.Msg) *dns.Msg {
 	resp := new(dns.Msg)
 	dnsutil.SetReply(resp, query)
@@ -334,6 +336,8 @@ func (r *recordingMockClient) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg
 
 func (r *recordingMockClient) String() string { return "recording-mock" }
 
+func (r *recordingMockClient) Close() {}
+
 // sleepingMockClient wraps mockSpeedClient and sleeps for the given duration
 // before returning, to guarantee a measurable round-trip latency in tests.
 type sleepingMockClient struct {
@@ -347,6 +351,8 @@ func (s *sleepingMockClient) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg,
 }
 
 func (s *sleepingMockClient) String() string { return "sleeping-mock" }
+
+func (s *sleepingMockClient) Close() {}
 
 // TestQueryDomain_SetsEDNS0 verifies that queryDomain includes an OPT record
 // (UDPSize > 0) in every query so that upstreams can return EDE options.

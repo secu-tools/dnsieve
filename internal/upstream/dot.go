@@ -16,11 +16,20 @@ import (
 	"github.com/secu-tools/dnsieve/internal/logging"
 )
 
-// DoTClient implements DNS-over-TLS (RFC 7858 / RFC 8310).
+const (
+	// defaultQueryTimeout bounds a single DoT exchange when the caller's
+	// context carries no deadline.
+	defaultQueryTimeout = 10 * time.Second
+)
+
+// DoTClient implements DNS-over-TLS (RFC 7858 / RFC 8310). Connections are
+// pooled and reused across queries; see connpool.go.
 type DoTClient struct {
 	address     string
 	displayAddr string
 	tlsConfig   *tls.Config
+	// pool holds idle TLS connections and owns the address they point at.
+	pool *connPool
 	// resolver is non-nil when TTL- or interval-based re-resolution is
 	// configured. Addr() is called before each new connection to obtain the
 	// current resolved IP, which may have been refreshed in the background.
@@ -60,26 +69,14 @@ func NewDoTClient(address string, verifyCert bool, ipFamily string, resolveMode 
 		}
 	}
 
-	tlsCfg := &tls.Config{
-		ServerName:         host,
-		InsecureSkipVerify: !verifyCert, //nolint:gosec
-		MinVersion:         tls.VersionTLS12,
-		CipherSuites: []uint16{
-			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-		},
-		CurvePreferences: []tls.CurveID{
-			tls.X25519,
-			tls.CurveP256,
-			tls.CurveP384,
-		},
-	}
+	tlsCfg := newUpstreamTLSConfig(host, verifyCert)
 
-	client := &DoTClient{address: address, displayAddr: address, tlsConfig: tlsCfg}
+	client := &DoTClient{
+		address:     address,
+		displayAddr: address,
+		tlsConfig:   tlsCfg,
+		pool:        newConnPool(defaultMaxIdleConns, defaultIdleTimeout),
+	}
 
 	if len(bootstrapIPs) > 0 && net.ParseIP(host) == nil {
 		if resolveMode == resolveDisabled {
@@ -119,34 +116,96 @@ func (c *DoTClient) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 		addr = c.resolver.Addr()
 	}
 
-	transport := &dns.Transport{
-		TLSConfig: c.tlsConfig,
+	timeout, err := queryTimeout(ctx)
+	if err != nil {
+		return nil, err
 	}
-	if deadline, ok := ctx.Deadline(); ok {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return nil, context.DeadlineExceeded
-		}
-		transport.ReadTimeout = remaining
-		transport.WriteTimeout = remaining
-		transport.Dialer = &net.Dialer{Timeout: remaining}
-	} else {
-		transport.ReadTimeout = 10 * time.Second
-		transport.WriteTimeout = 10 * time.Second
-	}
-	dnsClient := &dns.Client{Transport: transport}
 
-	// The library's Transport.dial passes the network string directly to
-	// tls.Dialer.DialContext when TLSConfig is set.  tls.Dialer wraps a plain
-	// TCP dialer and applies TLS on top, so the network must be "tcp".
-	// "tcp-tls" is not a recognised Go network type and causes "unknown network
-	// tcp-tls" at dial time.
-	resp, _, err := dnsClient.Exchange(ctx, msg, "tcp", addr)
+	// A pooled connection may have been closed by the peer since it was
+	// returned, which surfaces as a read or write error rather than at dial
+	// time, so one retry on a fresh connection follows.
+	if conn := c.pool.get(addr); conn != nil {
+		resp, err := c.exchange(ctx, addr, conn, msg, timeout)
+		if err == nil {
+			return resp, nil
+		}
+		// The connection is in an unknown protocol state; do not pool it.
+		conn.Close()
+		if ctx.Err() != nil {
+			return nil, shortNetError(err)
+		}
+		// ExchangeWithConn aliases the reply buffer onto msg.Data, so a failed
+		// attempt can leave the query bytes overwritten. Clearing Data makes
+		// the retry re-pack from the message fields, which are untouched.
+		msg.Data = nil
+	}
+
+	conn, err := c.dial(ctx, addr, timeout)
 	if err != nil {
 		return nil, shortNetError(err)
 	}
-
+	resp, err := c.exchange(ctx, addr, conn, msg, timeout)
+	if err != nil {
+		conn.Close()
+		return nil, shortNetError(err)
+	}
 	return resp, nil
+}
+
+// queryTimeout derives the per-query deadline from ctx, falling back to a
+// fixed default when ctx carries no deadline.
+func queryTimeout(ctx context.Context) (time.Duration, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return defaultQueryTimeout, nil
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0, context.DeadlineExceeded
+	}
+	return remaining, nil
+}
+
+// dial establishes a new TLS connection to addr.
+func (c *DoTClient) dial(ctx context.Context, addr string, timeout time.Duration) (net.Conn, error) {
+	c.pool.markDial()
+	dialer := tls.Dialer{
+		NetDialer: &net.Dialer{Timeout: timeout},
+		Config:    c.tlsConfig,
+	}
+	// tls.Dialer wraps a plain TCP dialer and applies TLS on top, so the
+	// network must be "tcp". "tcp-tls" is not a recognised Go network type.
+	return dialer.DialContext(ctx, "tcp", addr)
+}
+
+// exchange sends msg over conn and reads the reply, pooling the connection on
+// success. On failure it is left for the caller to close: a partial write or an
+// unread reply would desynchronise the next user.
+//
+// Msg.ReadFrom consumes exactly one length-prefixed message (RFC 7766 Section
+// 8), so a successful exchange leaves the stream at the next message boundary.
+func (c *DoTClient) exchange(ctx context.Context, addr string, conn net.Conn, msg *dns.Msg, timeout time.Duration) (*dns.Msg, error) {
+	// Set fresh before any I/O, so a deadline left on a pooled connection is
+	// never observed by its next user.
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, err
+	}
+
+	// ExchangeWithConn reads only ReadTimeout; the write half is covered above.
+	dnsClient := &dns.Client{Transport: &dns.Transport{ReadTimeout: timeout}}
+
+	resp, _, err := dnsClient.ExchangeWithConn(ctx, msg, conn)
+	if err != nil {
+		return nil, err
+	}
+
+	c.pool.put(addr, conn)
+	return resp, nil
+}
+
+// Close releases all pooled connections. Safe to call more than once.
+func (c *DoTClient) Close() {
+	c.pool.close()
 }
 
 // shortNetError simplifies a *net.OpError by stripping the source and

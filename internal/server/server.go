@@ -649,6 +649,8 @@ func RunContext(ctx context.Context, cfg *config.Config, logger *logging.Logger)
 	if err != nil {
 		return fmt.Errorf("create upstream resolver: %w", err)
 	}
+	// Upstream transports pool connections; release them on shutdown.
+	defer resolver.Close()
 
 	// Create whitelist resolver (nil when disabled)
 	wlBootstrapIPs := upstream.ParseBootstrapDNSAddrs(cfg.UpstreamSettings.BootstrapDNS)

@@ -73,6 +73,7 @@ func (m *mockClient) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) 
 func (m *mockClient) String() string {
 	return m.name
 }
+func (m *mockClient) Close() {}
 
 func makeQuery(name string, qtype uint16) *dns.Msg {
 	return dnsutil.SetQuestion(new(dns.Msg), dnsutil.Fqdn(name), qtype)

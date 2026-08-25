@@ -61,6 +61,14 @@ func generateSelfSignedCert(t *testing.T) tls.Certificate {
 // Returns the listener address (host:port).
 func startTLSDNSServer(t *testing.T, cert tls.Certificate, handler func(q *dns.Msg) *dns.Msg) string {
 	t.Helper()
+	return startTLSDNSServerHook(t, cert, handler, nil)
+}
+
+// startTLSDNSServerHook is startTLSDNSServer with an optional callback invoked
+// for each accepted connection, letting a test count or capture connections
+// without re-implementing the listener.
+func startTLSDNSServerHook(t *testing.T, cert tls.Certificate, handler func(q *dns.Msg) *dns.Msg, onAccept func(net.Conn)) string {
+	t.Helper()
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
@@ -76,6 +84,9 @@ func startTLSDNSServer(t *testing.T, cert tls.Certificate, handler func(q *dns.M
 			conn, err := ln.Accept()
 			if err != nil {
 				return
+			}
+			if onAccept != nil {
+				onAccept(conn)
 			}
 			go serveDNSTCPConn(conn, handler)
 		}

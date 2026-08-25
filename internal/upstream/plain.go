@@ -70,6 +70,10 @@ func (c *PlainClient) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error)
 }
 
 // String returns the upstream address for this plain DNS client.
+// Close implements Client. Plain DNS dials per query, so there is nothing to
+// release.
+func (c *PlainClient) Close() {}
+
 func (c *PlainClient) String() string {
 	return c.address
 }
