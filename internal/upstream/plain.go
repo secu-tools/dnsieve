@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"strings"
 	"time"
 
 	"codeberg.org/miekg/dns"
@@ -24,14 +23,7 @@ func NewPlainClient(address string) (*PlainClient, error) {
 		return nil, fmt.Errorf("empty DNS address")
 	}
 	// Normalise: if the address has no port component, append the default.
-	if _, _, err := net.SplitHostPort(address); err != nil {
-		if strings.Contains(address, ":") {
-			// Raw IPv6 address without port (e.g. "2001:db8::1").
-			address = "[" + address + "]:53"
-		} else {
-			address = address + ":53"
-		}
-	}
+	address, _, _ = addrWithDefaultPort(address, defaultPlainPort)
 	return &PlainClient{address: address}, nil
 }
 
@@ -48,8 +40,8 @@ func (c *PlainClient) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error)
 		transport.WriteTimeout = remaining
 		transport.Dialer = &net.Dialer{Timeout: remaining}
 	} else {
-		transport.ReadTimeout = 10 * time.Second
-		transport.WriteTimeout = 10 * time.Second
+		transport.ReadTimeout = defaultQueryTimeout
+		transport.WriteTimeout = defaultQueryTimeout
 	}
 	client := &dns.Client{Transport: transport}
 

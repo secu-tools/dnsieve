@@ -2498,3 +2498,32 @@ func TestDomainList_OnReload_NilCallbackIgnored(t *testing.T) {
 	// Must not panic.
 	dl.OnReload(nil)
 }
+
+// TestContainsMatchesIDNFromWire pins that a list entry written in Unicode is
+// matched by the same name as it arrives on the wire. addEntry stores entries
+// in ACE form, so Contains has to apply the same conversion; otherwise the
+// whitelist cache-invalidation predicate, which passes the raw cache-key name,
+// never matches an IDN entry and the rule silently fails to take effect.
+func TestContainsMatchesIDNFromWire(t *testing.T) {
+	// "bucher.example.com" with U+00FC in place of 'u'.
+	const unicodeEntry = "b\u00fccher.example.com"
+	const aceForm = "xn--bcher-kva.example.com"
+
+	set, err := ParseReader(strings.NewReader(unicodeEntry+"\n"), ModeAllow)
+	if err != nil {
+		t.Fatalf("ParseReader: %v", err)
+	}
+
+	// The ACE form is what HandleQuery passes after normalizeQueryName.
+	if !set.Contains(aceForm + ".") {
+		t.Error("ACE form should match the stored entry")
+	}
+	// The raw wire form is what the cache-key path passes.
+	if !set.Contains(unicodeEntry + ".") {
+		t.Error("Unicode wire form should match the stored entry")
+	}
+	// Unrelated names must still not match.
+	if set.Contains("other.example.com.") {
+		t.Error("unrelated domain must not match")
+	}
+}

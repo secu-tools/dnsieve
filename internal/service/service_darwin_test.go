@@ -107,9 +107,9 @@ func TestReadLineDarwin(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := bufio.NewReader(strings.NewReader(tt.input))
-			got := readLineDarwin(r)
+			got := readLine(r)
 			if got != tt.want {
-				t.Errorf("readLineDarwin(%q) = %q, want %q", tt.input, got, tt.want)
+				t.Errorf("readLine(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}

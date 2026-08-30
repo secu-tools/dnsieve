@@ -14,17 +14,47 @@ import (
 // full TLS handshake -- several kilobytes, mostly certificate chain -- to carry
 // a sub-200-byte DNS message.
 const (
-	// defaultMaxIdleConns caps idle connections per upstream. Sized for burst
-	// concurrency: a page load fans out tens of lookups, and a cap below the
-	// burst width closes handshakes it just paid for.
-	defaultMaxIdleConns = 16
+	// defaultMaxIdleConns caps idle connections per upstream. One in-flight
+	// query holds one connection, so this must cover the widest burst of
+	// concurrent queries: anything above the cap is closed after a single use
+	// and re-handshaked on the next burst. Measured at burst width 40, a cap
+	// of 16 opened 137 connections to carry 200 queries where 64 opened 41.
+	// Overridden by upstream_settings.max_idle_conns; see SetMaxIdleConns.
+	defaultMaxIdleConns = 128
 
 	// defaultIdleTimeout bounds how long an unused connection stays pooled.
-	// Kept below the keepalive advertised upstream
-	// (tcp_keepalive.upstream_timeout_sec, default 120s): reusing a connection
-	// the peer already dropped costs a wasted query and a redial.
+	// Measured idle lifetime before the peer closes: Cloudflare about 30s,
+	// Quad9 about 15s, and neither advertises an edns-tcp-keepalive timeout
+	// to negotiate against. Pooling for longer than the peer holds the socket
+	// only hands the next caller a dead connection.
 	defaultIdleTimeout = 30 * time.Second
 )
+
+// configuredMaxIdle overrides defaultMaxIdleConns when positive. It is set
+// once from the configuration during startup, before any upstream client is
+// built, and read whenever a client creates its pool. Stored atomically so a
+// late reader can never observe a torn value.
+var configuredMaxIdle atomic.Int32
+
+// SetMaxIdleConns sets the per-upstream idle connection cap for clients
+// created afterwards. A value of zero or less keeps defaultMaxIdleConns.
+// Call it before constructing any upstream client; existing pools keep the
+// size they were built with.
+func SetMaxIdleConns(n int) {
+	if n <= 0 {
+		configuredMaxIdle.Store(0)
+		return
+	}
+	configuredMaxIdle.Store(int32(n))
+}
+
+// effectiveMaxIdleConns is the cap new pools should use.
+func effectiveMaxIdleConns() int {
+	if n := configuredMaxIdle.Load(); n > 0 {
+		return int(n)
+	}
+	return defaultMaxIdleConns
+}
 
 // pooledConn is an idle connection waiting to be reused. reaper closes it once
 // idleTimeout elapses.

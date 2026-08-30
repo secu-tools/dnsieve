@@ -28,15 +28,8 @@ func ParseBootstrapDNSAddrs(s string) []string {
 		if p == "" {
 			continue
 		}
-		if _, _, err := net.SplitHostPort(p); err != nil {
-			// No port component: add default DNS port 53.
-			if strings.Contains(p, ":") {
-				// Raw IPv6 address without brackets and port.
-				p = "[" + p + "]:53"
-			} else {
-				p = p + ":53"
-			}
-		}
+		// No port component: add the default DNS port.
+		p, _, _ = addrWithDefaultPort(p, defaultPlainPort)
 		addrs = append(addrs, p)
 	}
 	return addrs
@@ -153,7 +146,6 @@ func resolveViaBootstrap(ctx context.Context, host string, bootstrapAddrs []stri
 
 	ch := make(chan result, len(bootstrapAddrs))
 	for _, addr := range bootstrapAddrs {
-		addr := addr
 		go func() {
 			ip, ttl, err := lookupHostViaBootstrap(ctx, host, addr, ipFamily)
 			select {

@@ -7,7 +7,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"math"
 	"os"
 	"os/signal"
 	"sync"
@@ -89,11 +88,7 @@ func (h *Handler) checkWhitelistCache(ctx context.Context, query *dns.Msg, qname
 		h.logger.Debugf("Query %s %s -> whitelisted (non-whitelist cache entry present, querying resolver)", qname, qtype)
 		return nil
 	}
-	ttlSec := int64(entry.ExpiresAt.Sub(entry.InsertedAt).Seconds())
-	rtlSec := int64(time.Until(entry.ExpiresAt).Seconds())
-	if rtlSec < 0 {
-		rtlSec = 0
-	}
+	ttlSec, rtlSec := entryTTLs(entry)
 	if refreshTriggered {
 		h.logger.Debugf("Query %s %s -> whitelisted (cached, background-refresh queued, ttl=%ds rtl=%ds)", qname, qtype, ttlSec, rtlSec)
 	} else {
@@ -107,10 +102,7 @@ func (h *Handler) checkWhitelistCache(ctx context.Context, query *dns.Msg, qname
 		return nil
 	}
 	if h.logger.IsJSONEnabled() {
-		ttlPct := 0.0
-		if ttlSec > 0 {
-			ttlPct = math.Round(float64(rtlSec)/float64(ttlSec)*100*100) / 100
-		}
+		ttlPct := ttlRemainingPct(ttlSec, rtlSec)
 		ev := logging.NewDNSQueryEvent(logging.LevelDebug, "server",
 			qname+" "+qtype+" -> whitelisted (cached)")
 		ev.DNS.Request = buildClientInfo(query, ClientMetaFrom(ctx))
@@ -141,8 +133,14 @@ func (h *Handler) resolveWhitelistUpstream(ctx context.Context, query *dns.Msg, 
 	}
 	resp.ID = query.ID
 	resp.RecursionAvailable = true
+	// A transport error is already handled above, but the resolver can still
+	// answer SERVFAIL or BADCOOKIE. dnsmsg treats both as retryable server
+	// errors that must not be cached; the main fan-out drops them via
+	// Result.OK, and caching them here would pin a transient upstream failure
+	// for min_ttl.
+	cacheable := !dnsmsg.InspectResponse(resp).ServFail
 	cached := false
-	if h.cfg.Cache.Enabled {
+	if h.cfg.Cache.Enabled && cacheable {
 		h.cache.Put(query, resp, false, true) // whitelisted=true
 		cached = true
 		h.logger.Debugf("Query %s %s -> final: rcode=%s blocked=false cached=true (whitelist resolver)", qname, qtype, dns.RcodeToString[resp.Rcode])
@@ -200,11 +198,7 @@ func (h *Handler) handleCacheHit(ctx context.Context, query *dns.Msg, qname, qty
 		return nil
 	}
 
-	ttlSec := int64(entry.ExpiresAt.Sub(entry.InsertedAt).Seconds())
-	rtlSec := int64(time.Until(entry.ExpiresAt).Seconds())
-	if rtlSec < 0 {
-		rtlSec = 0
-	}
+	ttlSec, rtlSec := entryTTLs(entry)
 
 	if entry.Blocked {
 		if refreshTriggered {
@@ -330,6 +324,11 @@ func (h *Handler) HandleQuery(ctx context.Context, query *dns.Msg) *dns.Msg {
 			ev.DNS.Response = buildResponseInfo(resp)
 			h.logger.LogEvent(logging.LevelWarn, ev)
 		}
+		// RFC 5001: substitute mode applies to every response the proxy
+		// originates, including this one. Every other return path in
+		// HandleQuery does this, and omitting it here made NSID depend on
+		// whether the upstreams happened to answer.
+		h.edns.HandleNSIDSubstitute(query, resp)
 		return resp
 	}
 
@@ -521,7 +520,12 @@ func makeRefreshFunc(
 			logger.Debugf("Cache background-refresh failed (no response): %s %s", qname, qtype)
 			return
 		}
-		if !result.Cacheable {
+		// An early block returns before every upstream has answered, so
+		// Cacheable is false even though one upstream positively signalled a
+		// block. HandleQuery caches that case deliberately; without the same
+		// exception here a newly blocked domain is never refreshed into the
+		// cache and keeps being re-resolved until the entry expires.
+		if !result.Cacheable && !(result.Blocked && result.WaitAll != nil) {
 			logger.Debugf("Cache background-refresh skipped (not cacheable): %s %s", qname, qtype)
 			return
 		}
@@ -577,43 +581,29 @@ func makeWhitelistInvalidator(c *cache.Cache, logger *logging.Logger) func(*doma
 // background goroutines, sending any fatal errors to errCh.
 // Returns an error immediately if no listeners are enabled.
 func startListeners(ctx context.Context, handler *Handler, cfg *config.Config, logger *logging.Logger, errCh chan<- error, wg *sync.WaitGroup) error {
-	count := 0
-
+	var serves []func(context.Context, *Handler, *config.Config, *logging.Logger) error
 	if cfg.Downstream.Plain.Enabled {
-		count++
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := ServePlain(ctx, handler, cfg, logger); err != nil {
-				errCh <- err
-			}
-		}()
+		serves = append(serves, ServePlain)
 	}
-
 	if cfg.Downstream.DoT.Enabled {
-		count++
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := ServeDoT(ctx, handler, cfg, logger); err != nil {
-				errCh <- err
-			}
-		}()
+		serves = append(serves, ServeDoT)
 	}
-
 	if cfg.Downstream.DoH.Enabled {
-		count++
+		serves = append(serves, ServeDoH)
+	}
+
+	if len(serves) == 0 {
+		return fmt.Errorf("no downstream listeners enabled. Enable at least one of: plain, dot, doh")
+	}
+
+	for _, serve := range serves {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := ServeDoH(ctx, handler, cfg, logger); err != nil {
+			if err := serve(ctx, handler, cfg, logger); err != nil {
 				errCh <- err
 			}
 		}()
-	}
-
-	if count == 0 {
-		return fmt.Errorf("no downstream listeners enabled. Enable at least one of: plain, dot, doh")
 	}
 	return nil
 }
@@ -644,6 +634,11 @@ func Run(cfg *config.Config, logger *logging.Logger) error {
 // Windows Service Control Manager) should use this variant and cancel ctx
 // when a stop request is received.
 func RunContext(ctx context.Context, cfg *config.Config, logger *logging.Logger) error {
+	// Size the per-upstream connection pools before any client is built. A cap
+	// below the widest burst of concurrent queries re-handshakes the excess on
+	// every burst, so this is a bandwidth setting, not a memory one.
+	upstream.SetMaxIdleConns(cfg.UpstreamSettings.MaxIdleConns)
+
 	// Create upstream resolver
 	resolver, err := upstream.NewResolver(cfg, logger)
 	if err != nil {
@@ -661,6 +656,12 @@ func RunContext(ctx context.Context, cfg *config.Config, logger *logging.Logger)
 	wlResolver, err := upstream.NewWhitelistResolver(&cfg.Whitelist, cfg.UpstreamSettings.VerifyCertificates, wlBootstrapIPs, wlIPFamily, cfg.UpstreamSettings.UpstreamTTL, cfg.Cache.RenewPercent, logger)
 	if err != nil {
 		return fmt.Errorf("create whitelist resolver: %w", err)
+	}
+	// The whitelist upstream must apply the same EDNS privacy policy and
+	// transaction-ID handling as the main fan-out; without this its queries
+	// would carry the client's own OPT record.
+	if wlResolver != nil {
+		wlResolver.SetEDNS(edns.NewMiddleware(cfg))
 	}
 
 	// Create blacklist (nil when disabled)
@@ -729,43 +730,11 @@ func newBlacklist(cfg *config.BlacklistConfig, logger *logging.Logger) *domainli
 		return nil
 	}
 	bl := domainlist.NewDomainList("blacklist", domainlist.ModeBlock, cfg.ListFiles)
-	dbg := func(f string, a ...interface{}) { logger.Debugf(f, a...) }
-	count, invalid, dedup, loadErr := bl.Load(dbg)
-	if loadErr != nil {
-		logger.Warnf("Blacklist: failed to load list files: %v", loadErr)
-	} else if count > 0 {
-		msg := fmt.Sprintf("Blacklist: loaded %d domains", count)
-		if dedup > 0 {
-			msg += fmt.Sprintf(" (%d dedup)", dedup)
-		}
-		if invalid > 0 {
-			msg += fmt.Sprintf(", %d invalid", invalid)
-		}
-		msg += " from list files"
-		if invalid > 0 {
-			logger.Warnf("%s", msg)
-		} else {
-			logger.Infof("%s", msg)
-		}
-		if count > domainlist.LargeListThreshold {
-			logger.Warnf("Blacklist: %d domains exceeds recommended threshold (%d); large blocklists are not officially supported", count, domainlist.LargeListThreshold)
-		}
-	} else if len(cfg.ListFiles) == 0 {
-		logger.Warnf("Blacklist: enabled but no list_files configured; blacklist has no effect")
-	} else {
-		if invalid > 0 {
-			logger.Warnf("Blacklist: enabled but no valid domains loaded from configured list_files (%d invalid lines)", invalid)
-		} else {
-			logger.Warnf("Blacklist: enabled but no domains loaded from configured list_files")
-		}
-	}
+	count, invalid, dedup, loadErr := bl.Load(logger.Debugf)
+	upstream.LogListLoadResult(upstream.BlacklistReport, cfg.ListFiles, count, invalid, dedup, loadErr, logger)
 
 	if cfg.ListTTL > 0 {
-		bl.StartWatcher(cfg.ListTTL,
-			func(f string, a ...interface{}) { logger.Infof(f, a...) },
-			func(f string, a ...interface{}) { logger.Warnf(f, a...) },
-			func(f string, a ...interface{}) { logger.Debugf(f, a...) },
-		)
+		bl.StartWatcher(cfg.ListTTL, logger.Infof, logger.Warnf, logger.Debugf)
 		logger.Infof("Blacklist: file watcher started (check interval: %ds)", cfg.ListTTL)
 	}
 	return bl

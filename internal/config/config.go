@@ -32,6 +32,11 @@ func (u *UpstreamServer) ShouldVerifyCert(globalDefault bool) bool {
 	return globalDefault
 }
 
+// defaultMaxIdleConns is the default for upstream_settings.max_idle_conns.
+// Kept in step with defaultMaxIdleConns in internal/upstream/connpool.go,
+// which applies when a client is built without going through the config.
+const defaultMaxIdleConns = 128
+
 // UpstreamSettings holds settings for upstream resolution.
 type UpstreamSettings struct {
 	TimeoutMS          int    `toml:"timeout_ms"`
@@ -53,6 +58,12 @@ type UpstreamSettings struct {
 	// of the TTL/interval remains. Re-resolution reuses bootstrap_dns and
 	// bootstrap_ip_family; existing connections are never closed.
 	UpstreamTTL int `toml:"upstream_ttl"`
+	// MaxIdleConns is how many idle connections to keep per upstream (DoT and
+	// DoH). It must cover the widest burst of simultaneous lookups, because
+	// one in-flight query holds one connection and anything above the cap is
+	// closed and re-handshaked on the next burst.
+	// Default 128, which suits roughly 100 clients. 0 uses the default.
+	MaxIdleConns int `toml:"max_idle_conns"`
 }
 
 // TLSConfig holds shared TLS certificate settings used by both DoT and DoH
@@ -256,6 +267,7 @@ func DefaultConfig() *Config {
 			BootstrapDNS:       "9.9.9.9:53,149.112.112.112:53",
 			BootstrapIPFamily:  "auto",
 			UpstreamTTL:        -1,
+			MaxIdleConns:       defaultMaxIdleConns,
 		},
 		Downstream: Downstream{
 			Plain: DownstreamPlain{
@@ -456,41 +468,22 @@ func (c *Config) Validate() (warnings []string, errors []string) {
 		errors = append(errors, "no downstream listeners enabled; enable at least one of: plain, dot, doh")
 	}
 
-	w, e := c.validateUpstreams()
-	warnings = append(warnings, w...)
-	errors = append(errors, e...)
-
-	w, e = c.validateTLS()
-	warnings = append(warnings, w...)
-	errors = append(errors, e...)
-
-	w, e = c.validateCache()
-	warnings = append(warnings, w...)
-	errors = append(errors, e...)
-
-	w, e = c.validateLogging()
-	warnings = append(warnings, w...)
-	errors = append(errors, e...)
-
-	w, e = c.validateDownstreamPorts()
-	warnings = append(warnings, w...)
-	errors = append(errors, e...)
-
-	w, e = c.validateWhitelist()
-	warnings = append(warnings, w...)
-	errors = append(errors, e...)
-
-	w, e = c.validateBlacklist()
-	warnings = append(warnings, w...)
-	errors = append(errors, e...)
-
-	w, e = c.validateBlocking()
-	warnings = append(warnings, w...)
-	errors = append(errors, e...)
-
-	w, e = c.validatePrivacy()
-	warnings = append(warnings, w...)
-	errors = append(errors, e...)
+	// Order matters: it determines the order warnings and errors are reported.
+	for _, validate := range []func() ([]string, []string){
+		c.validateUpstreams,
+		c.validateTLS,
+		c.validateCache,
+		c.validateLogging,
+		c.validateDownstreamPorts,
+		c.validateWhitelist,
+		c.validateBlacklist,
+		c.validateBlocking,
+		c.validatePrivacy,
+	} {
+		w, e := validate()
+		warnings = append(warnings, w...)
+		errors = append(errors, e...)
+	}
 
 	return warnings, errors
 }
@@ -518,6 +511,13 @@ func (c *Config) validateUpstreams() (warnings []string, errors []string) {
 
 	if !c.UpstreamSettings.VerifyCertificates {
 		warnings = append(warnings, "Global upstream verify_certificates is disabled, all DoH/DoT upstreams will skip certificate validation")
+	}
+
+	if c.UpstreamSettings.MaxIdleConns < 0 {
+		errors = append(errors, fmt.Sprintf("upstream_settings.max_idle_conns=%d is invalid, must be >= 0", c.UpstreamSettings.MaxIdleConns))
+	}
+	if c.UpstreamSettings.MaxIdleConns > 4096 {
+		warnings = append(warnings, fmt.Sprintf("upstream_settings.max_idle_conns=%d is very high; each idle connection holds a socket per upstream", c.UpstreamSettings.MaxIdleConns))
 	}
 
 	if c.UpstreamSettings.TimeoutMS < 100 {
@@ -596,32 +596,29 @@ func (c *Config) validateLogging() (warnings []string, errors []string) {
 
 // validateDownstreamPorts checks that listener port numbers and addresses are valid.
 func (c *Config) validateDownstreamPorts() (warnings []string, errors []string) {
-	const maxPort = 65535
-	if c.Downstream.Plain.Enabled {
-		if c.Downstream.Plain.Port > maxPort {
-			errors = append(errors, fmt.Sprintf("downstream plain port=%d is out of range, must be 1-65535", c.Downstream.Plain.Port))
-		}
-		if len(c.Downstream.Plain.ListenAddresses) == 0 {
-			errors = append(errors, "downstream plain: listen_addresses must contain at least one address")
-		}
-	}
-	if c.Downstream.DoT.Enabled {
-		if c.Downstream.DoT.Port > maxPort {
-			errors = append(errors, fmt.Sprintf("downstream dot port=%d is out of range, must be 1-65535", c.Downstream.DoT.Port))
-		}
-		if len(c.Downstream.DoT.ListenAddresses) == 0 {
-			errors = append(errors, "downstream dot: listen_addresses must contain at least one address")
-		}
-	}
-	if c.Downstream.DoH.Enabled {
-		if c.Downstream.DoH.Port > maxPort {
-			errors = append(errors, fmt.Sprintf("downstream doh port=%d is out of range, must be 1-65535", c.Downstream.DoH.Port))
-		}
-		if len(c.Downstream.DoH.ListenAddresses) == 0 {
-			errors = append(errors, "downstream doh: listen_addresses must contain at least one address")
-		}
-	}
+	d := &c.Downstream
+	errors = append(errors, validateListener("plain", d.Plain.Enabled, d.Plain.Port, d.Plain.ListenAddresses)...)
+	errors = append(errors, validateListener("dot", d.DoT.Enabled, d.DoT.Port, d.DoT.ListenAddresses)...)
+	errors = append(errors, validateListener("doh", d.DoH.Enabled, d.DoH.Port, d.DoH.ListenAddresses)...)
 	return warnings, errors
+}
+
+// validateListener checks one downstream listener's port and bind addresses.
+// name is the listener label used in messages ("plain", "dot", "doh").
+// Disabled listeners are not checked.
+func validateListener(name string, enabled bool, port int, addrs []string) []string {
+	const maxPort = 65535
+	if !enabled {
+		return nil
+	}
+	var errors []string
+	if port > maxPort {
+		errors = append(errors, fmt.Sprintf("downstream %s port=%d is out of range, must be 1-65535", name, port))
+	}
+	if len(addrs) == 0 {
+		errors = append(errors, fmt.Sprintf("downstream %s: listen_addresses must contain at least one address", name))
+	}
+	return errors
 }
 
 func (c *Config) validateTLS() (warnings []string, errors []string) {
@@ -786,28 +783,28 @@ func applyLoggingDefaults(cfg *Config) {
 	}
 }
 
-// defaultListenAddresses is the replacement used when listen_addresses is
-// empty or omitted from the config file.
-var defaultListenAddresses = []string{"0.0.0.0", "::"} //nolint:gochecknoglobals
+// defaultListenAddresses returns the addresses used when listen_addresses is
+// empty or omitted from the config file. It returns a fresh slice per call so
+// the three listeners never share one backing array.
+func defaultListenAddresses() []string {
+	return []string{"0.0.0.0", "::"}
+}
 
 func applyDownstreamDefaults(cfg *Config) {
-	if len(cfg.Downstream.Plain.ListenAddresses) == 0 {
-		cfg.Downstream.Plain.ListenAddresses = defaultListenAddresses
+	d := &cfg.Downstream
+	applyListenerDefaults(&d.Plain.ListenAddresses, &d.Plain.Port, 5353)
+	applyListenerDefaults(&d.DoT.ListenAddresses, &d.DoT.Port, 8853)
+	applyListenerDefaults(&d.DoH.ListenAddresses, &d.DoH.Port, 4433)
+}
+
+// applyListenerDefaults fills in the default bind addresses and port for one
+// downstream listener when they are unset.
+func applyListenerDefaults(addrs *[]string, port *int, defaultPort int) {
+	if len(*addrs) == 0 {
+		*addrs = defaultListenAddresses()
 	}
-	if cfg.Downstream.Plain.Port <= 0 {
-		cfg.Downstream.Plain.Port = 5353
-	}
-	if len(cfg.Downstream.DoT.ListenAddresses) == 0 {
-		cfg.Downstream.DoT.ListenAddresses = defaultListenAddresses
-	}
-	if cfg.Downstream.DoT.Port <= 0 {
-		cfg.Downstream.DoT.Port = 8853
-	}
-	if len(cfg.Downstream.DoH.ListenAddresses) == 0 {
-		cfg.Downstream.DoH.ListenAddresses = defaultListenAddresses
-	}
-	if cfg.Downstream.DoH.Port <= 0 {
-		cfg.Downstream.DoH.Port = 4433
+	if *port <= 0 {
+		*port = defaultPort
 	}
 }
 
@@ -836,6 +833,10 @@ func applyTCPKeepaliveDefaults(cfg *Config) {
 	if cfg.TCPKeepalive.ClientTimeoutSec <= 0 {
 		cfg.TCPKeepalive.ClientTimeoutSec = 120
 	}
+	if cfg.UpstreamSettings.MaxIdleConns <= 0 {
+		cfg.UpstreamSettings.MaxIdleConns = defaultMaxIdleConns
+	}
+
 	if cfg.TCPKeepalive.UpstreamTimeoutSec <= 0 {
 		cfg.TCPKeepalive.UpstreamTimeoutSec = 120
 	}
@@ -945,6 +946,22 @@ bootstrap_ip_family = "ipv4"
 # the old one expires. Open connections are never closed forcibly. All
 # modes reuse bootstrap_dns and bootstrap_ip_family.
 upstream_ttl = -1
+
+# Idle connections kept per upstream, for DoT and DoH.
+#
+# One in-flight query holds one connection, so this must cover the widest burst
+# of simultaneous lookups. Connections above the cap are closed after a single
+# query and pay a fresh TLS handshake on the next burst, which costs upstream
+# bandwidth rather than saving memory.
+#
+#   32   -- a handful of devices
+#   128  -- household or small office, up to roughly 100 clients (default)
+#   256+ -- hundreds of clients
+#
+# This is a ceiling, not a reservation. Idle connections are dropped after 30 s,
+# so the pool drains to nothing when traffic stops. Raise the process
+# file-descriptor limit alongside values of 256 or more.
+max_idle_conns = 128
 
 
 # =============================================================================

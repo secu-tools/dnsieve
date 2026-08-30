@@ -5,7 +5,6 @@
 package dnsmsg
 
 import (
-	"fmt"
 	"net/netip"
 
 	"codeberg.org/miekg/dns"
@@ -225,7 +224,7 @@ func MakeBlockedResponse(query *dns.Msg, mode string, blockedBy string) *dns.Msg
 	// Build EDE extra text with upstream identification.
 	edeText := "Blocked"
 	if blockedBy != "" {
-		edeText = fmt.Sprintf("Blocked (%s)", blockedBy)
+		edeText = "Blocked (" + blockedBy + ")"
 	}
 
 	// RFC 8914 EDE code 15 (Blocked): informs the client that the upstream

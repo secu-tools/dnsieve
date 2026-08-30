@@ -119,6 +119,15 @@ func (s *DomainSet) Contains(domain string) bool {
 	if d == "" {
 		return false
 	}
+	// Entries are stored in ACE form (addEntry applies toASCII), but callers
+	// hand this method whatever the wire carried. A client may send Unicode
+	// labels verbatim, and the cache-invalidation predicate passes the raw
+	// cache-key name, so without the same conversion an IDN entry would never
+	// match. Pure-ASCII names skip the conversion: toASCII returns them
+	// unchanged, and it is measurably expensive on a per-query path.
+	if hasNonASCII(d) {
+		d = toASCII(d)
+	}
 
 	// Check exact match
 	if _, ok := s.exact[d]; ok {
@@ -131,17 +140,18 @@ func (s *DomainSet) Contains(domain string) bool {
 
 // matchWildcard walks up the domain hierarchy checking for wildcard matches.
 func (s *DomainSet) matchWildcard(d string) bool {
-	curr := d
-	for {
-		if _, ok := s.wildcard[curr]; ok {
+	return domainMatchesWildcard(d, s.wildcard)
+}
+
+// hasNonASCII reports whether s contains any byte outside the ASCII range,
+// which is the only case where IDN conversion can change the name.
+func hasNonASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
 			return true
 		}
-		idx := strings.IndexByte(curr, '.')
-		if idx < 0 {
-			return false
-		}
-		curr = curr[idx+1:]
 	}
+	return false
 }
 
 // normalize lowercases a domain and strips the trailing dot.
@@ -401,7 +411,7 @@ func addEntry(entry string, exact, wildcard map[string]struct{}, dedup *int) boo
 // the wildcard map. It walks up the label hierarchy: for "sub.example.com"
 // it checks wildcard["sub.example.com"] (i.e. *.sub.example.com), then
 // wildcard["example.com"] (i.e. *.example.com), then wildcard["com"].
-// This mirrors DomainSet.matchWildcard and is used during deduplication.
+// It backs DomainSet.matchWildcard and is also used during deduplication.
 func domainMatchesWildcard(domain string, wildcard map[string]struct{}) bool {
 	curr := domain
 	for {
@@ -482,7 +492,7 @@ type DomainList struct {
 }
 
 // LogFunc is the signature for logging callbacks.
-type LogFunc func(format string, args ...interface{})
+type LogFunc func(format string, args ...any)
 
 // loadStats accumulates counters from a load/reload pass.
 type loadStats struct {

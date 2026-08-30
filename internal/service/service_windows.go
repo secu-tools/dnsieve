@@ -4,21 +4,14 @@
 package service
 
 import (
-	"bufio"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"syscall"
 )
 
-func init() {
-	platformInstall = installWindows
-	platformUninstall = uninstallWindows
-}
-
-// Install installs DNSieve as a Windows service using sc.exe.
-func installWindows(cfg ServiceConfig) error {
+// platformInstall installs DNSieve as a Windows service using sc.exe.
+func platformInstall(cfg ServiceConfig) error {
 	exe, err := cfg.resolveExePath()
 	if err != nil {
 		return err
@@ -89,41 +82,17 @@ func serviceBinPath(exe, name string, args []string) string {
 	return strings.Join(parts, " ")
 }
 
-// Uninstall lists all DNSieve Windows services and prompts user to pick one.
-func uninstallWindows(cfg ServiceConfig) error {
+// platformUninstall lists all DNSieve Windows services and prompts the user
+// to pick one.
+func platformUninstall(cfg ServiceConfig) error {
 	services := findDNSieveServicesWindows()
-	if len(services) == 0 {
-		fmt.Println("No DNSieve services found.")
-		return nil
-	}
 
-	fmt.Println("Found DNSieve services:")
-	fmt.Println()
+	choices := make([]serviceChoice, len(services))
 	for i, svc := range services {
-		fmt.Printf("  %d. %s\n", i+1, svc.displayName)
-		fmt.Printf("     Command: %s\n", svc.binPath)
-		fmt.Println()
+		choices[i] = serviceChoice{name: svc.displayName, detailLabel: "Command", detail: svc.binPath}
 	}
-
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Enter the number to uninstall (or press Enter to cancel): ")
-	choice := strings.TrimSpace(readLineStdio(reader))
-	if choice == "" {
-		fmt.Println("Cancelled.")
-		return nil
-	}
-
-	idx := 0
-	for _, c := range choice {
-		if c < '0' || c > '9' {
-			fmt.Println("Invalid choice.")
-			return nil
-		}
-		idx = idx*10 + int(c-'0')
-	}
-	idx-- // 1-based to 0-based
-	if idx < 0 || idx >= len(services) {
-		fmt.Println("Invalid choice.")
+	idx, ok := promptServiceChoice(choices)
+	if !ok {
 		return nil
 	}
 
@@ -173,9 +142,4 @@ func findDNSieveServicesWindows() []winService {
 		})
 	}
 	return services
-}
-
-func readLineStdio(reader *bufio.Reader) string {
-	line, _ := reader.ReadString('\n')
-	return strings.TrimSpace(line)
 }

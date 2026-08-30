@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -96,7 +97,7 @@ func Install(cfg ServiceConfig) error {
 	fmt.Println("Service Installation")
 	fmt.Println("  The service will be named \"DNSieve DNS Filtering Proxy\".")
 	fmt.Print("  Enter a custom label (or press Enter to skip): ")
-	label := strings.TrimSpace(readLine(reader))
+	label := readLine(reader)
 	if label != "" {
 		cfg.DisplayLabel = label
 	}
@@ -114,24 +115,69 @@ func Uninstall(cfg ServiceConfig) error {
 	return platformUninstall(cfg)
 }
 
-// platformInstall and platformUninstall are set by platform-specific files.
-var platformInstall func(ServiceConfig) error
-var platformUninstall func(ServiceConfig) error
+// platformInstall and platformUninstall are declared by the build-tagged
+// platform files (service_linux.go, service_darwin.go, service_windows.go).
+// Declaring them as functions rather than assigning function variables in
+// init() means a GOOS with no platform file fails to compile here instead of
+// panicking on a nil call at run time.
 
 // fillDefaults populates missing fields.
 func fillDefaults(cfg *ServiceConfig) error {
-	if cfg.ExePath == "" {
-		exe, err := os.Executable()
-		if err != nil {
-			return fmt.Errorf("detect executable path: %w", err)
-		}
-		exe, err = filepath.EvalSymlinks(exe)
-		if err != nil {
-			return fmt.Errorf("resolve executable path: %w", err)
-		}
-		cfg.ExePath = exe
+	exe, err := cfg.resolveExePath()
+	if err != nil {
+		return err
 	}
+	cfg.ExePath = exe
 	return nil
+}
+
+// serviceChoice is one entry in the interactive uninstall picker.
+// detailLabel is the caption for the second line ("Plist", "Command").
+type serviceChoice struct {
+	name        string
+	detailLabel string
+	detail      string
+}
+
+// promptServiceChoice prints a numbered list of discovered services and reads
+// the user's pick from stdin. It returns the zero-based index and true, or
+// false when there is nothing to pick, the user cancels, or the input is not a
+// valid entry number. A message is printed on every false path.
+func promptServiceChoice(choices []serviceChoice) (int, bool) {
+	if len(choices) == 0 {
+		fmt.Println("No DNSieve services found.")
+		return 0, false
+	}
+
+	fmt.Println("Found DNSieve services:")
+	fmt.Println()
+	for i, c := range choices {
+		fmt.Printf("  %d. %s\n", i+1, c.name)
+		fmt.Printf("     %s: %s\n", c.detailLabel, c.detail)
+		fmt.Println()
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print("Enter the number to uninstall (or press Enter to cancel): ")
+	choice := readLine(reader)
+	if choice == "" {
+		fmt.Println("Cancelled.")
+		return 0, false
+	}
+
+	// Digits only: reject signs and whitespace the way the prompt always has.
+	for _, c := range choice {
+		if c < '0' || c > '9' {
+			fmt.Println("Invalid choice.")
+			return 0, false
+		}
+	}
+	idx, err := strconv.Atoi(choice)
+	if err != nil || idx < 1 || idx > len(choices) {
+		fmt.Println("Invalid choice.")
+		return 0, false
+	}
+	return idx - 1, true
 }
 
 func readLine(reader *bufio.Reader) string {

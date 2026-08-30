@@ -4,7 +4,6 @@
 package service
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,12 +11,7 @@ import (
 	"strings"
 )
 
-func init() {
-	platformInstall = installDarwin
-	platformUninstall = uninstallDarwin
-}
-
-func installDarwin(cfg ServiceConfig) error {
+func platformInstall(cfg ServiceConfig) error {
 	exe, err := cfg.resolveExePath()
 	if err != nil {
 		return err
@@ -83,40 +77,15 @@ func installDarwin(cfg ServiceConfig) error {
 	return nil
 }
 
-func uninstallDarwin(cfg ServiceConfig) error {
+func platformUninstall(cfg ServiceConfig) error {
 	services := findDNSieveServicesDarwin("/Library/LaunchDaemons")
-	if len(services) == 0 {
-		fmt.Println("No DNSieve services found.")
-		return nil
-	}
 
-	fmt.Println("Found DNSieve services:")
-	fmt.Println()
+	choices := make([]serviceChoice, len(services))
 	for i, svc := range services {
-		fmt.Printf("  %d. %s\n", i+1, svc.label)
-		fmt.Printf("     Plist: %s\n", svc.plistPath)
-		fmt.Println()
+		choices[i] = serviceChoice{name: svc.label, detailLabel: "Plist", detail: svc.plistPath}
 	}
-
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Enter the number to uninstall (or press Enter to cancel): ")
-	choice := strings.TrimSpace(readLineDarwin(reader))
-	if choice == "" {
-		fmt.Println("Cancelled.")
-		return nil
-	}
-
-	idx := 0
-	for _, c := range choice {
-		if c < '0' || c > '9' {
-			fmt.Println("Invalid choice.")
-			return nil
-		}
-		idx = idx*10 + int(c-'0')
-	}
-	idx--
-	if idx < 0 || idx >= len(services) {
-		fmt.Println("Invalid choice.")
+	idx, ok := promptServiceChoice(choices)
+	if !ok {
 		return nil
 	}
 
@@ -158,9 +127,4 @@ func findDNSieveServicesDarwin(dir string) []darwinService {
 		})
 	}
 	return services
-}
-
-func readLineDarwin(reader *bufio.Reader) string {
-	line, _ := reader.ReadString('\n')
-	return strings.TrimSpace(line)
 }

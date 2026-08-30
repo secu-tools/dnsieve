@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"time"
 
 	"codeberg.org/miekg/dns"
@@ -53,21 +52,8 @@ func NewDoTClient(address string, verifyCert bool, ipFamily string, resolveMode 
 		return nil, fmt.Errorf("empty DoT address")
 	}
 
-	// Extract hostname for TLS ServerName
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		// Bare address without port: check if it is a raw IPv6 address.
-		if strings.Contains(address, ":") {
-			// Raw IPv6 (e.g. "2620:fe::fe") - wrap in brackets and add default port.
-			host = address
-			address = "[" + address + "]:853"
-			port = "853"
-		} else {
-			host = address
-			address = address + ":853"
-			port = "853"
-		}
-	}
+	// Extract hostname for TLS ServerName, adding the default port if absent.
+	address, host, port := addrWithDefaultPort(address, defaultDoTPort)
 
 	tlsCfg := newUpstreamTLSConfig(host, verifyCert)
 
@@ -75,7 +61,7 @@ func NewDoTClient(address string, verifyCert bool, ipFamily string, resolveMode 
 		address:     address,
 		displayAddr: address,
 		tlsConfig:   tlsCfg,
-		pool:        newConnPool(defaultMaxIdleConns, defaultIdleTimeout),
+		pool:        newConnPool(effectiveMaxIdleConns(), defaultIdleTimeout),
 	}
 
 	if len(bootstrapIPs) > 0 && net.ParseIP(host) == nil {

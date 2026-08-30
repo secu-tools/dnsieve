@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/secu-tools/dnsieve/internal/config"
 	"github.com/secu-tools/dnsieve/internal/dnsmsg"
 	"github.com/secu-tools/dnsieve/internal/domainlist"
+	"github.com/secu-tools/dnsieve/internal/edns"
 	"github.com/secu-tools/dnsieve/internal/logging"
 )
 
@@ -1660,4 +1662,142 @@ func TestHasNXDomainDisagreement_Disagreement(t *testing.T) {
 	if !r.hasNXDomainDisagreement(results) {
 		t.Error("expected disagreement when one is NXDOMAIN and one is not")
 	}
+}
+
+// recordingWLClient captures the message the whitelist resolver actually sends
+// upstream, so a test can assert on the OPT record it carries.
+type recordingWLClient struct{ got *dns.Msg }
+
+func (c *recordingWLClient) Query(_ context.Context, m *dns.Msg) (*dns.Msg, error) {
+	c.got = m
+	r := new(dns.Msg)
+	dnsutil.SetReply(r, m)
+	return r, nil
+}
+func (c *recordingWLClient) String() string { return "https://whitelist.example/dns-query" }
+func (c *recordingWLClient) Close()         {}
+
+// TestWhitelistQueryAppliesEDNSPolicy pins that the whitelist upstream gets the
+// proxy's own OPT record, not the client's. Forwarding the client query
+// verbatim sent its ECS, cookie and NSID options straight to the upstream,
+// bypassing the privacy policy that the main fan-out applies, and reused the
+// client's transaction ID.
+func TestWhitelistQueryAppliesEDNSPolicy(t *testing.T) {
+	rc := &recordingWLClient{}
+	w := NewWhitelistResolverFromClient(rc, &config.WhitelistConfig{Enabled: true}, nil)
+	w.SetEDNS(edns.NewMiddleware(config.DefaultConfig())) // ecs.mode defaults to "strip"
+
+	q := dnsutil.SetQuestion(new(dns.Msg), "example.com.", dns.TypeA)
+	q.ID = 0x4142
+	q.UDPSize = 4096
+	q.Pseudo = append(q.Pseudo, &dns.SUBNET{
+		Family:  1,
+		Netmask: 24,
+		Address: netip.MustParseAddr("203.0.113.7"),
+	})
+
+	if _, err := w.Query(context.Background(), q); err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if rc.got == nil {
+		t.Fatal("upstream client was not called")
+	}
+	if rc.got == q {
+		t.Error("the client query object was forwarded verbatim")
+	}
+	for _, rr := range rc.got.Pseudo {
+		if s, ok := rr.(*dns.SUBNET); ok {
+			t.Errorf("client ECS %v/%d leaked upstream despite ecs.mode=strip", s.Address, s.Netmask)
+		}
+	}
+	if rc.got.ID == q.ID {
+		t.Errorf("upstream query reused the client transaction ID 0x%04x", q.ID)
+	}
+}
+
+// slowCapturingClient answers after a bounded delay and records the context
+// it was handed, so a test can observe when Resolve cancels it.
+type slowCapturingClient struct {
+	mu   sync.Mutex
+	ctx  context.Context
+	done chan struct{}
+}
+
+func (c *slowCapturingClient) Query(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
+	c.mu.Lock()
+	c.ctx = ctx
+	c.mu.Unlock()
+	select {
+	case <-time.After(150 * time.Millisecond):
+	case <-ctx.Done():
+		close(c.done)
+		return nil, ctx.Err()
+	}
+	close(c.done)
+	r := new(dns.Msg)
+	dnsutil.SetReply(r, m)
+	return r, nil
+}
+func (c *slowCapturingClient) String() string { return "slow.example:853" }
+func (c *slowCapturingClient) Close()         {}
+
+func (c *slowCapturingClient) capturedCtx() context.Context {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ctx
+}
+
+// blockedAnswerClient answers immediately with a null-address block, so
+// Resolve takes the early-block path and returns before the slow client is done.
+type blockedAnswerClient struct{}
+
+func (c *blockedAnswerClient) Query(_ context.Context, m *dns.Msg) (*dns.Msg, error) {
+	r := new(dns.Msg)
+	dnsutil.SetReply(r, m)
+	r.Answer = append(r.Answer, &dns.A{
+		Hdr: dns.Header{Name: m.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+		A:   rdata.A{Addr: netip.AddrFrom4([4]byte{})},
+	})
+	return r, nil
+}
+func (c *blockedAnswerClient) String() string { return "blocked.example:853" }
+func (c *blockedAnswerClient) Close()         {}
+
+// TestResolveCancelsDetachedContextWithoutWaitAll pins that Resolve owns the
+// cancellation of the context it detaches from the request. cancel used to
+// live only inside the WaitAll closure, so a caller that returned without
+// invoking WaitAll -- the plain-text logging path and the cache refresh both
+// do -- left the context and its timer alive until the upstream timeout
+// expired instead of releasing them once the upstreams had finished.
+func TestResolveCancelsDetachedContextWithoutWaitAll(t *testing.T) {
+	slow := &slowCapturingClient{done: make(chan struct{})}
+	r := NewResolverFromClients(
+		[]Client{&blockedAnswerClient{}, slow},
+		10*time.Second, 10*time.Millisecond,
+		logging.NewStdoutOnly(logging.DefaultConfig(), "test"),
+	)
+
+	res := r.Resolve(context.Background(), makeQuery("blocked.example.com.", dns.TypeA))
+	if res.WaitAll == nil {
+		t.Skip("run did not take the early-block path")
+	}
+	// Deliberately never call res.WaitAll(), mimicking the plain-text path.
+
+	<-slow.done // every upstream has now finished
+	ctx := slow.capturedCtx()
+	if ctx == nil {
+		t.Fatal("slow client never ran")
+	}
+
+	// The resolver timeout is 10s, far beyond this budget, so a context that
+	// becomes cancelled here can only have been cancelled by Resolve itself.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return // cancelled promptly, as it should be
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("detached context was not cancelled after the upstreams finished; " +
+		"it would stay alive until the upstream timeout")
 }

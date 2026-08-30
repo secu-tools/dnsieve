@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"time"
 
 	"codeberg.org/miekg/dns"
@@ -84,6 +85,19 @@ func (h *plainHandler) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dn
 	}
 }
 
+// clientIdleTimeout is how long an idle downstream TCP connection is held
+// open. RFC 7828: PrepareClientResponse advertises
+// tcp_keepalive.client_timeout_sec to the client, so the server has to hold
+// the connection for at least that long or the advertisement is a promise it
+// does not keep and the client reconnects sooner than it was told to. The
+// library defaults to 8s, which is far below the advertised 120s.
+func clientIdleTimeout(cfg *config.Config) time.Duration {
+	if sec := cfg.TCPKeepalive.ClientTimeoutSec; sec > 0 {
+		return time.Duration(sec) * time.Second
+	}
+	return 0 // library default
+}
+
 // isTransportTCP returns true if the ResponseWriter is using TCP.
 func isTransportTCP(w dns.ResponseWriter) bool {
 	if addr := w.RemoteAddr(); addr != nil {
@@ -152,7 +166,7 @@ func servePlainAddresses(ctx context.Context, handler *Handler, addrs []string, 
 	}
 
 	pairs := make([]serverPair, 0, len(addrs))
-	portStr := fmt.Sprintf("%d", port)
+	portStr := strconv.Itoa(port)
 
 	// shutdownStarted shuts down all successfully-bound pairs and the two
 	// servers for the current address (which may not yet be in pairs).
@@ -212,6 +226,7 @@ func servePlainAddresses(ctx context.Context, handler *Handler, addrs []string, 
 			Addr:              addr,
 			Net:               tcpNet,
 			Handler:           ph,
+			IdleTimeout:       clientIdleTimeout(handler.cfg),
 			NotifyStartedFunc: func(_ context.Context) { close(tcpReady) },
 		}
 

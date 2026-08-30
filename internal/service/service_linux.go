@@ -4,7 +4,6 @@
 package service
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,13 +11,8 @@ import (
 	"strings"
 )
 
-func init() {
-	platformInstall = installLinux
-	platformUninstall = uninstallLinux
-}
-
-// installLinux handles systemd, OpenWRT procd.
-func installLinux(cfg ServiceConfig) error {
+// platformInstall handles systemd and OpenWRT procd.
+func platformInstall(cfg ServiceConfig) error {
 	if isSystemd() {
 		return installSystemd(cfg)
 	}
@@ -28,7 +22,7 @@ func installLinux(cfg ServiceConfig) error {
 	return fmt.Errorf("unsupported init system: neither systemd nor OpenWRT procd detected")
 }
 
-func uninstallLinux(cfg ServiceConfig) error {
+func platformUninstall(cfg ServiceConfig) error {
 	if isSystemd() {
 		return uninstallSystemd(cfg)
 	}
@@ -166,38 +160,13 @@ WantedBy=multi-user.target
 
 func uninstallSystemd(cfg ServiceConfig) error {
 	services := findDNSieveServicesSystemd()
-	if len(services) == 0 {
-		fmt.Println("No DNSieve services found.")
-		return nil
-	}
 
-	fmt.Println("Found DNSieve services:")
-	fmt.Println()
+	choices := make([]serviceChoice, len(services))
 	for i, svc := range services {
-		fmt.Printf("  %d. %s\n", i+1, svc.name)
-		fmt.Printf("     Command: %s\n", svc.execStart)
-		fmt.Println()
+		choices[i] = serviceChoice{name: svc.name, detailLabel: "Command", detail: svc.execStart}
 	}
-
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Enter the number to uninstall (or press Enter to cancel): ")
-	choice := strings.TrimSpace(readLineLinux(reader))
-	if choice == "" {
-		fmt.Println("Cancelled.")
-		return nil
-	}
-
-	idx := 0
-	for _, c := range choice {
-		if c < '0' || c > '9' {
-			fmt.Println("Invalid choice.")
-			return nil
-		}
-		idx = idx*10 + int(c-'0')
-	}
-	idx--
-	if idx < 0 || idx >= len(services) {
-		fmt.Println("Invalid choice.")
+	idx, ok := promptServiceChoice(choices)
+	if !ok {
 		return nil
 	}
 
@@ -266,11 +235,6 @@ func findDNSieveServicesSystemd() []linuxService {
 		})
 	}
 	return services
-}
-
-func readLineLinux(reader *bufio.Reader) string {
-	line, _ := reader.ReadString('\n')
-	return strings.TrimSpace(line)
 }
 
 func installOpenWRT(cfg ServiceConfig) error {

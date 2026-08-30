@@ -46,11 +46,15 @@ func NewDoHClient(rawURL string, verifyCert bool, ipFamily string, resolveMode i
 		return nil, fmt.Errorf("empty DoH URL")
 	}
 
+	// HTTP/2 multiplexes every concurrent query onto one connection, so these
+	// limits only bite when an upstream falls back to HTTP/1.1. Sized to match
+	// the DoT pool; see defaultMaxIdleConns.
+	maxIdle := effectiveMaxIdleConns()
 	transport := &http.Transport{
 		TLSClientConfig:       newUpstreamTLSConfig("", verifyCert),
 		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          10,
-		MaxIdleConnsPerHost:   5,
+		MaxIdleConns:          maxIdle * 3,
+		MaxIdleConnsPerHost:   maxIdle,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   5 * time.Second,
 		ResponseHeaderTimeout: 5 * time.Second,
@@ -134,8 +138,9 @@ func (c *DoHClient) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 	if err := queryMsg.Pack(); err != nil {
 		return nil, fmt.Errorf("pack DNS query: %w", err)
 	}
-	wireQuery := make([]byte, len(queryMsg.Data))
-	copy(wireQuery, queryMsg.Data)
+	// Pack allocated this buffer above (Data was nil'd) and queryMsg is a local
+	// that is never read again, so the bytes can be handed over directly.
+	wireQuery := queryMsg.Data
 
 	resp, err := c.doPost(ctx, wireQuery)
 	if err != nil {

@@ -17,7 +17,6 @@ import (
 	"golang.org/x/net/idna"
 
 	"github.com/secu-tools/dnsieve/internal/cache"
-	"github.com/secu-tools/dnsieve/internal/dnsmsg"
 	"github.com/secu-tools/dnsieve/internal/logging"
 	"github.com/secu-tools/dnsieve/internal/upstream"
 )
@@ -181,11 +180,7 @@ func buildUpstreamInfos(results []*upstream.Result, slowThreshold time.Duration)
 			info.ServFail = true
 			info.Error = res.Err.Error()
 		} else if res.Msg != nil {
-			if rcode, ok := dns.RcodeToString[uint16(res.Inspect.Rcode)]; ok {
-				info.RCode = rcode
-			} else {
-				info.RCode = "UNKNOWN"
-			}
+			info.RCode = rcodeString(uint16(res.Inspect.Rcode))
 			info.Blocked = res.Inspect.Blocked
 			info.ServFail = res.Inspect.ServFail
 			info.HasDNSSEC = res.Inspect.HasDNSSEC
@@ -246,11 +241,7 @@ func buildResponseInfo(resp *dns.Msg) *logging.ResponseInfo {
 		AD:             resp.AuthenticatedData,
 		AuthorityCount: len(resp.Ns),
 	}
-	if rcode, ok := dns.RcodeToString[uint16(resp.Rcode)]; ok {
-		ri.RCode = rcode
-	} else {
-		ri.RCode = "UNKNOWN"
-	}
+	ri.RCode = rcodeString(uint16(resp.Rcode))
 	ri.IPs = extractResolvedIPs(resp)
 	// Check for RRSIG records in Answer and Authority sections.
 	for _, rr := range resp.Answer {
@@ -290,20 +281,35 @@ func decodeNSID(hexStr string) string {
 	return string(b)
 }
 
+// entryTTLs derives the full TTL and the remaining TTL (floored at zero) for a
+// cache entry. Shared by the cache-hit log paths so they cannot report
+// different numbers for the same entry.
+func entryTTLs(entry *cache.Entry) (ttlSec, rtlSec int64) {
+	ttlSec = int64(entry.ExpiresAt.Sub(entry.InsertedAt).Seconds())
+	rtlSec = int64(time.Until(entry.ExpiresAt).Seconds())
+	if rtlSec < 0 {
+		rtlSec = 0
+	}
+	return ttlSec, rtlSec
+}
+
+// ttlRemainingPct is the remaining TTL as a percentage of the full TTL,
+// rounded to two decimals. Kept separate from entryTTLs so the text-log paths
+// do not pay for it.
+func ttlRemainingPct(ttlSec, rtlSec int64) float64 {
+	if ttlSec <= 0 {
+		return 0
+	}
+	return math.Round(float64(rtlSec)/float64(ttlSec)*100.0*100) / 100
+}
+
 // buildCacheInfo builds a CacheInfo from a cache entry and the refresh flag.
 func buildCacheInfo(entry *cache.Entry, refreshTriggered bool) *logging.CacheInfo {
 	if entry == nil {
 		return nil
 	}
-	ttlSec := int64(entry.ExpiresAt.Sub(entry.InsertedAt).Seconds())
-	rtlSec := int64(time.Until(entry.ExpiresAt).Seconds())
-	if rtlSec < 0 {
-		rtlSec = 0
-	}
-	var pct float64
-	if ttlSec > 0 {
-		pct = math.Round(float64(rtlSec)/float64(ttlSec)*100.0*100) / 100
-	}
+	ttlSec, rtlSec := entryTTLs(entry)
+	pct := ttlRemainingPct(ttlSec, rtlSec)
 	return &logging.CacheInfo{
 		TTLSec:                     ttlSec,
 		TTLRemainingSec:            rtlSec,
@@ -315,9 +321,10 @@ func buildCacheInfo(entry *cache.Entry, refreshTriggered bool) *logging.CacheInf
 	}
 }
 
-// inspectToRCode converts an InspectResult rcode int to its string form.
-func inspectToRCode(inspect dnsmsg.InspectResult) string {
-	if s, ok := dns.RcodeToString[uint16(inspect.Rcode)]; ok {
+// rcodeString renders a DNS rcode as its mnemonic, falling back to "UNKNOWN"
+// for codes the library does not name.
+func rcodeString(rcode uint16) string {
+	if s, ok := dns.RcodeToString[rcode]; ok {
 		return s
 	}
 	return "UNKNOWN"

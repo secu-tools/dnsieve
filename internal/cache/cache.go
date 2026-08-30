@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"codeberg.org/miekg/dns"
+
+	"github.com/secu-tools/dnsieve/internal/dnsmsg"
 )
 
 // Entry represents a single cached DNS response.
@@ -78,6 +80,33 @@ func (c *Cache) SetRefreshFunc(fn func(query *dns.Msg)) {
 	c.refreshFunc = fn
 }
 
+// asciiLowerName case-folds a DNS name for use as a cache key.
+//
+// DNS name comparison is case-insensitive over ASCII only (RFC 4343 s3):
+// exactly the 26 unaccented letters, and no other octet. strings.ToLower is
+// Unicode-aware and folds runes such as U+212A KELVIN SIGN to 'k' and U+0130
+// to 'i'. The library copies question labels out of the wire verbatim without
+// escaping, so an attacker can put those bytes in a QNAME and collide with a
+// victim domain's key: "ban\u212a.com" would fold to "bank.com" and overwrite
+// the cached entry for a name it does not control. Folding octets rather than
+// runes keeps the key faithful to the wire name.
+func asciiLowerName(name string) string {
+	var b []byte
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c >= 'A' && c <= 'Z' {
+			if b == nil {
+				b = []byte(name)
+			}
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	if b == nil {
+		return name
+	}
+	return string(b)
+}
+
 // cacheKey builds a canonical key from the DNS question section.
 // Format: "lowername/qtype/qclass" or "lowername/qtype/qclass/DO" for
 // DNSSEC-requesting queries (RFC 3225 DO bit cache segregation).
@@ -88,7 +117,7 @@ func cacheKey(msg *dns.Msg) string {
 	q := msg.Question[0]
 	qtype := dns.RRToType(q)
 	var b strings.Builder
-	b.WriteString(strings.ToLower(q.Header().Name))
+	b.WriteString(asciiLowerName(q.Header().Name))
 	b.WriteByte('/')
 	if s, ok := dns.TypeToString[qtype]; ok {
 		b.WriteString(s)
@@ -109,12 +138,12 @@ func cacheKey(msg *dns.Msg) string {
 
 // hasDOBit checks whether the message has the DNSSEC OK (DO) bit set.
 func hasDOBit(msg *dns.Msg) bool {
-	for _, rr := range msg.Pseudo {
-		if opt, ok := rr.(*dns.OPT); ok {
-			return opt.Security()
-		}
-	}
-	return false
+	// Msg.Unpack decomposes the OPT record: the DO bit is hoisted to the
+	// message-level Security field and Pseudo holds only the individual EDNS
+	// options, never a *dns.OPT. Scanning Pseudo therefore always reported
+	// false for a message read off the wire, so DO=1 and DO=0 queries shared
+	// one cache entry.
+	return msg != nil && msg.Security
 }
 
 // Get retrieves a cached response for the given query.
@@ -210,13 +239,14 @@ func (c *Cache) Put(query *dns.Msg, resp *dns.Msg, blocked bool, whitelisted boo
 	data := make([]byte, len(resp.Data))
 	copy(data, resp.Data)
 
+	now := time.Now()
 	c.entries[key] = &Entry{
 		Data:        data,
 		Blocked:     blocked,
 		Whitelisted: whitelisted,
 		DNSSEC:      hasDOBit(query),
-		ExpiresAt:   time.Now().Add(ttl),
-		InsertedAt:  time.Now(),
+		ExpiresAt:   now.Add(ttl),
+		InsertedAt:  now,
 	}
 }
 
@@ -228,30 +258,10 @@ func (c *Cache) computeTTL(msg *dns.Msg, blocked bool) time.Duration {
 		return c.blockedTTL
 	}
 
-	// Extract minimum TTL from records (respect upstream TTL)
-	var minRRTTL time.Duration
-	found := false
-	for _, rr := range msg.Answer {
-		rrTTL := time.Duration(rr.Header().TTL) * time.Second
-		if !found || rrTTL < minRRTTL {
-			minRRTTL = rrTTL
-			found = true
-		}
-	}
-	for _, rr := range msg.Ns {
-		rrTTL := time.Duration(rr.Header().TTL) * time.Second
-		if !found || rrTTL < minRRTTL {
-			minRRTTL = rrTTL
-			found = true
-		}
-	}
-
-	if !found {
-		// No records with TTL; use minTTL as a reasonable fallback.
-		return c.minTTL
-	}
-
-	// Enforce minimum TTL floor
+	// Respect the upstream TTL, floored at minTTL. ExtractMinTTL returns 0 when
+	// no answer/authority record carries a TTL, which falls through the same
+	// floor below (minTTL is always >= 1s; see New).
+	minRRTTL := time.Duration(dnsmsg.ExtractMinTTL(msg)) * time.Second
 	if minRRTTL < c.minTTL {
 		return c.minTTL
 	}
@@ -369,19 +379,11 @@ func MakeCachedResponse(query *dns.Msg, entry *Entry) *dns.Msg {
 		remainingSec = 1
 	}
 
-	for _, rr := range resp.Answer {
-		if rr.Header().TTL > remainingSec {
-			rr.Header().TTL = remainingSec
-		}
-	}
-	for _, rr := range resp.Ns {
-		if rr.Header().TTL > remainingSec {
-			rr.Header().TTL = remainingSec
-		}
-	}
-	for _, rr := range resp.Extra {
-		if rr.Header().TTL > remainingSec {
-			rr.Header().TTL = remainingSec
+	for _, section := range [][]dns.RR{resp.Answer, resp.Ns, resp.Extra} {
+		for _, rr := range section {
+			if rr.Header().TTL > remainingSec {
+				rr.Header().TTL = remainingSec
+			}
 		}
 	}
 

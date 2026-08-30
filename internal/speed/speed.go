@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -331,7 +332,7 @@ func extractEDECode(msg *dns.Msg) string {
 		if name, ok := dns.ExtendedErrorToString[ede.InfoCode]; ok {
 			return fmt.Sprintf("%d:%s", ede.InfoCode, name)
 		}
-		return fmt.Sprintf("%d", ede.InfoCode)
+		return strconv.Itoa(int(ede.InfoCode))
 	}
 	return ""
 }
@@ -476,15 +477,7 @@ func resolveHost(host, bootstrapDNS, ipFamily string) ([]string, error) {
 			lastErr = err
 			continue
 		}
-		var result []string
-		for _, rr := range resp.Answer {
-			switch a := rr.(type) {
-			case *dns.A:
-				result = append(result, a.Addr.String())
-			case *dns.AAAA:
-				result = append(result, a.Addr.String())
-			}
-		}
+		result := extractAnswerIPs(resp)
 		if len(result) > 0 {
 			return result, nil
 		}

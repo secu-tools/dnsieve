@@ -220,3 +220,63 @@ func TestConnPoolConcurrentAccess(t *testing.T) {
 	}
 	p.close()
 }
+
+// TestSetMaxIdleConns verifies the configurable pool cap: a positive value
+// overrides the built-in default, and zero or negative restores it. The cap
+// governs how wide a burst of concurrent queries can be before the excess
+// connections are discarded and re-handshaked on the next burst.
+func TestSetMaxIdleConns(t *testing.T) {
+	t.Cleanup(func() { SetMaxIdleConns(0) })
+
+	if got := effectiveMaxIdleConns(); got != defaultMaxIdleConns {
+		t.Fatalf("unset: effectiveMaxIdleConns() = %d, want %d", got, defaultMaxIdleConns)
+	}
+
+	SetMaxIdleConns(256)
+	if got := effectiveMaxIdleConns(); got != 256 {
+		t.Errorf("after SetMaxIdleConns(256) = %d, want 256", got)
+	}
+
+	SetMaxIdleConns(0)
+	if got := effectiveMaxIdleConns(); got != defaultMaxIdleConns {
+		t.Errorf("after SetMaxIdleConns(0) = %d, want default %d", got, defaultMaxIdleConns)
+	}
+
+	SetMaxIdleConns(-5)
+	if got := effectiveMaxIdleConns(); got != defaultMaxIdleConns {
+		t.Errorf("after SetMaxIdleConns(-5) = %d, want default %d", got, defaultMaxIdleConns)
+	}
+}
+
+// TestPoolHonoursConfiguredCap verifies that a pool built after
+// SetMaxIdleConns keeps up to the configured number of connections and closes
+// the rest, which is the behaviour that decides how many TLS handshakes a
+// burst costs.
+func TestPoolHonoursConfiguredCap(t *testing.T) {
+	t.Cleanup(func() { SetMaxIdleConns(0) })
+	SetMaxIdleConns(3)
+
+	p := newConnPool(effectiveMaxIdleConns(), defaultIdleTimeout)
+	const addr = "192.0.2.1:853"
+
+	var conns []*fakeConn
+	for i := 0; i < 5; i++ {
+		c := &fakeConn{}
+		conns = append(conns, c)
+		p.put(addr, c)
+	}
+
+	if got := p.idleLen(); got != 3 {
+		t.Fatalf("idleLen() = %d, want 3 (the configured cap)", got)
+	}
+
+	closed := 0
+	for _, c := range conns {
+		if c.closed.Load() {
+			closed++
+		}
+	}
+	if closed != 2 {
+		t.Errorf("closed %d connections, want 2 (the excess above the cap)", closed)
+	}
+}

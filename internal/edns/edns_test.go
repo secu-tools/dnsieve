@@ -26,14 +26,23 @@ func makeQuery(name string, qtype uint16) *dns.Msg {
 	return q
 }
 
+// makeQueryWithDO builds a DO=1 query the way one arrives off the wire.
+// Msg.Unpack decomposes the OPT record into the message-level UDPSize and
+// Security fields, leaving Pseudo holding only the individual EDNS options,
+// so a hand-appended *dns.OPT would be a shape no client can actually send.
 func makeQueryWithDO(name string, qtype uint16) *dns.Msg {
 	q := makeQuery(name, qtype)
-	opt := &dns.OPT{}
-	opt.Hdr.Name = "."
-	opt.SetUDPSize(4096)
-	opt.SetSecurity(true)
-	q.Pseudo = append(q.Pseudo, opt)
-	return q
+	q.UDPSize = 4096
+	q.Security = true
+	if err := q.Pack(); err != nil {
+		panic("makeQueryWithDO: pack: " + err.Error())
+	}
+	out := new(dns.Msg)
+	out.Data = append([]byte(nil), q.Data...)
+	if err := out.Unpack(); err != nil {
+		panic("makeQueryWithDO: unpack: " + err.Error())
+	}
+	return out
 }
 
 func makeQueryWithECS(name string, qtype uint16, addr string, mask int) *dns.Msg {
@@ -1789,5 +1798,111 @@ func TestPadding_ClientResponse_IsNonDeterministic(t *testing.T) {
 	}
 	if len(sizes) < 2 {
 		t.Errorf("RFC 8467 s3: response padding should be non-deterministic, got only %d distinct size(s) in 100 iterations", len(sizes))
+	}
+}
+
+// TestPrepareUpstreamQueryRandomisesID pins RFC 5452 s9.1: the transaction ID
+// sent upstream must be the resolver's own, not the downstream client's.
+// Forwarding the client's ID lets any client fix the ID an off-path spoofer
+// would otherwise have to guess.
+func TestPrepareUpstreamQueryRandomisesID(t *testing.T) {
+	m := NewMiddleware(config.DefaultConfig())
+
+	q := dnsutil.SetQuestion(new(dns.Msg), "example.com.", dns.TypeA)
+	q.ID = 0x4142
+
+	seen := make(map[uint16]int)
+	for i := 0; i < 64; i++ {
+		out := m.PrepareUpstreamQuery(q, "9.9.9.9:853", false)
+		if out.ID == q.ID {
+			t.Fatalf("upstream query reused the client transaction ID 0x%04x", q.ID)
+		}
+		seen[out.ID]++
+	}
+	// 64 draws from 16 bits should not repeat much; a constant would collapse
+	// to a single entry.
+	if len(seen) < 32 {
+		t.Errorf("upstream IDs look non-random: %d distinct values from 64 draws", len(seen))
+	}
+}
+
+// TestMakeTruncatedResponseKeepsEDNS pins RFC 6891 s6.2.5 and RFC 3225: a TC=1
+// reply to an EDNS client must still carry an OPT record and echo the DO bit.
+// The truncated message replaces one PrepareClientResponse had already fitted
+// with both, so rebuilding them here is what keeps the reply from looking like
+// it came from a resolver with no EDNS support.
+func TestMakeTruncatedResponseKeepsEDNS(t *testing.T) {
+	wire := func(do bool, udpSize uint16) *dns.Msg {
+		q := dnsutil.SetQuestion(new(dns.Msg), "example.com.", dns.TypeA)
+		q.UDPSize = udpSize
+		q.Security = do
+		if err := q.Pack(); err != nil {
+			t.Fatalf("pack: %v", err)
+		}
+		out := new(dns.Msg)
+		out.Data = append([]byte(nil), q.Data...)
+		if err := out.Unpack(); err != nil {
+			t.Fatalf("unpack: %v", err)
+		}
+		return out
+	}
+
+	// The library only emits an OPT record when UDPSize exceeds MinMsgSize
+	// (512), so an EDNS client has to advertise more than that.
+	t.Run("EDNS client with DO=1", func(t *testing.T) {
+		resp := MakeTruncatedResponse(wire(true, 4096))
+		if !resp.Truncated {
+			t.Error("TC bit must be set")
+		}
+		if resp.UDPSize == 0 {
+			t.Error("response to an EDNS query must carry an OPT record")
+		}
+		if !resp.Security {
+			t.Error("DO bit must be echoed back to the client")
+		}
+	})
+
+	t.Run("EDNS client with DO=0", func(t *testing.T) {
+		resp := MakeTruncatedResponse(wire(false, 4096))
+		if resp.UDPSize == 0 {
+			t.Error("response to an EDNS query must carry an OPT record")
+		}
+		if resp.Security {
+			t.Error("DO bit must not be set when the client did not ask for it")
+		}
+	})
+
+	t.Run("non-EDNS client gets no OPT", func(t *testing.T) {
+		q := dnsutil.SetQuestion(new(dns.Msg), "example.com.", dns.TypeA)
+		resp := MakeTruncatedResponse(q)
+		if resp.UDPSize != 0 {
+			t.Error("RFC 6891: no OPT in a response to a non-EDNS query")
+		}
+	})
+}
+
+// TestClientRequestsDNSSECFromWire guards the DO-bit detection against
+// regressing to a Pseudo scan. Msg.Unpack decomposes the OPT record into the
+// message-level Security field, so any implementation that looks for a
+// *dns.OPT in Pseudo silently reports false for every real query.
+func TestClientRequestsDNSSECFromWire(t *testing.T) {
+	for _, do := range []bool{true, false} {
+		q := dnsutil.SetQuestion(new(dns.Msg), "example.com.", dns.TypeA)
+		q.UDPSize = 4096
+		q.Security = do
+		if err := q.Pack(); err != nil {
+			t.Fatalf("pack: %v", err)
+		}
+		w := new(dns.Msg)
+		w.Data = append([]byte(nil), q.Data...)
+		if err := w.Unpack(); err != nil {
+			t.Fatalf("unpack: %v", err)
+		}
+		if len(w.Pseudo) != 0 {
+			t.Fatalf("precondition: Unpack should leave no *dns.OPT in Pseudo, got %d entries", len(w.Pseudo))
+		}
+		if got := ClientRequestsDNSSEC(w); got != do {
+			t.Errorf("ClientRequestsDNSSEC() = %v for a wire query with DO=%v", got, do)
+		}
 	}
 }

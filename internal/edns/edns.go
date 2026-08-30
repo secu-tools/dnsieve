@@ -67,6 +67,13 @@ func (m *Middleware) PrepareUpstreamQuery(query *dns.Msg, upstreamAddr string, i
 		MsgHeader: query.MsgHeader,
 		Question:  query.Question,
 	}
+	// RFC 5452 s9.1: the resolver picks its own transaction ID. MsgHeader
+	// carries the downstream client's ID, and forwarding that verbatim would
+	// let any client choose the ID used on the wire to the upstream, removing
+	// half the entropy an off-path spoofer has to guess against a plain-UDP
+	// upstream. dns.ID is crypto/rand backed. Every path that returns a
+	// response to the client restamps it from the client's query.
+	out.ID = dns.ID()
 	// Data is nil in the struct literal above - Pack will allocate fresh
 	// memory when the message is sent.  No need to nil it explicitly.
 
@@ -244,6 +251,13 @@ func randomJitter(maxExclusive int) int {
 	return (int(b[0])<<8 | int(b[1])) % maxExclusive
 }
 
+// Padding block sizes from RFC 8467: s4.1 recommends 128 bytes for queries,
+// s4.2 recommends 468 bytes for responses.
+const (
+	upstreamPaddingBlock = 128
+	responsePaddingBlock = 468
+)
+
 // addUpstreamPadding packs the message to measure its current wire size, then
 // appends a PADDING option so the total is a multiple of 128 bytes (RFC 8467
 // s4.1). A random jitter of 0-(block-1) bytes is added before alignment so
@@ -257,19 +271,27 @@ func randomJitter(maxExclusive int) int {
 // This function is a no-op if packing fails (the query is still sent without
 // padding).
 func addUpstreamPadding(out *dns.Msg) {
-	if err := out.Pack(); err != nil {
-		out.Data = nil
+	addPadding(out, upstreamPaddingBlock)
+}
+
+// addPadding packs msg to measure its current wire size, then appends a PADDING
+// option so the total is a multiple of block. A random jitter of 0-(block-1)
+// bytes is added before alignment. The 4-byte PADDING option header (type +
+// length) is included so the final wire size is an exact multiple of block.
+// The packed data is cleared so the message is repacked with the option
+// included. No-op if packing fails.
+func addPadding(msg *dns.Msg, block int) {
+	if err := msg.Pack(); err != nil {
+		msg.Data = nil
 		return
 	}
-	size := len(out.Data)
-	out.Data = nil
-	const block = 128
-	// Add a random jitter before aligning so repeated identical queries land in
-	// different buckets. The final invariant is:
+	size := len(msg.Data)
+	msg.Data = nil
+	// The final invariant is:
 	//   (size + 4 + jitter + paddingData) % block == 0
 	jitter := randomJitter(block)
 	paddingData := (block - (size+4+jitter)%block) % block
-	out.Pseudo = append(out.Pseudo, &dns.PADDING{Padding: strings.Repeat("00", jitter+paddingData)})
+	msg.Pseudo = append(msg.Pseudo, &dns.PADDING{Padding: strings.Repeat("00", jitter+paddingData)})
 }
 
 // addResponsePadding packs the response to measure its current wire size, then
@@ -285,38 +307,18 @@ func addUpstreamPadding(out *dns.Msg) {
 // This function is a no-op if packing fails (the response is still sent without
 // padding).
 func addResponsePadding(resp *dns.Msg) {
-	if err := resp.Pack(); err != nil {
-		resp.Data = nil
-		return
-	}
-	size := len(resp.Data)
-	resp.Data = nil
-	const block = 468
-	// Add a random jitter before aligning so repeated identical responses vary
-	// in wire size. The final invariant is:
-	//   (size + 4 + jitter + paddingData) % block == 0
-	jitter := randomJitter(block)
-	paddingData := (block - (size+4+jitter)%block) % block
-	resp.Pseudo = append(resp.Pseudo, &dns.PADDING{Padding: strings.Repeat("00", jitter+paddingData)})
+	addPadding(resp, responsePaddingBlock)
 }
 
 // --- DO Bit Helpers ---
 
 // ClientRequestsDNSSEC returns true if the client query has DO=1.
 func ClientRequestsDNSSEC(query *dns.Msg) bool {
-	return clientRequestsDNSSEC(query)
-}
-
-func clientRequestsDNSSEC(query *dns.Msg) bool {
-	if query == nil {
-		return false
-	}
-	for _, rr := range query.Pseudo {
-		if opt, ok := rr.(*dns.OPT); ok {
-			return opt.Security()
-		}
-	}
-	return false
+	// Msg.Unpack hoists the DO bit out of the OPT record into the
+	// message-level Security field; Pseudo never contains a *dns.OPT after a
+	// wire round trip, so scanning it always answered false and the DO bit
+	// was cleared in every response.
+	return query != nil && query.Security
 }
 
 // --- ECS Handling (RFC 7871) ---
@@ -718,5 +720,15 @@ func MakeTruncatedResponse(query *dns.Msg) *dns.Msg {
 	resp.Question = query.Question
 	resp.RecursionDesired = query.RecursionDesired
 	resp.RecursionAvailable = true
+	// RFC 6891 s6.2.5: a response to an EDNS query carries an OPT record,
+	// and RFC 3225 requires the DO bit to be echoed. This message replaces
+	// one that PrepareClientResponse had already fitted with both, so
+	// rebuilding them here keeps a TC=1 reply from looking like it came from
+	// a resolver that does not speak EDNS, which can push clients into
+	// downgrading later queries.
+	if ClientHasEDNS(query) {
+		resp.UDPSize = MaxUDPPayload
+		resp.Security = query.Security
+	}
 	return resp
 }

@@ -53,7 +53,7 @@ func serveDoHAddresses(ctx context.Context, handler *Handler, addrs []string, po
 		dohHandler(w, r, handler, logger)
 	})
 
-	portStr := fmt.Sprintf("%d", port)
+	portStr := strconv.Itoa(port)
 	servers := make([]*http.Server, 0, len(addrs))
 	runErrCh := make(chan error, len(addrs))
 
@@ -147,7 +147,7 @@ func startDOHListenerGoroutine(srv *http.Server, addr, tcpNet string, cfg *confi
 	}
 	go func() {
 		logger.Infof("DoH (HTTPS/HTTP2) listening on %s", addr)
-		if err := srv.Serve(newTLSListener(ln, tlsCfg)); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(tls.NewListener(ln, tlsCfg)); err != nil && err != http.ErrServerClosed {
 			errCh <- fmt.Errorf("HTTPS %s: %w", addr, err)
 		}
 	}()
@@ -188,8 +188,7 @@ func readDOHWireQuery(r *http.Request) ([]byte, int, string) {
 		// JSON API: ?name=<domain>&type=<type>
 		nameParam := r.URL.Query().Get("name")
 		if nameParam != "" {
-			wire, code, msg := buildQueryFromJSONParams(r)
-			return wire, code, msg
+			return buildQueryFromJSONParams(r)
 		}
 		return nil, http.StatusBadRequest, "Missing ?dns= or ?name= parameter. Use ?dns=<base64url> (RFC 8484) or ?name=<domain>&type=<type> (JSON API)."
 	default:
@@ -339,13 +338,7 @@ func dohHandler(w http.ResponseWriter, r *http.Request, handler *Handler, logger
 	}
 
 	w.Header().Set("Content-Type", "application/dns-message")
-	// RFC 8484 s5.1: use no-store for error responses that must not be
-	// cached by intermediaries (SERVFAIL, REFUSED, etc.).
-	if resp.Rcode == dns.RcodeServerFailure || resp.Rcode == dns.RcodeRefused {
-		w.Header().Set("Cache-Control", "no-store")
-	} else {
-		w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", computeMaxAge(resp)))
-	}
+	setCacheControl(w, resp)
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(resp.Data); err != nil {
 		logger.Debugf("Failed to write DoH response: %v", err)
@@ -358,31 +351,34 @@ func decodeBase64URL(s string) ([]byte, error) {
 	return base64.RawURLEncoding.DecodeString(s)
 }
 
+// setCacheControl applies the RFC 8484 s5.1 Cache-Control policy: no-store for
+// error responses that must not be cached by intermediaries (SERVFAIL,
+// REFUSED), and the response TTL as max-age otherwise.
+func setCacheControl(w http.ResponseWriter, resp *dns.Msg) {
+	if resp.Rcode == dns.RcodeServerFailure || resp.Rcode == dns.RcodeRefused {
+		w.Header().Set("Cache-Control", "no-store")
+		return
+	}
+	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", computeMaxAge(resp)))
+}
+
 // computeMaxAge extracts the minimum TTL from a DNS response for the
 // Cache-Control header.
 func computeMaxAge(msg *dns.Msg) int {
-	min := 1800
-	for _, rr := range msg.Answer {
-		ttl := int(rr.Header().TTL)
-		if ttl < min {
-			min = ttl
+	// Seeded at 1800 rather than 0, so a response with no answer or authority
+	// records keeps the default half-hour max-age.
+	maxAge := 1800
+	for _, section := range [][]dns.RR{msg.Answer, msg.Ns} {
+		for _, rr := range section {
+			if ttl := int(rr.Header().TTL); ttl < maxAge {
+				maxAge = ttl
+			}
 		}
 	}
-	for _, rr := range msg.Ns {
-		ttl := int(rr.Header().TTL)
-		if ttl < min {
-			min = ttl
-		}
+	if maxAge < 1 {
+		maxAge = 1
 	}
-	if min < 1 {
-		min = 1
-	}
-	return min
-}
-
-// newTLSListener wraps a net.Listener with TLS.
-func newTLSListener(ln net.Listener, cfg *tls.Config) net.Listener {
-	return tls.NewListener(ln, cfg)
+	return maxAge
 }
 
 // --- JSON DNS API (application/dns-json) ---
@@ -431,11 +427,7 @@ func writeJSONResponse(w http.ResponseWriter, resp *dns.Msg, logger *logging.Log
 	jr.Additional = rrToJSON(resp.Extra)
 
 	w.Header().Set("Content-Type", "application/dns-json")
-	if resp.Rcode == dns.RcodeServerFailure || resp.Rcode == dns.RcodeRefused {
-		w.Header().Set("Cache-Control", "no-store")
-	} else {
-		w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", computeMaxAge(resp)))
-	}
+	setCacheControl(w, resp)
 	w.WriteHeader(http.StatusOK)
 
 	enc := json.NewEncoder(w)

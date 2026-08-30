@@ -45,12 +45,7 @@ func parseRemoteAddr(addr net.Addr) (ip string, port int) {
 	if addr == nil {
 		return "", 0
 	}
-	host, portStr, err := net.SplitHostPort(addr.String())
-	if err != nil {
-		return addr.String(), 0
-	}
-	p, _ := strconv.Atoi(portStr)
-	return host, p
+	return parseRemoteAddrString(addr.String())
 }
 
 // parseRemoteAddrString splits a "host:port" string (as in http.Request.RemoteAddr)

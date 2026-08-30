@@ -329,9 +329,16 @@ func (r *Resolver) Resolve(ctx context.Context, query *dns.Msg) *FanOutResult {
 			copy(snapshot, results)
 			mu.Unlock()
 			partialResult := r.selectResult(snapshot)
-			partialResult.WaitAll = func() []*Result {
+			// Resolve owns the detached context, not the caller. cancel used
+			// to live only inside WaitAll, so a caller that never invoked it
+			// (the plain-text logging path, and the cache refresh) leaked the
+			// context and its timer for the full upstream timeout.
+			go func() {
 				<-allDone
 				cancel()
+			}()
+			partialResult.WaitAll = func() []*Result {
+				<-allDone
 				mu.Lock()
 				out := make([]*Result, len(results))
 				copy(out, results)

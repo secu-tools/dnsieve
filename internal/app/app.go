@@ -19,6 +19,7 @@ import (
 	"github.com/secu-tools/dnsieve/internal/server"
 	"github.com/secu-tools/dnsieve/internal/service"
 	"github.com/secu-tools/dnsieve/internal/speed"
+	"github.com/secu-tools/dnsieve/internal/upstream"
 )
 
 // version, commit, and buildNumber are set via ldflags at build time:
@@ -86,11 +87,10 @@ func resolveVersion() string {
 
 // versionTag returns the version with optional build mode suffix.
 func versionTag() string {
-	label := resolveCommitLabel()
 	if buildMode != "" {
-		label = buildMode
+		return buildMode
 	}
-	return label
+	return resolveCommitLabel()
 }
 
 func versionString() string {
@@ -174,7 +174,7 @@ func Run() {
 	}
 
 	// Handle speed test mode (may need config for upstream list)
-	if flag.Lookup("speed").Value.String() != "" || isSpeedFlag() {
+	if *speedTest != "" || isSpeedFlag() {
 		handleSpeedTest(*cfgFile, *speedTest)
 		return
 	}
@@ -267,6 +267,13 @@ func loadAndValidateConfig(cfgFile string) (*config.Config, string, []string) {
 		}
 		os.Exit(1)
 	}
+
+	// Size the upstream connection pools before anything builds a client. The
+	// startup speed test creates its own clients and runs before the server,
+	// so applying this here keeps the measurement on the same footing as the
+	// running proxy.
+	upstream.SetMaxIdleConns(cfg.UpstreamSettings.MaxIdleConns)
+
 	return cfg, cfgPath, warnings
 }
 

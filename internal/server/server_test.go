@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -2879,14 +2880,23 @@ func TestHandleQuery_WhitelistNormalDomainNotCachedAsWhitelisted(t *testing.T) {
 // =============================================================================
 
 // makeQueryDO returns a query with the DNSSEC OK (DO) bit set.
+// makeQueryDO builds a DO=1 query the way one arrives off the wire.
+// Msg.Unpack decomposes the OPT record into the message-level UDPSize and
+// Security fields, so appending a *dns.OPT to Pseudo by hand produces a shape
+// no client can send and would bypass the real DO detection path.
 func makeQueryDO(name string, qtype uint16) *dns.Msg {
 	q := makeQuery(name, qtype)
-	opt := &dns.OPT{}
-	opt.Hdr.Name = "."
-	opt.SetUDPSize(4096)
-	opt.SetSecurity(true)
-	q.Pseudo = append(q.Pseudo, opt)
-	return q
+	q.UDPSize = 4096
+	q.Security = true
+	if err := q.Pack(); err != nil {
+		panic("makeQueryDO: pack: " + err.Error())
+	}
+	out := new(dns.Msg)
+	out.Data = append([]byte(nil), q.Data...)
+	if err := out.Unpack(); err != nil {
+		panic("makeQueryDO: unpack: " + err.Error())
+	}
+	return out
 }
 
 // invalidatePred is the production predicate from makeWhitelistInvalidator.
@@ -4255,5 +4265,201 @@ func TestJSONEvent_IDN_Unicode_NormalizedInDomain(t *testing.T) {
 	}
 	if !strings.Contains(out, "xn--0zwm56d.org") {
 		t.Errorf("expected Punycode xn--0zwm56d.org in JSON domain, got: %s", out)
+	}
+}
+
+// wlStubClient is a whitelist upstream that always returns the same response.
+type wlStubClient struct{ resp *dns.Msg }
+
+func (c *wlStubClient) Query(_ context.Context, m *dns.Msg) (*dns.Msg, error) {
+	r := c.resp.Copy()
+	r.Question = m.Question
+	return r, nil
+}
+func (c *wlStubClient) String() string { return "https://whitelist.example/dns-query" }
+func (c *wlStubClient) Close()         {}
+
+// newWhitelistTestHandler wires a handler whose whitelist resolver returns
+// resp for every name in the whitelist.
+func newWhitelistTestHandler(t *testing.T, resp *dns.Msg, entries []string) (*Handler, *cache.Cache) {
+	t.Helper()
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+	cfg.Whitelist.Enabled = true
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wl.list")
+	if err := os.WriteFile(path, []byte(strings.Join(entries, "\n")+"\n"), 0644); err != nil {
+		t.Fatalf("write whitelist: %v", err)
+	}
+	dl := domainlist.NewDomainList("whitelist", domainlist.ModeAllow, []string{path})
+	if _, _, _, err := dl.Load(nil); err != nil {
+		t.Fatalf("load whitelist: %v", err)
+	}
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	c := cache.New(100, 3600, 5, 0)
+	wl := upstream.NewWhitelistResolverFromClient(&wlStubClient{resp: resp}, &cfg.Whitelist, dl)
+	resolver := upstream.NewResolverFromClients(nil, 2*time.Second, 50*time.Millisecond, logger)
+	return NewHandler(resolver, wl, nil, c, logger, cfg), c
+}
+
+// TestWhitelistDoesNotCacheServerFailure pins that a SERVFAIL from the
+// whitelist resolver is not cached. dnsmsg treats SERVFAIL and BADCOOKIE as
+// retryable server errors, and the main fan-out drops them via Result.OK;
+// caching one here pinned a transient upstream blip for min_ttl and served it
+// to every client until it expired.
+func TestWhitelistDoesNotCacheServerFailure(t *testing.T) {
+	q := makeQuery("allowed.example.com", dns.TypeA)
+
+	servfail := new(dns.Msg)
+	dnsutil.SetReply(servfail, q)
+	servfail.Rcode = dns.RcodeServerFailure
+
+	h, c := newWhitelistTestHandler(t, servfail, []string{"allowed.example.com"})
+
+	resp := h.HandleQuery(context.Background(), q)
+	if resp == nil {
+		t.Fatal("expected a response")
+	}
+	if resp.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("precondition: expected SERVFAIL to reach the client, got %s", dns.RcodeToString[resp.Rcode])
+	}
+	if c.Len() != 0 {
+		t.Errorf("SERVFAIL from the whitelist resolver must not be cached, cache holds %d entries", c.Len())
+	}
+
+	// A successful answer for the same name must still be cached.
+	ok := makeNormalResp(q)
+	h2, c2 := newWhitelistTestHandler(t, ok, []string{"allowed.example.com"})
+	if r := h2.HandleQuery(context.Background(), makeQuery("allowed.example.com", dns.TypeA)); r == nil {
+		t.Fatal("expected a response")
+	}
+	if c2.Len() != 1 {
+		t.Errorf("a successful whitelist answer should be cached, got %d entries", c2.Len())
+	}
+}
+
+// TestUpstreamFailureResponseAppliesNSIDSubstitute pins that the SERVFAIL a
+// client receives when every upstream fails still carries the substituted
+// NSID. selectResult always fills BestResponse (makeServFail never returns
+// nil), so this answer travels the normal return path, and the substitution
+// has to survive there.
+func TestUpstreamFailureResponseAppliesNSIDSubstitute(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Privacy.NSID.Mode = "substitute"
+	cfg.Privacy.NSID.Value = "dnsieve-test"
+	cfg.Cache.Enabled = false
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	resolver := upstream.NewResolverFromClients(
+		[]upstream.Client{&mockUpstreamClient{name: "err", err: fmt.Errorf("network error")}}, time.Second, 10*time.Millisecond, logger)
+	h := NewHandler(resolver, nil, nil, cache.New(10, 60, 5, 0), logger, cfg)
+
+	q := makeQuery("unreachable.example.com", dns.TypeA)
+	q.UDPSize = 4096
+	q.Pseudo = append(q.Pseudo, &dns.NSID{})
+
+	resp := h.HandleQuery(context.Background(), q)
+	if resp == nil {
+		t.Fatal("expected a response")
+	}
+	if resp.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("precondition: expected SERVFAIL, got %s", dns.RcodeToString[resp.Rcode])
+	}
+
+	// SetReply copies the client's Pseudo section, so an NSID option is
+	// present either way; only its value proves the substitution ran.
+	want := hex.EncodeToString([]byte("dnsieve-test"))
+	var got []string
+	for _, rr := range resp.Pseudo {
+		if n, ok := rr.(*dns.NSID); ok {
+			got = append(got, n.Nsid)
+			if n.Nsid == want {
+				return
+			}
+		}
+	}
+	t.Errorf("upstream-failure SERVFAIL carries no substituted NSID (want %q, got %q)", want, got)
+}
+
+// TestClientIdleTimeoutMatchesAdvertisedKeepalive pins that the downstream TCP
+// idle timeout follows tcp_keepalive.client_timeout_sec, which is the value
+// PrepareClientResponse advertises to clients via RFC 7828. The library
+// defaults to 8s, so before this the proxy promised 120s and dropped the
+// connection at 8, making clients reconnect far more often than they were told
+// to -- and for the DoT listener that is a TLS handshake each time.
+func TestClientIdleTimeoutMatchesAdvertisedKeepalive(t *testing.T) {
+	cfg := config.DefaultConfig()
+
+	if got, want := clientIdleTimeout(cfg), time.Duration(cfg.TCPKeepalive.ClientTimeoutSec)*time.Second; got != want {
+		t.Errorf("clientIdleTimeout() = %v, want %v (the advertised keepalive)", got, want)
+	}
+
+	cfg.TCPKeepalive.ClientTimeoutSec = 45
+	if got := clientIdleTimeout(cfg); got != 45*time.Second {
+		t.Errorf("clientIdleTimeout() = %v, want 45s", got)
+	}
+
+	// 0 means "unset"; fall back to the library default rather than closing
+	// connections immediately.
+	cfg.TCPKeepalive.ClientTimeoutSec = 0
+	if got := clientIdleTimeout(cfg); got != 0 {
+		t.Errorf("clientIdleTimeout() = %v, want 0 (library default)", got)
+	}
+}
+
+// earlyBlockRefreshClients builds one upstream that answers with a block
+// immediately and one that is slow, so Resolve returns via the early-block
+// path where Cacheable is false even though a block was positively detected.
+type slowOKClient struct{ resp *dns.Msg }
+
+func (c *slowOKClient) Query(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
+	select {
+	case <-time.After(400 * time.Millisecond):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	r := c.resp.Copy()
+	r.Question = m.Question
+	return r, nil
+}
+func (c *slowOKClient) String() string { return "slow.example:853" }
+func (c *slowOKClient) Close()         {}
+
+// TestRefreshCachesEarlyBlock pins that a background refresh which detects a
+// block still writes it to the cache. Resolve reports Cacheable=false on the
+// early-block path because not every upstream has answered; HandleQuery
+// compensates for that deliberately, and without the same exception here a
+// newly blocked domain was never refreshed and kept being re-resolved on every
+// query until its entry expired.
+func TestRefreshCachesEarlyBlock(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Cache.Enabled = true
+
+	logger := logging.NewStdoutOnly(logging.DefaultConfig(), "test")
+	c := cache.New(100, 3600, 5, 0)
+
+	q := makeQuery("nowblocked.example.com", dns.TypeA)
+	blocked := makeBlockedResp(q)
+	normal := makeNormalResp(q)
+
+	resolver := upstream.NewResolverFromClients(
+		[]upstream.Client{&mockUpstreamClient{name: "fast-block", response: blocked}, &slowOKClient{resp: normal}},
+		5*time.Second, 10*time.Millisecond, logger,
+	)
+
+	refresh := makeRefreshFunc(resolver, nil, c, cfg, logger, 5*time.Second)
+	refresh(q)
+
+	if c.Len() == 0 {
+		t.Fatal("background refresh discarded the early-block result; the cache is still empty")
+	}
+	entry, _ := c.Get(q)
+	if entry == nil {
+		t.Fatal("no cache entry for the refreshed query")
+	}
+	if !entry.Blocked {
+		t.Error("refreshed entry should be marked blocked")
 	}
 }

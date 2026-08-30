@@ -728,13 +728,22 @@ func TestCacheKey_DOBitSegregation(t *testing.T) {
 	respNoDO := makeResp(queryNoDO, 300)
 	c.Put(queryNoDO, respNoDO, false, false)
 
-	// Build the same query but with DO=1.
+	// Build the same query but with DO=1, as it arrives off the wire.
+	// Msg.Unpack decomposes the OPT record into the message-level UDPSize and
+	// Security fields, so a hand-appended *dns.OPT in Pseudo is a shape no
+	// client can send and would not exercise the real DO detection path.
 	queryDO := makeQuery("dnssec.example.com", dns.TypeA)
-	opt := &dns.OPT{}
-	opt.Hdr.Name = "."
-	opt.SetUDPSize(4096)
-	opt.SetSecurity(true)
-	queryDO.Pseudo = append(queryDO.Pseudo, opt)
+	queryDO.UDPSize = 4096
+	queryDO.Security = true
+	if err := queryDO.Pack(); err != nil {
+		t.Fatalf("pack DO query: %v", err)
+	}
+	wire := append([]byte(nil), queryDO.Data...)
+	queryDO = new(dns.Msg)
+	queryDO.Data = wire
+	if err := queryDO.Unpack(); err != nil {
+		t.Fatalf("unpack DO query: %v", err)
+	}
 
 	// DO=1 query must not hit the DO=0 cache entry.
 	if entry, _ := c.Get(queryDO); entry != nil {
@@ -1248,5 +1257,49 @@ func TestKeyDomain(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("keyDomain(%q) = %q, want %q", tt.key, got, tt.want)
 		}
+	}
+}
+
+// wireRoundTripName packs a question name and unpacks it again, so the test
+// sees exactly the bytes a client would put on the wire. The library copies
+// question labels verbatim without escaping, so non-ASCII octets survive.
+func wireRoundTripName(t *testing.T, name string) *dns.Msg {
+	t.Helper()
+	m := dnsutil.SetQuestion(new(dns.Msg), name, dns.TypeA)
+	if m == nil {
+		t.Fatalf("SetQuestion(%q) = nil", name)
+	}
+	if err := m.Pack(); err != nil {
+		t.Fatalf("pack %q: %v", name, err)
+	}
+	got := new(dns.Msg)
+	got.Data = append([]byte(nil), m.Data...)
+	if err := got.Unpack(); err != nil {
+		t.Fatalf("unpack %q: %v", name, err)
+	}
+	return got
+}
+
+// TestCacheKeyFoldsASCIIOnly pins RFC 4343 case folding: only the 26 ASCII
+// letters are case-insensitive in a DNS name. Unicode-aware folding would map
+// U+212A KELVIN SIGN to 'k' and U+0130 to 'i', letting any client store a
+// response under the cache key of a domain it does not control.
+func TestCacheKeyFoldsASCIIOnly(t *testing.T) {
+	victim := cacheKey(wireRoundTripName(t, "bank.com."))
+
+	// U+212A KELVIN SIGN in place of 'k': a distinct wire name that Unicode
+	// folding would collapse onto "bank.com".
+	if got := cacheKey(wireRoundTripName(t, "ban\u212a.com.")); got == victim {
+		t.Errorf("U+212A collides with ASCII 'k': both keyed %q", victim)
+	}
+
+	// U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE folds to 'i' under Unicode.
+	if got, want := cacheKey(wireRoundTripName(t, "wik\u0130.com.")), cacheKey(wireRoundTripName(t, "wiki.com.")); got == want {
+		t.Errorf("U+0130 collides with ASCII 'i': both keyed %q", want)
+	}
+
+	// ASCII case-insensitivity must still hold.
+	if got := cacheKey(wireRoundTripName(t, "BaNk.CoM.")); got != victim {
+		t.Errorf("ASCII case folding regressed: got %q, want %q", got, victim)
 	}
 }

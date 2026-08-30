@@ -306,17 +306,16 @@ func (l *Logger) applyFileWriter(w io.Writer) {
 // across all active output destinations. Must be called whenever the
 // stdout/file writers or their minimum levels change.
 func (l *Logger) updateMinLevel() {
-	min := Level(255)
-	if l.stdoutWriter != nil && l.stdoutMin < min {
-		min = l.stdoutMin
+	// LevelFatal is the ceiling: with no destination attached, nothing below
+	// Fatal is worth formatting.
+	lvl := LevelFatal
+	if l.stdoutWriter != nil && l.stdoutMin < lvl {
+		lvl = l.stdoutMin
 	}
-	if l.fileWriter != nil && l.fileMin < min {
-		min = l.fileMin
+	if l.fileWriter != nil && l.fileMin < lvl {
+		lvl = l.fileMin
 	}
-	if min > LevelFatal {
-		min = LevelFatal
-	}
-	l.minLevel = min
+	l.minLevel = lvl
 }
 
 // SetLevel sets the minimum log level for all active output destinations.
@@ -366,7 +365,7 @@ func (l *Logger) openFile() error {
 // which is critical at high query rates (e.g. 100k DNS requests/second).
 // Each buffer is pre-grown to a reasonable event size to minimise resizing.
 var jsonBufPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		b := &bytes.Buffer{}
 		b.Grow(512)
 		return b
@@ -377,7 +376,7 @@ var jsonBufPool = sync.Pool{
 // lines. Reusing buffers avoids the string-concatenation allocation that
 // would otherwise occur when appending the trailing newline.
 var textBufPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		b := &bytes.Buffer{}
 		b.Grow(128)
 		return b
@@ -467,6 +466,24 @@ type logEntry struct {
 
 // startWorker initialises the async write channel and starts the background
 // I/O goroutine. Must be called exactly once during logger construction.
+// writeEntry writes one entry to every enabled destination under l.mu.
+// Shared by the async worker goroutine and the Synchronous inline path so the
+// two cannot drift on routing rules.
+func (l *Logger) writeEntry(entry logEntry) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !entry.jsonOnly {
+		l.writeText(entry.level, l.formatLine(entry.level.String(), entry.msg))
+	}
+	if !entry.textOnly && (l.stdoutJSON || l.fileJSON) {
+		ev := entry.event
+		if ev == nil {
+			ev = NewGeneralEvent(entry.level, l.module, entry.msg)
+		}
+		l.writeJSON(entry.level, ev)
+	}
+}
+
 // In Synchronous mode no goroutine is started; enqueue writes inline instead.
 func (l *Logger) startWorker() {
 	if l.config.Synchronous {
@@ -481,18 +498,7 @@ func (l *Logger) startWorker() {
 				close(entry.done)
 				continue
 			}
-			l.mu.Lock()
-			if !entry.jsonOnly {
-				l.writeText(entry.level, l.formatLine(entry.level.String(), entry.msg))
-			}
-			if !entry.textOnly && (l.stdoutJSON || l.fileJSON) {
-				ev := entry.event
-				if ev == nil {
-					ev = NewGeneralEvent(entry.level, l.module, entry.msg)
-				}
-				l.writeJSON(entry.level, ev)
-			}
-			l.mu.Unlock()
+			l.writeEntry(entry)
 		}
 	}()
 }
@@ -503,18 +509,7 @@ func (l *Logger) startWorker() {
 // In Synchronous mode the entry is written inline before returning.
 func (l *Logger) enqueue(entry logEntry) {
 	if l.config.Synchronous {
-		l.mu.Lock()
-		if !entry.jsonOnly {
-			l.writeText(entry.level, l.formatLine(entry.level.String(), entry.msg))
-		}
-		if !entry.textOnly && (l.stdoutJSON || l.fileJSON) {
-			ev := entry.event
-			if ev == nil {
-				ev = NewGeneralEvent(entry.level, l.module, entry.msg)
-			}
-			l.writeJSON(entry.level, ev)
-		}
-		l.mu.Unlock()
+		l.writeEntry(entry)
 		return
 	}
 	select {
@@ -587,7 +582,7 @@ func (l *Logger) LogEvent(level Level, event *Event) {
 }
 
 // Debugf logs a DEBUG-level formatted message.
-func (l *Logger) Debugf(format string, v ...interface{}) {
+func (l *Logger) Debugf(format string, v ...any) {
 	if l.minLevel > LevelDebug {
 		return
 	}
@@ -595,7 +590,7 @@ func (l *Logger) Debugf(format string, v ...interface{}) {
 }
 
 // Infof logs an INFO-level formatted message.
-func (l *Logger) Infof(format string, v ...interface{}) {
+func (l *Logger) Infof(format string, v ...any) {
 	if l.minLevel > LevelInfo {
 		return
 	}
@@ -603,7 +598,7 @@ func (l *Logger) Infof(format string, v ...interface{}) {
 }
 
 // Warnf logs a WARN-level formatted message.
-func (l *Logger) Warnf(format string, v ...interface{}) {
+func (l *Logger) Warnf(format string, v ...any) {
 	if l.minLevel > LevelWarn {
 		return
 	}
@@ -611,7 +606,7 @@ func (l *Logger) Warnf(format string, v ...interface{}) {
 }
 
 // Errorf logs an ERROR-level formatted message.
-func (l *Logger) Errorf(format string, v ...interface{}) {
+func (l *Logger) Errorf(format string, v ...any) {
 	if l.minLevel > LevelError {
 		return
 	}
@@ -620,7 +615,7 @@ func (l *Logger) Errorf(format string, v ...interface{}) {
 
 // Fatalf logs a FATAL message synchronously, bypassing the async queue to
 // ensure the message is written before the process exits.
-func (l *Logger) Fatalf(format string, v ...interface{}) {
+func (l *Logger) Fatalf(format string, v ...any) {
 	msg := fmt.Sprintf(format, v...)
 	l.mu.Lock()
 	l.writeText(LevelFatal, l.formatLine("FATAL", msg))
@@ -634,7 +629,7 @@ func (l *Logger) Fatalf(format string, v ...interface{}) {
 // InfofText logs an INFO message only to text-format (non-JSON) outputs.
 // Use for verbose per-query messages that are already captured in a
 // structured JSON DNS event, so they are not duplicated in JSON mode.
-func (l *Logger) InfofText(format string, v ...interface{}) {
+func (l *Logger) InfofText(format string, v ...any) {
 	if !l.hasTextOutput(LevelInfo) {
 		return
 	}
@@ -644,7 +639,7 @@ func (l *Logger) InfofText(format string, v ...interface{}) {
 // WarnfText logs a WARN message only to text-format (non-JSON) outputs.
 // Use for verbose per-query messages that are already captured in a
 // structured JSON DNS event, so they are not duplicated in JSON mode.
-func (l *Logger) WarnfText(format string, v ...interface{}) {
+func (l *Logger) WarnfText(format string, v ...any) {
 	if !l.hasTextOutput(LevelWarn) {
 		return
 	}
@@ -719,7 +714,12 @@ func (l *Logger) rotate() {
 		l.applyStdoutWriter(os.Stdout)
 		l.fileWriter = nil
 		l.updateMinLevel()
-		l.logMsg(LevelError, fmt.Sprintf("Failed to open new log file after rotation: %v", err))
+		// rotate runs with l.mu held (writeText and writeJSON both require
+		// it). logMsg would route through enqueue, which in Synchronous mode
+		// writes inline and takes l.mu again, deadlocking on a non-reentrant
+		// mutex. Report to stderr instead: this path only runs when the log
+		// file itself could not be reopened.
+		fmt.Fprintf(os.Stderr, "ERROR | [%s] failed to open new log file after rotation: %v\n", l.module, err)
 	}
 }
 

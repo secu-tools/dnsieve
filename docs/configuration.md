@@ -85,7 +85,30 @@ timeout_ms = 2000            # Per-upstream query timeout
 min_wait_ms = 200            # Minimum wait for block consensus
 verify_certificates = true   # Global TLS cert verification
 bootstrap_dns = "9.9.9.9:53,149.112.112.112:53"  # Bootstrap DNS for DoH/DoT hostname resolution
+max_idle_conns = 128         # Idle connections kept per upstream (DoT/DoH)
 ```
+
+### Connection pooling (`max_idle_conns`)
+
+DNSieve reuses TLS connections to DoT and DoH upstreams instead of handshaking
+per lookup. One in-flight query holds one connection, so this cap must cover
+the widest burst of simultaneous lookups; connections above it are closed after
+a single query and re-handshaked on the next burst, which costs upstream
+bandwidth.
+
+| Deployment | Value |
+|---|---|
+| A handful of devices | `32` |
+| Household or small office, up to ~100 clients | `128` (default) |
+| Hundreds of clients | `256`+ |
+
+It is a ceiling, not a reservation: idle connections are dropped after 30
+seconds, so the pool drains to nothing when traffic stops. Raise the process
+file-descriptor limit alongside values of 256 or more.
+
+Mainly affects DoT. DoH upstreams that speak HTTP/2 multiplex every concurrent
+query onto one connection, so the cap only applies there on an HTTP/1.1
+fallback. Plain UDP upstreams do not pool.
 
 ### timeout_ms vs min_wait_ms
 

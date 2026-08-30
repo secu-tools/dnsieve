@@ -11,6 +11,7 @@ import (
 
 	"github.com/secu-tools/dnsieve/internal/config"
 	"github.com/secu-tools/dnsieve/internal/domainlist"
+	"github.com/secu-tools/dnsieve/internal/edns"
 	"github.com/secu-tools/dnsieve/internal/logging"
 )
 
@@ -20,6 +21,19 @@ type WhitelistResolver struct {
 	client Client
 	cfg    *config.WhitelistConfig
 	list   *domainlist.DomainList
+	// edns rebuilds the OPT record on forwarded queries. Nil leaves the
+	// client's own OPT in place, which is only appropriate in tests.
+	edns *edns.Middleware
+}
+
+// SetEDNS attaches the EDNS middleware used to rebuild the OPT record on
+// queries forwarded to the whitelist upstream. Without it the client's own
+// OPT section, including any ECS, cookie and NSID options, would be sent
+// verbatim to the upstream, bypassing the configured privacy policy.
+func (w *WhitelistResolver) SetEDNS(m *edns.Middleware) {
+	if w != nil {
+		w.edns = m
+	}
 }
 
 // NewWhitelistResolverFromClient creates a WhitelistResolver from an existing
@@ -62,20 +76,16 @@ func NewWhitelistResolver(cfg *config.WhitelistConfig, verifyCert bool, bootstra
 	list := domainlist.NewDomainList("whitelist", domainlist.ModeAllow, cfg.ListFiles)
 	var dbg domainlist.LogFunc
 	if logger != nil {
-		dbg = func(f string, a ...interface{}) { logger.Debugf(f, a...) }
+		dbg = logger.Debugf
 	}
 	count, invalid, dedup, loadErr := list.Load(dbg)
 	if logger != nil {
-		logListLoadResult("Whitelist", cfg.ListFiles, count, invalid, dedup, loadErr, logger)
+		LogListLoadResult(WhitelistReport, cfg.ListFiles, count, invalid, dedup, loadErr, logger)
 	}
 
 	// Start background watcher if list_ttl > 0
 	if cfg.ListTTL > 0 && logger != nil {
-		list.StartWatcher(cfg.ListTTL,
-			func(f string, a ...interface{}) { logger.Infof(f, a...) },
-			func(f string, a ...interface{}) { logger.Warnf(f, a...) },
-			func(f string, a ...interface{}) { logger.Debugf(f, a...) },
-		)
+		list.StartWatcher(cfg.ListTTL, logger.Infof, logger.Warnf, logger.Debugf)
 		logger.Infof("Whitelist: file watcher started (check interval: %ds)", cfg.ListTTL)
 	}
 
@@ -94,7 +104,21 @@ func (w *WhitelistResolver) IsWhitelisted(qname string) bool {
 // Query resolves a DNS message through the whitelist resolver's upstream.
 // This bypasses all blocking upstreams.
 func (w *WhitelistResolver) Query(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
-	return w.client.Query(ctx, msg)
+	// Rebuild the OPT record exactly as the main fan-out does, so the
+	// privacy policy (ECS, cookies, NSID, padding) and RFC 5452 transaction
+	// ID apply here too rather than forwarding the client's query verbatim.
+	out := msg
+	if w.edns != nil {
+		out = w.edns.PrepareUpstreamQuery(msg, w.client.String(), isClientTCP(w.client))
+	}
+	resp, err := w.client.Query(ctx, out)
+	if err != nil {
+		return nil, err
+	}
+	if w.edns != nil {
+		w.edns.ProcessUpstreamResponse(resp, w.client.String())
+	}
+	return resp, nil
 }
 
 // Stop shuts down the background watcher and releases the upstream client.
@@ -121,9 +145,37 @@ func (w *WhitelistResolver) OnListReload(cb func(newSet *domainlist.DomainSet)) 
 	}
 }
 
-// logListLoadResult logs the outcome of an initial domain list load.
-// prefix is "Whitelist" or "Blacklist".
-func logListLoadResult(prefix string, listFiles []string, count, invalid, dedup int, loadErr error, logger *logging.Logger) {
+// ListLoadReport describes the wording differences between the whitelist and
+// blacklist variants of the load report, so both can share one implementation
+// without changing either one's log output.
+type ListLoadReport struct {
+	// Prefix labels every line ("Whitelist" or "Blacklist").
+	Prefix string
+	// NoFilesMsg is the message used when the list is enabled but no
+	// list_files are configured. It is formatted with Prefix.
+	NoFilesMsg string
+	// ThresholdSuffix is appended to the large-list warning (may be empty).
+	ThresholdSuffix string
+}
+
+// WhitelistReport is the wording used for whitelist list loads.
+var WhitelistReport = ListLoadReport{
+	Prefix:     "Whitelist",
+	NoFilesMsg: "%s: enabled but no list_files configured; list has no effect",
+}
+
+// BlacklistReport is the wording used for blacklist list loads.
+var BlacklistReport = ListLoadReport{
+	Prefix:          "Blacklist",
+	NoFilesMsg:      "%s: enabled but no list_files configured; blacklist has no effect",
+	ThresholdSuffix: "; large blocklists are not officially supported",
+}
+
+// LogListLoadResult logs the outcome of an initial domain list load.
+// rep supplies the label and the two messages that differ between the
+// whitelist and blacklist variants.
+func LogListLoadResult(rep ListLoadReport, listFiles []string, count, invalid, dedup int, loadErr error, logger *logging.Logger) {
+	prefix := rep.Prefix
 	if loadErr != nil {
 		logger.Warnf("%s: failed to load list files: %v", prefix, loadErr)
 		return
@@ -143,12 +195,12 @@ func logListLoadResult(prefix string, listFiles []string, count, invalid, dedup 
 			logger.Infof("%s", msg)
 		}
 		if count > domainlist.LargeListThreshold {
-			logger.Warnf("%s: %d domains exceeds recommended threshold (%d)", prefix, count, domainlist.LargeListThreshold)
+			logger.Warnf("%s: %d domains exceeds recommended threshold (%d)%s", prefix, count, domainlist.LargeListThreshold, rep.ThresholdSuffix)
 		}
 		return
 	}
 	if len(listFiles) == 0 {
-		logger.Warnf("%s: enabled but no list_files configured; list has no effect", prefix)
+		logger.Warnf(rep.NoFilesMsg, prefix)
 		return
 	}
 	if invalid > 0 {

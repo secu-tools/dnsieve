@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"time"
 
 	"codeberg.org/miekg/dns"
@@ -49,7 +50,7 @@ func serveDoTAddresses(ctx context.Context, handler *Handler, addrs []string, po
 	}
 
 	ph := &plainHandler{handler: handler, protocol: "dot"}
-	portStr := fmt.Sprintf("%d", port)
+	portStr := strconv.Itoa(port)
 	servers := make([]*dns.Server, 0, len(addrs))
 
 	// Phase 1: bind all sockets synchronously so bind errors surface early.
@@ -65,6 +66,7 @@ func serveDoTAddresses(ctx context.Context, handler *Handler, addrs []string, po
 			Net:               tcpNet,
 			TLSConfig:         tlsCfg,
 			Handler:           ph,
+			IdleTimeout:       clientIdleTimeout(handler.cfg),
 			NotifyStartedFunc: func(_ context.Context) { close(ready) },
 		}
 
